@@ -95,6 +95,79 @@ export interface StringSnippet {
   content: string;
 }
 
+// ======================== grep -C 上下文聚合类型 ========================
+
+// grep -C 输出中的单行（带 context 标记）
+export interface GrepContextLine {
+  content: string;
+  isMatch: boolean; // true = 触发 grep 匹配的行（`:` 分隔符行）
+}
+
+// 一个 grep 上下文分组（两个 `--` 之间的全部行）
+export interface GrepGroup {
+  groupIndex: number;
+  lines: GrepContextLine[];
+  // 对分组内主匹配行应用解析规则后的结构化字段
+  parsedFields: Record<string, string | number>;
+  matchedLineContent: string; // 被命中的原始行内容
+  matched: boolean;           // 当前规则是否成功解析主匹配行
+}
+
+// ======================== SOP 故障排查工具类型 ========================
+
+// SOP 模板中的单个检查步骤
+export interface SOPCheck {
+  id: string;
+  order: number;
+  name: string;
+  description: string;
+  command: string;          // 支持 ${var} 占位符
+  expectedNormal?: string;  // 正常输出的描述/示例
+  abnormalSigns?: string;   // 异常特征描述
+}
+
+// SOP 模板（可复用的故障排查流程）
+export interface SOPTemplate {
+  id: string;
+  name: string;
+  category: string;
+  description: string;
+  checks: SOPCheck[];
+  diagnosisHints?: string; // 常见根因提示，Markdown 格式
+  createdAt: number;
+  updatedAt: number;
+}
+
+// 单个检查步骤的执行结果
+export interface SOPCheckResult {
+  checkId: string;
+  checkName: string;
+  command: string;     // 渲染后的实际命令（变量已替换）
+  output: string;      // 用户粘贴的命令输出
+  conclusion: string;  // 用户对该步骤的分析结论
+  status: 'pending' | 'normal' | 'abnormal' | 'skipped';
+  executedAt?: number;
+}
+
+// SOP 执行实例（一次具体的故障排查会话）
+export interface SOPInstance {
+  id: string;
+  templateId: string;
+  templateName: string;   // 快照，防止模板改名后丢失信息
+  incidentTitle: string;
+  status: 'investigating' | 'resolved' | 'escalated';
+  checkResults: SOPCheckResult[];
+  extraChecks: SOPCheckResult[]; // 临时追加的非模板步骤
+  diagnosis: {
+    phenomenon: string;  // 故障现象
+    rootCause: string;   // 根因分析
+    solution: string;    // 解决方案
+    prevention: string;  // 预防措施
+  };
+  createdAt: number;
+  resolvedAt?: number;
+}
+
 // ======================== 全局状态类型 ========================
 
 export type ThemeMode = 'dark' | 'light';

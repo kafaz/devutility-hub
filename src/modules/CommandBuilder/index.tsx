@@ -53,7 +53,10 @@ const CommandBuilder: React.FC = () => {
     variableValues,
     selectTemplate,
     setVariableValue,
+    commitVariableHistory,
     resetVariableValues,
+    clearParamHistory,
+    getVarHistory,
     addTemplate,
     updateTemplate,
     deleteTemplate,
@@ -86,6 +89,7 @@ const CommandBuilder: React.FC = () => {
       : templates.filter((t) => t.category === categoryFilter);
 
   const handleCopy = async () => {
+    commitVariableHistory(); // 复制时将当前参数写入历史
     const ok = await copy(generatedCommand);
     if (ok) {
       messageApi.success('命令已复制到剪贴板');
@@ -380,10 +384,16 @@ const CommandBuilder: React.FC = () => {
                   </Text>
                 )}
                 <VariableForm
+                  templateId={selectedTemplate.id}
                   variables={selectedTemplate.variables}
                   values={variableValues}
                   onChange={setVariableValue}
-                  isDark={isDark}
+                  getHistory={(varName) =>
+                    getVarHistory(selectedTemplate.id, varName)
+                  }
+                  clearHistory={(varName) =>
+                    clearParamHistory(selectedTemplate.id, varName)
+                  }
                 />
               </Card>
 
@@ -460,19 +470,23 @@ const CommandBuilder: React.FC = () => {
   );
 };
 
-// 变量表单组件
+// 变量表单组件（带历史记录支持）
 interface VariableFormProps {
+  templateId: string;
   variables: VariableConfig[];
   values: Record<string, string>;
   onChange: (name: string, value: string) => void;
-  isDark: boolean;
+  getHistory: (varName: string) => string[];
+  clearHistory: (varName: string) => void;
 }
 
 const VariableForm: React.FC<VariableFormProps> = ({
+  templateId: _templateId,
   variables,
   values,
   onChange,
-  isDark: _isDark,
+  getHistory,
+  clearHistory,
 }) => {
   if (variables.length === 0) {
     return (
@@ -486,47 +500,111 @@ const VariableForm: React.FC<VariableFormProps> = ({
     <div
       style={{
         display: 'grid',
-        gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
+        gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))',
         gap: '8px 16px',
       }}
     >
-      {variables.map((v) => (
-        <Form.Item
-          key={v.name}
-          label={
-            <Space size={4}>
-              <Text style={{ fontSize: 13 }}>{v.label || v.name}</Text>
-              {v.required && <Text type="danger">*</Text>}
-            </Space>
-          }
-          style={{ marginBottom: 0 }}
-        >
-          {v.type === 'number' ? (
-            <InputNumber
-              value={values[v.name] !== undefined ? Number(values[v.name]) : undefined}
-              onChange={(val) => onChange(v.name, String(val ?? ''))}
-              placeholder={v.placeholder}
-              style={{ width: '100%' }}
-              min={v.validation?.min}
-              max={v.validation?.max}
-            />
-          ) : v.type === 'select' ? (
-            <Select
-              value={values[v.name]}
-              onChange={(val) => onChange(v.name, val)}
-              placeholder={v.placeholder || `选择 ${v.label || v.name}`}
-              options={v.options?.map((o) => ({ label: o, value: o }))}
-              style={{ width: '100%' }}
-            />
-          ) : (
-            <Input
-              value={values[v.name] || ''}
-              onChange={(e) => onChange(v.name, e.target.value)}
-              placeholder={v.placeholder || `输入 ${v.label || v.name}`}
-            />
-          )}
-        </Form.Item>
-      ))}
+      {variables.map((v) => {
+        const history = getHistory(v.name);
+        return (
+          <Form.Item
+            key={v.name}
+            label={
+              <Space size={4} style={{ justifyContent: 'space-between', width: '100%' }}>
+                <Space size={4}>
+                  <Text style={{ fontSize: 13 }}>{v.label || v.name}</Text>
+                  {v.required && <Text type="danger">*</Text>}
+                </Space>
+                {history.length > 0 && (
+                  <Tooltip title="清除此参数的历史记录">
+                    <Text
+                      type="secondary"
+                      style={{ fontSize: 11, cursor: 'pointer' }}
+                      onClick={() => clearHistory(v.name)}
+                    >
+                      清除历史
+                    </Text>
+                  </Tooltip>
+                )}
+              </Space>
+            }
+            style={{ marginBottom: 0 }}
+          >
+            {v.type === 'number' ? (
+              <InputNumber
+                value={values[v.name] !== undefined ? Number(values[v.name]) : undefined}
+                onChange={(val) => onChange(v.name, String(val ?? ''))}
+                placeholder={v.placeholder}
+                style={{ width: '100%' }}
+                min={v.validation?.min}
+                max={v.validation?.max}
+              />
+            ) : v.type === 'select' ? (
+              <Select
+                value={values[v.name]}
+                onChange={(val) => onChange(v.name, val)}
+                placeholder={v.placeholder || `选择 ${v.label || v.name}`}
+                options={v.options?.map((o) => ({ label: o, value: o }))}
+                style={{ width: '100%' }}
+              />
+            ) : history.length > 0 ? (
+              // 有历史记录时，使用带下拉历史的 AutoComplete
+              <Select
+                showSearch
+                value={values[v.name] || undefined}
+                onChange={(val) => onChange(v.name, val)}
+                onSearch={(val) => onChange(v.name, val)}
+                placeholder={v.placeholder || `输入 ${v.label || v.name}`}
+                style={{ width: '100%' }}
+                filterOption={false}
+                notFoundContent={null}
+                options={[
+                  {
+                    label: (
+                      <Text type="secondary" style={{ fontSize: 11 }}>
+                        最近使用
+                      </Text>
+                    ),
+                    options: history.map((h) => ({
+                      label: (
+                        <Space style={{ justifyContent: 'space-between', width: '100%' }}>
+                          <Text
+                            style={{
+                              fontFamily: 'JetBrains Mono, Fira Code, Consolas, monospace',
+                              fontSize: 12,
+                            }}
+                          >
+                            {h}
+                          </Text>
+                          <Tag color="default" style={{ fontSize: 10 }}>历史</Tag>
+                        </Space>
+                      ),
+                      value: h,
+                    })),
+                  },
+                ]}
+                dropdownRender={(menu) => (
+                  <>
+                    {menu}
+                    <Divider style={{ margin: '4px 0' }} />
+                    <div style={{ padding: '4px 8px' }}>
+                      <Text type="secondary" style={{ fontSize: 11 }}>
+                        输入新值后点击复制命令将自动保存
+                      </Text>
+                    </div>
+                  </>
+                )}
+              />
+            ) : (
+              <Input
+                value={values[v.name] || ''}
+                onChange={(e) => onChange(v.name, e.target.value)}
+                placeholder={v.placeholder || `输入 ${v.label || v.name}`}
+              />
+            )}
+          </Form.Item>
+        );
+      })}
     </div>
   );
 };

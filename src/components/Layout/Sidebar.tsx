@@ -4,6 +4,7 @@ import { Layout, Menu, Tooltip, Typography } from 'antd';
 import {
   FileSearchOutlined,
   CodeOutlined,
+  ApartmentOutlined,
   SettingOutlined,
   BulbOutlined,
   MenuFoldOutlined,
@@ -17,6 +18,7 @@ const { Text } = Typography;
 const ICON_MAP: Record<string, React.ReactNode> = {
   FileSearch: <FileSearchOutlined />,
   CodeOutlined: <CodeOutlined />,
+  ApartmentOutlined: <ApartmentOutlined />,
 };
 
 const tools = [
@@ -31,6 +33,12 @@ const tools = [
     name: '命令生成器',
     icon: 'CodeOutlined',
     path: '/command-builder',
+  },
+  {
+    id: 'sop-builder',
+    name: 'SOP 排查',
+    icon: 'ApartmentOutlined',
+    path: '/sop-builder',
   },
 ];
 

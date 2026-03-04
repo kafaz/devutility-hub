@@ -1,17 +1,20 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { ParseRule, ParseResult, CFormatField } from '../../../types';
-import { generateId, cFormatToRegex } from '../../../utils';
+import type { ParseRule, ParseResult, CFormatField, GrepGroup } from '../../../types';
+import { generateId, cFormatToRegex, parseGrepCOutput } from '../../../utils';
 
 interface LogStore {
   rules: ParseRule[];
   activeRuleId: string | null;
   logText: string;
   parseResults: ParseResult[];
+  grepGroups: GrepGroup[];    // grep -C 模式的分组结果
+  grepCMode: boolean;         // 是否启用 grep -C 聚合模式
   isParsing: boolean;
 
   setLogText: (text: string) => void;
   setActiveRule: (id: string | null) => void;
+  setGrepCMode: (enabled: boolean) => void;
 
   addRegexRule: (
     data: Omit<ParseRule, 'id' | 'createdAt' | 'updatedAt' | 'mode'>
@@ -28,21 +31,52 @@ interface LogStore {
   clearResults: () => void;
 }
 
-function parseLogWithRule(
-  lines: string[],
-  rule: ParseRule
-): ParseResult[] {
+// 用规则解析单行，返回字段映射
+function parseSingleLine(
+  line: string,
+  regex: RegExp,
+  mappings: Array<{ groupIndex: number; fieldName: string; fieldType?: string }>
+): { matched: boolean; fields: Record<string, string | number> } {
+  const m = regex.exec(line);
+  if (!m) return { matched: false, fields: {} };
+
+  const fields: Record<string, string | number> = {};
+  mappings.forEach((mapping) => {
+    const raw = m[mapping.groupIndex] ?? '';
+    if (
+      mapping.fieldType === 'number' ||
+      mapping.fieldType === 'float' ||
+      mapping.fieldType === 'hex'
+    ) {
+      const num = parseFloat(raw);
+      fields[mapping.fieldName] = isNaN(num) ? raw : num;
+    } else {
+      fields[mapping.fieldName] = raw;
+    }
+  });
+  return { matched: true, fields };
+}
+
+// 普通逐行解析
+function parseLogLines(lines: string[], rule: ParseRule): ParseResult[] {
   let regex: RegExp;
-  let fieldNames: string[] = [];
+  let mappings: Array<{ groupIndex: number; fieldName: string; fieldType?: string }> = [];
 
   try {
     if (rule.mode === 'REGEX') {
       regex = new RegExp(rule.pattern || '');
-      fieldNames =
-        rule.fieldMappings?.map((m) => m.fieldName) ?? [];
+      mappings = rule.fieldMappings?.map((m) => ({
+        groupIndex: m.groupIndex,
+        fieldName: m.fieldName,
+        fieldType: m.fieldType,
+      })) ?? [];
     } else {
       regex = new RegExp(rule.patternCompiled || '');
-      fieldNames = rule.fields?.map((f) => f.name || `field${f.index}`) ?? [];
+      mappings = rule.fields?.map((f) => ({
+        groupIndex: f.index,
+        fieldName: f.name || `field${f.index}`,
+        fieldType: f.type,
+      })) ?? [];
     }
   } catch {
     return lines.map((line, i) => ({
@@ -54,41 +88,53 @@ function parseLogWithRule(
   }
 
   return lines.map((line, i) => {
-    const m = regex.exec(line);
-    if (!m) {
-      return { lineIndex: i, rawLine: line, matched: false, fields: {} };
+    const { matched, fields } = parseSingleLine(line, regex, mappings);
+    return { lineIndex: i, rawLine: line, matched, fields };
+  });
+}
+
+// grep -C 模式：对每个分组找到"主匹配行"并解析字段
+function parseGrepGroups(groups: GrepGroup[], rule: ParseRule): GrepGroup[] {
+  let regex: RegExp;
+  let mappings: Array<{ groupIndex: number; fieldName: string; fieldType?: string }> = [];
+
+  try {
+    if (rule.mode === 'REGEX') {
+      regex = new RegExp(rule.pattern || '');
+      mappings = rule.fieldMappings?.map((m) => ({
+        groupIndex: m.groupIndex,
+        fieldName: m.fieldName,
+        fieldType: m.fieldType,
+      })) ?? [];
+    } else {
+      regex = new RegExp(rule.patternCompiled || '');
+      mappings = rule.fields?.map((f) => ({
+        groupIndex: f.index,
+        fieldName: f.name || `field${f.index}`,
+        fieldType: f.type,
+      })) ?? [];
     }
-    const fields: Record<string, string | number> = {};
-    const mappings =
-      rule.mode === 'REGEX'
-        ? rule.fieldMappings ?? []
-        : (rule.fields ?? []).map((f) => ({
-            groupIndex: f.index,
-            fieldName: f.name || `field${f.index}`,
-            fieldType: f.type,
-          }));
+  } catch {
+    return groups;
+  }
 
-    mappings.forEach((mapping) => {
-      const raw = m[mapping.groupIndex] ?? '';
-      if (
-        mapping.fieldType === 'number' ||
-        mapping.fieldType === 'float' ||
-        mapping.fieldType === 'hex'
-      ) {
-        const num = parseFloat(raw);
-        fields[mapping.fieldName] = isNaN(num) ? raw : num;
-      } else {
-        fields[mapping.fieldName] = raw;
-      }
-    });
-    // 补充未映射的捕获组
-    fieldNames.forEach((name, idx) => {
-      if (!(name in fields)) {
-        fields[name] = m[idx + 1] ?? '';
-      }
-    });
+  return groups.map((group) => {
+    // 优先在已标记为 isMatch 的行中匹配，找不到则遍历所有行
+    const candidates = group.lines.filter((l) => l.isMatch);
+    const allLines = candidates.length > 0 ? candidates : group.lines;
 
-    return { lineIndex: i, rawLine: line, matched: true, fields };
+    for (const line of allLines) {
+      const { matched, fields } = parseSingleLine(line.content, regex, mappings);
+      if (matched) {
+        return {
+          ...group,
+          matched: true,
+          matchedLineContent: line.content,
+          parsedFields: fields,
+        };
+      }
+    }
+    return { ...group, matched: false, matchedLineContent: '', parsedFields: {} };
   });
 }
 
@@ -134,11 +180,13 @@ export const useLogStore = create<LogStore>()(
       activeRuleId: null,
       logText: '',
       parseResults: [],
+      grepGroups: [],
+      grepCMode: false,
       isParsing: false,
 
       setLogText: (text) => set({ logText: text }),
-
       setActiveRule: (id) => set({ activeRuleId: id }),
+      setGrepCMode: (enabled) => set({ grepCMode: enabled }),
 
       addRegexRule: (data) => {
         const id = generateId();
@@ -179,9 +227,7 @@ export const useLogStore = create<LogStore>()(
       updateRule: (id, data) => {
         set((s) => ({
           rules: s.rules.map((r) =>
-            r.id === id
-              ? { ...r, ...data, updatedAt: Date.now() }
-              : r
+            r.id === id ? { ...r, ...data, updatedAt: Date.now() } : r
           ),
         }));
       },
@@ -189,34 +235,43 @@ export const useLogStore = create<LogStore>()(
       deleteRule: (id) => {
         set((s) => ({
           rules: s.rules.filter((r) => r.id !== id),
-          activeRuleId:
-            s.activeRuleId === id ? null : s.activeRuleId,
+          activeRuleId: s.activeRuleId === id ? null : s.activeRuleId,
         }));
       },
 
       runParse: () => {
-        const { logText, activeRuleId, rules } = get();
+        const { logText, activeRuleId, rules, grepCMode } = get();
         const rule = rules.find((r) => r.id === activeRuleId);
         if (!rule || !logText.trim()) {
-          set({ parseResults: [] });
+          set({ parseResults: [], grepGroups: [] });
           return;
         }
         set({ isParsing: true });
-        // 使用 setTimeout 避免阻塞 UI
+
         setTimeout(() => {
-          const lines = logText.split('\n').filter((l) => l.trim());
-          const results = parseLogWithRule(lines, rule);
-          set({ parseResults: results, isParsing: false });
+          if (grepCMode) {
+            // grep -C 聚合模式：先解析分组，再对每组找主匹配行
+            const rawGroups = parseGrepCOutput(logText);
+            const groups = parseGrepGroups(rawGroups, rule);
+            set({ grepGroups: groups, parseResults: [], isParsing: false });
+          } else {
+            // 普通逐行模式
+            const lines = logText.split('\n').filter((l) => l.trim());
+            const results = parseLogLines(lines, rule);
+            set({ parseResults: results, grepGroups: [], isParsing: false });
+          }
         }, 0);
       },
 
-      clearResults: () => set({ parseResults: [], logText: '' }),
+      clearResults: () =>
+        set({ parseResults: [], grepGroups: [], logText: '' }),
     }),
     {
       name: 'devutility-log-analyzer',
       partialize: (state) => ({
         rules: state.rules,
         activeRuleId: state.activeRuleId,
+        grepCMode: state.grepCMode,
       }),
     }
   )

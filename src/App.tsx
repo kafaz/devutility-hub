@@ -5,6 +5,7 @@ import AppLayout from './components/Layout/AppLayout';
 
 const LogAnalyzer = lazy(() => import('./modules/LogAnalyzer'));
 const CommandBuilder = lazy(() => import('./modules/CommandBuilder'));
+const SOPBuilder = lazy(() => import('./modules/SOPBuilder'));
 
 const Loading: React.FC = () => (
   <div
@@ -37,6 +38,14 @@ const App: React.FC = () => (
           element={
             <Suspense fallback={<Loading />}>
               <CommandBuilder />
+            </Suspense>
+          }
+        />
+        <Route
+          path="sop-builder"
+          element={
+            <Suspense fallback={<Loading />}>
+              <SOPBuilder />
             </Suspense>
           }
         />
