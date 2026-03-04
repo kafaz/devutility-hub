@@ -17,6 +17,14 @@ const toolsConfig: ToolConfig[] = [
     category: 'generator',
     version: '1.0.0',
   },
+  {
+    id: 'sop-builder',
+    name: 'SOP 排查',
+    icon: 'ApartmentOutlined',
+    description: '标准化故障排查流程，逐步执行并导出报告',
+    category: 'utility',
+    version: '1.0.0',
+  },
 ];
 
 export default toolsConfig;

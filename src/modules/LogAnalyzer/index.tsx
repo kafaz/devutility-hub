@@ -10,18 +10,22 @@ import {
   Upload,
   Tooltip,
   Input,
+  Switch,
+  Tag,
 } from 'antd';
 import {
   PlayCircleOutlined,
   ClearOutlined,
   UploadOutlined,
   DownloadOutlined,
+  MergeCellsOutlined,
 } from '@ant-design/icons';
 import { useLogStore } from './store/logStore';
 import RuleManager from './components/RuleManager';
 import RegexRuleModal from './components/RegexRuleModal';
 import CFormatRuleModal from './components/CFormatRuleModal';
 import ResultTable from './components/ResultTable';
+import GrepGroupTable from './components/GrepGroupTable';
 import type { ParseRule } from '../../types';
 import { useGlobalStore } from '../../store/globalStore';
 import { downloadJSON, cFormatToRegex } from '../../utils';
@@ -52,9 +56,12 @@ const LogAnalyzer: React.FC = () => {
     activeRuleId,
     logText,
     parseResults,
+    grepGroups,
+    grepCMode,
     isParsing,
     setLogText,
     setActiveRule,
+    setGrepCMode,
     addRegexRule,
     addCFormatRule,
     updateRule,
@@ -213,19 +220,33 @@ const LogAnalyzer: React.FC = () => {
               messageApi.success('规则已删除');
             }}
           />
-          <Space>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              新建规则类型：
-            </Text>
-            <Segmented
-              size="small"
-              value={newRuleMode}
-              onChange={(val) => setNewRuleMode(val as NewRuleMode)}
-              options={[
-                { label: '正则模式', value: 'REGEX' },
-                { label: 'C格式模式', value: 'C_FORMAT' },
-              ]}
-            />
+          <Space wrap>
+            <Space size={6}>
+              <Text type="secondary" style={{ fontSize: 12 }}>新建规则：</Text>
+              <Segmented
+                size="small"
+                value={newRuleMode}
+                onChange={(val) => setNewRuleMode(val as NewRuleMode)}
+                options={[
+                  { label: '正则模式', value: 'REGEX' },
+                  { label: 'C格式模式', value: 'C_FORMAT' },
+                ]}
+              />
+            </Space>
+            <Tooltip title="开启后，将把 grep -C N 的输出按 '--' 分隔符聚合为上下文分组，每组可展开查看前后文">
+              <Space size={6}>
+                <MergeCellsOutlined style={{ color: grepCMode ? '#3b82f6' : '#a1a1aa' }} />
+                <Text style={{ fontSize: 12 }}>grep -C 聚合模式</Text>
+                <Switch
+                  size="small"
+                  checked={grepCMode}
+                  onChange={setGrepCMode}
+                />
+                {grepCMode && (
+                  <Tag color="blue" style={{ fontSize: 11 }}>已开启</Tag>
+                )}
+              </Space>
+            </Tooltip>
           </Space>
         </div>
       </Card>
@@ -280,7 +301,11 @@ const LogAnalyzer: React.FC = () => {
             value={logText}
             onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setLogText(e.target.value)}
             rows={10}
-            placeholder="粘贴日志内容，或点击右上角上传日志文件..."
+            placeholder={
+              grepCMode
+                ? '粘贴 grep -C N 的输出（各分组之间以 "--" 分隔）...'
+                : '粘贴日志内容，或点击右上角上传日志文件...'
+            }
             style={{
               fontFamily: 'JetBrains Mono, Fira Code, Consolas, monospace',
               fontSize: 12,
@@ -303,7 +328,7 @@ const LogAnalyzer: React.FC = () => {
             <Button
               icon={<ClearOutlined />}
               onClick={handleClear}
-              disabled={!logText && parseResults.length === 0}
+              disabled={!logText && parseResults.length === 0 && grepGroups.length === 0}
             >
               清空
             </Button>
@@ -311,13 +336,21 @@ const LogAnalyzer: React.FC = () => {
         </Card>
 
         {/* 结果展示区 */}
-        {(parseResults.length > 0 || isParsing) && (
-          <ResultTable
-            results={parseResults}
-            rule={activeRule}
-            loading={isParsing}
-          />
-        )}
+        {grepCMode
+          ? (grepGroups.length > 0 || isParsing) && (
+              <GrepGroupTable
+                groups={grepGroups}
+                rule={activeRule}
+                loading={isParsing}
+              />
+            )
+          : (parseResults.length > 0 || isParsing) && (
+              <ResultTable
+                results={parseResults}
+                rule={activeRule}
+                loading={isParsing}
+              />
+            )}
       </div>
 
       {/* 正则规则弹窗 */}

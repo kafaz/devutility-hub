@@ -1,3 +1,5 @@
+import type { GrepContextLine, GrepGroup } from '../types';
+
 // 生成唯一 ID
 export function generateId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -196,6 +198,114 @@ export function inferVariableType(
   if (/path|file|dir|folder/.test(lower)) return 'path';
   if (/port|num|count|size|limit|timeout/.test(lower)) return 'number';
   return 'text';
+}
+
+/**
+ * 解析 grep -C N 的标准输出
+ *
+ * 输入格式（以下三种均支持）：
+ *   1) 纯内容模式（无文件名/行号前缀）
+ *   2) 带行号模式：`12-context` / `13:match`
+ *   3) 带文件名模式：`file.log-12-ctx` / `file.log:13:match`
+ *
+ * 各分组之间以 `--` 单独一行分隔，函数将每个分组解析为
+ * { lines: GrepContextLine[] } 结构，调用方决定哪行作为"主行"。
+ */
+
+export function parseGrepCOutput(text: string): GrepGroup[] {
+  const rawGroups = text.split(/^--$/m);
+  const groups: GrepGroup[] = [];
+
+  rawGroups.forEach((block, gi) => {
+    const rawLines = block.split('\n').filter((l) => l !== '');
+    if (rawLines.length === 0) return;
+
+    const lines: GrepContextLine[] = rawLines.map((raw) => {
+      // 尝试匹配带文件名或行号的前缀
+      // file.log:123:content  → match
+      // file.log-123-content  → context
+      // 123:content           → match
+      // 123-content           → context
+      const withFile = raw.match(/^(?:.+?)([:−-])(\d+)\1(.*)$/);
+      if (withFile) {
+        const sep = withFile[1];
+        return {
+          content: withFile[3],
+          isMatch: sep === ':',
+        };
+      }
+      // 无前缀：无法区分 match/context，全部标记为 context
+      // 后续由调用方的正则规则来识别主匹配行
+      return { content: raw, isMatch: false };
+    });
+
+    groups.push({
+      groupIndex: gi,
+      lines,
+      parsedFields: {},
+      matchedLineContent: '',
+      matched: false,
+    });
+  });
+
+  return groups;
+}
+
+// 从文本中提取 Markdown 导出内容（用于 SOP 报告）
+export function generateMarkdownReport(params: {
+  title: string;
+  incidentTime: string;
+  steps: { name: string; command: string; output: string; status: string; conclusion: string }[];
+  diagnosis: { phenomenon: string; rootCause: string; solution: string; prevention: string };
+}): string {
+  const { title, incidentTime, steps, diagnosis } = params;
+  const statusEmoji: Record<string, string> = {
+    normal: '✅',
+    abnormal: '❌',
+    skipped: '⏭️',
+    pending: '⏳',
+  };
+
+  const stepsSection = steps
+    .map(
+      (s, i) =>
+        `### Step ${i + 1}: ${s.name} ${statusEmoji[s.status] ?? ''}\n\n` +
+        `**命令**\n\`\`\`bash\n${s.command}\n\`\`\`\n\n` +
+        (s.output ? `**输出**\n\`\`\`\n${s.output}\n\`\`\`\n\n` : '') +
+        (s.conclusion ? `**分析**：${s.conclusion}\n` : '')
+    )
+    .join('\n---\n\n');
+
+  return `# 故障排查报告：${title}
+
+> 排查时间：${incidentTime}
+
+## 一、排查步骤
+
+${stepsSection}
+
+## 二、诊断结论
+
+### 故障现象
+
+${diagnosis.phenomenon || '（未填写）'}
+
+### 根因分析
+
+${diagnosis.rootCause || '（未填写）'}
+
+### 解决方案
+
+${diagnosis.solution || '（未填写）'}
+
+### 预防措施
+
+${diagnosis.prevention || '（未填写）'}
+
+---
+
+*由 DevUtility Hub SOP 工具生成*
+`;
 }
 
 // 导出 JSON 数据为文件下载

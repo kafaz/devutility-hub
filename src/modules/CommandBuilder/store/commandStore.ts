@@ -7,11 +7,17 @@ import {
   inferVariableType,
 } from '../../../utils';
 
+// 参数值历史: key = `${templateId}::${varName}`, value = 最近10条
+type ParamHistory = Record<string, string[]>;
+
+const PARAM_HISTORY_MAX = 10;
+
 interface CommandStore {
   templates: CommandTemplate[];
   snippets: StringSnippet[];
   selectedTemplateId: string | null;
   variableValues: Record<string, string>;
+  paramHistory: ParamHistory;
 
   addTemplate: (
     data: Omit<CommandTemplate, 'id' | 'createdAt' | 'updatedAt'>
@@ -20,7 +26,10 @@ interface CommandStore {
   deleteTemplate: (id: string) => void;
   selectTemplate: (id: string | null) => void;
   setVariableValue: (name: string, value: string) => void;
+  commitVariableHistory: () => void; // 执行/复制时提交当前值到历史
   resetVariableValues: () => void;
+  clearParamHistory: (templateId: string, varName?: string) => void;
+  getVarHistory: (templateId: string, varName: string) => string[];
 
   addSnippet: (data: Omit<StringSnippet, 'id'>) => void;
   deleteSnippet: (id: string) => void;
@@ -112,6 +121,7 @@ export const useCommandStore = create<CommandStore>()(
       snippets: [],
       selectedTemplateId: null,
       variableValues: {},
+      paramHistory: {},
 
       addTemplate: (data) => {
         const now = Date.now();
@@ -174,6 +184,27 @@ export const useCommandStore = create<CommandStore>()(
         }));
       },
 
+      // 将当前所有变量值写入历史记录（在复制命令时触发）
+      commitVariableHistory: () => {
+        const { selectedTemplateId, variableValues } = get();
+        if (!selectedTemplateId) return;
+        set((s) => {
+          const next = { ...s.paramHistory };
+          Object.entries(variableValues).forEach(([varName, val]) => {
+            if (!val) return;
+            const key = `${selectedTemplateId}::${varName}`;
+            const existing = next[key] ?? [];
+            // 去重，新值放最前
+            const deduped = [val, ...existing.filter((v) => v !== val)].slice(
+              0,
+              PARAM_HISTORY_MAX
+            );
+            next[key] = deduped;
+          });
+          return { paramHistory: next };
+        });
+      },
+
       resetVariableValues: () => {
         const template = get().templates.find(
           (t) => t.id === get().selectedTemplateId
@@ -185,6 +216,24 @@ export const useCommandStore = create<CommandStore>()(
           });
         }
         set({ variableValues: initialValues });
+      },
+
+      clearParamHistory: (templateId, varName) => {
+        set((s) => {
+          const next = { ...s.paramHistory };
+          if (varName) {
+            delete next[`${templateId}::${varName}`];
+          } else {
+            Object.keys(next)
+              .filter((k) => k.startsWith(`${templateId}::`))
+              .forEach((k) => delete next[k]);
+          }
+          return { paramHistory: next };
+        });
+      },
+
+      getVarHistory: (templateId, varName) => {
+        return get().paramHistory[`${templateId}::${varName}`] ?? [];
       },
 
       addSnippet: (data) => {
@@ -215,6 +264,7 @@ export const useCommandStore = create<CommandStore>()(
       partialize: (state) => ({
         templates: state.templates,
         snippets: state.snippets,
+        paramHistory: state.paramHistory,
       }),
     }
   )
