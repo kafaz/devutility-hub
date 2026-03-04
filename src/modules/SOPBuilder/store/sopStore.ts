@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { SOPTemplate, SOPInstance, SOPCheck, SOPCheckResult } from '../../../types';
-import { generateId, renderTemplate } from '../../../utils';
+import { generateId, renderTemplate, parseSOPTemplatesFromMarkdown } from '../../../utils';
 
 interface SOPStore {
   templates: SOPTemplate[];
@@ -12,6 +12,10 @@ interface SOPStore {
   addTemplate: (data: Omit<SOPTemplate, 'id' | 'createdAt' | 'updatedAt'>) => string;
   updateTemplate: (id: string, data: Partial<SOPTemplate>) => void;
   deleteTemplate: (id: string) => void;
+  // 从 Markdown 批量导入模板（跳过重名模板）
+  importTemplatesFromMarkdown: (md: string) => { imported: number; skipped: number };
+  // 从 JSON 批量导入模板
+  importTemplatesFromJSON: (templates: SOPTemplate[]) => { imported: number; skipped: number };
 
   // 实例操作
   startInstance: (templateId: string, incidentTitle: string) => string;
@@ -222,6 +226,43 @@ export const useSOPStore = create<SOPStore>()(
         set((s) => ({
           templates: s.templates.filter((t) => t.id !== id),
         }));
+      },
+
+      importTemplatesFromMarkdown: (md) => {
+        const parsed = parseSOPTemplatesFromMarkdown(md);
+        let imported = 0;
+        let skipped = 0;
+        const now = Date.now();
+        set((s) => {
+          const existingNames = new Set(s.templates.map((t) => t.name));
+          const newTemplates: SOPTemplate[] = [];
+          parsed.forEach((data) => {
+            if (existingNames.has(data.name)) {
+              skipped++;
+            } else {
+              newTemplates.push({ ...data, id: generateId(), createdAt: now, updatedAt: now });
+              existingNames.add(data.name);
+              imported++;
+            }
+          });
+          return { templates: [...s.templates, ...newTemplates] };
+        });
+        return { imported, skipped };
+      },
+
+      importTemplatesFromJSON: (templates) => {
+        let imported = 0;
+        let skipped = 0;
+        set((s) => {
+          const existingIds = new Set(s.templates.map((t) => t.id));
+          const newTemplates = templates.filter((t) => {
+            if (existingIds.has(t.id)) { skipped++; return false; }
+            imported++;
+            return true;
+          });
+          return { templates: [...s.templates, ...newTemplates] };
+        });
+        return { imported, skipped };
       },
 
       startInstance: (templateId, incidentTitle) => {

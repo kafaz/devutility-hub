@@ -28,7 +28,7 @@ import {
 } from '@ant-design/icons';
 import type { SOPInstance, SOPTemplate, SOPCheckResult } from '../../../types';
 import { useClipboard } from '../../../hooks/useClipboard';
-import { generateMarkdownReport } from '../../../utils';
+import { generateInstanceReport } from '../../../utils';
 import { useGlobalStore } from '../../../store/globalStore';
 
 const { Title, Text } = Typography;
@@ -377,27 +377,18 @@ const InstanceRunner: React.FC<Props> = ({
 
   const statusCfg = INSTANCE_STATUS[instance.status];
 
-  // 生成 Markdown 报告
+  // 生成 Markdown 报告（使用增强版导出函数）
   const handleExport = () => {
-    const allChecks = [...instance.checkResults, ...instance.extraChecks];
-    const markdown = generateMarkdownReport({
-      title: instance.incidentTitle,
-      incidentTime: new Date(instance.createdAt).toLocaleString('zh-CN'),
-      steps: allChecks.map((r) => ({
-        name: r.checkName,
-        command: r.command,
-        output: r.output,
-        status: r.status,
-        conclusion: r.conclusion,
-      })),
-      diagnosis: instance.diagnosis,
+    const markdown = generateInstanceReport({
+      instance,
+      templateName: template?.name ?? instance.templateName,
     });
 
     const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `SOP-${instance.incidentTitle.replace(/\s+/g, '-')}.md`;
+    a.download = `故障排查报告-${instance.incidentTitle.replace(/\s+/g, '-')}.md`;
     a.click();
     URL.revokeObjectURL(url);
     setExportOpen(false);

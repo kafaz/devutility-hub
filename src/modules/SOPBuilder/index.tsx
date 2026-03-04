@@ -15,6 +15,7 @@ import {
   message,
   Tabs,
   Badge,
+  Dropdown,
 } from 'antd';
 import {
   PlusOutlined,
@@ -23,11 +24,20 @@ import {
   PlayCircleOutlined,
   HistoryOutlined,
   FileTextOutlined,
+  DownloadOutlined,
+  UploadOutlined,
+  MoreOutlined,
 } from '@ant-design/icons';
 import { useSOPStore } from './store/sopStore';
 import TemplateEditor from './components/TemplateEditor';
 import InstanceRunner from './components/InstanceRunner';
+import ImportModal from './components/ImportModal';
 import type { SOPTemplate, SOPInstance } from '../../types';
+import {
+  exportSOPTemplatesToMarkdown,
+  exportSOPTemplateToMarkdown,
+  downloadJSON,
+} from '../../utils';
 import { useGlobalStore } from '../../store/globalStore';
 
 const { Title, Text } = Typography;
@@ -65,6 +75,8 @@ const SOPBuilder: React.FC = () => {
     addTemplate,
     updateTemplate,
     deleteTemplate,
+    importTemplatesFromMarkdown,
+    importTemplatesFromJSON,
     startInstance,
     setActiveInstance,
     updateCheckResult,
@@ -78,6 +90,7 @@ const SOPBuilder: React.FC = () => {
   const [editingTemplate, setEditingTemplate] = useState<SOPTemplate | null>(null);
   const [startModalOpen, setStartModalOpen] = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>('');
+  const [importModalOpen, setImportModalOpen] = useState(false);
   const [startForm] = Form.useForm();
   const [messageApi, contextHolder] = message.useMessage();
   const [activeTab, setActiveTab] = useState<'templates' | 'history'>('templates');
@@ -119,6 +132,56 @@ const SOPBuilder: React.FC = () => {
     setTemplateEditorOpen(false);
   };
 
+  // 导出所有模板为 Markdown
+  const handleExportAllMarkdown = () => {
+    const md = exportSOPTemplatesToMarkdown(templates);
+    const blob = new Blob([md], { type: 'text/markdown;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'sop-templates.md';
+    a.click();
+    URL.revokeObjectURL(url);
+    messageApi.success(`已导出 ${templates.length} 个模板`);
+  };
+
+  // 导出单个模板为 Markdown
+  const handleExportOneMarkdown = (tpl: SOPTemplate) => {
+    const md = exportSOPTemplateToMarkdown(tpl);
+    const blob = new Blob([md], { type: 'text/markdown;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `sop-${tpl.name.replace(/\s+/g, '-')}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+    messageApi.success('模板已导出');
+  };
+
+  // 导出所有模板为 JSON
+  const handleExportAllJSON = () => {
+    downloadJSON(templates, 'sop-templates.json');
+    messageApi.success(`已导出 ${templates.length} 个模板（JSON 格式）`);
+  };
+
+  // 从 Markdown 导入
+  const handleImportMarkdown = (md: string) => {
+    const { imported, skipped } = importTemplatesFromMarkdown(md);
+    setImportModalOpen(false);
+    messageApi.success(
+      `导入完成：新增 ${imported} 个${skipped > 0 ? `，跳过重名 ${skipped} 个` : ''}`
+    );
+  };
+
+  // 从 JSON 导入
+  const handleImportJSON = (tpls: SOPTemplate[]) => {
+    const { imported, skipped } = importTemplatesFromJSON(tpls);
+    setImportModalOpen(false);
+    messageApi.success(
+      `导入完成：新增 ${imported} 个${skipped > 0 ? `，跳过重复 ${skipped} 个` : ''}`
+    );
+  };
+
   return (
     <div style={{ padding: 24 }}>
       {contextHolder}
@@ -140,6 +203,40 @@ const SOPBuilder: React.FC = () => {
           </Text>
         </div>
         <Space>
+          {/* 导入按钮 */}
+          <Button
+            icon={<UploadOutlined />}
+            onClick={() => setImportModalOpen(true)}
+          >
+            导入模板
+          </Button>
+
+          {/* 导出下拉 */}
+          <Dropdown
+            menu={{
+              items: [
+                {
+                  key: 'md',
+                  label: '导出全部模板（Markdown）',
+                  icon: <DownloadOutlined />,
+                  onClick: handleExportAllMarkdown,
+                  disabled: templates.length === 0,
+                },
+                {
+                  key: 'json',
+                  label: '导出全部模板（JSON）',
+                  icon: <DownloadOutlined />,
+                  onClick: handleExportAllJSON,
+                  disabled: templates.length === 0,
+                },
+              ],
+            }}
+          >
+            <Button icon={<DownloadOutlined />}>
+              导出模板 <MoreOutlined />
+            </Button>
+          </Dropdown>
+
           <Button
             icon={<PlusOutlined />}
             onClick={() => {
@@ -238,6 +335,12 @@ const SOPBuilder: React.FC = () => {
                               size={4}
                               onClick={(e) => e.stopPropagation()}
                             >
+                              <Tooltip title="导出此模板（Markdown）">
+                                <DownloadOutlined
+                                  style={{ color: '#a1a1aa', cursor: 'pointer', fontSize: 13 }}
+                                  onClick={() => handleExportOneMarkdown(tpl)}
+                                />
+                              </Tooltip>
                               <Tooltip title="编辑模板">
                                 <EditOutlined
                                   style={{ color: '#a1a1aa', cursor: 'pointer', fontSize: 13 }}
@@ -404,6 +507,14 @@ const SOPBuilder: React.FC = () => {
         initial={editingTemplate}
         onOk={handleTemplateOk}
         onCancel={() => setTemplateEditorOpen(false)}
+      />
+
+      {/* 导入弹窗 */}
+      <ImportModal
+        open={importModalOpen}
+        onOk={handleImportMarkdown}
+        onOkJSON={handleImportJSON}
+        onCancel={() => setImportModalOpen(false)}
       />
 
       {/* 开始排查弹窗 */}
