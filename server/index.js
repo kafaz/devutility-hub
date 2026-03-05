@@ -1,33 +1,44 @@
 /**
- * SSH Agent Proxy Server
+ * SSH Proxy Server — 私钥 + Passphrase 认证版
  *
- * 职责：
- *   1. 检测本机可用的 SSH Agent（Windows OpenSSH Agent / Pageant / Unix socket）
- *   2. 通过 Agent 复用方式连接 SSH 目标服务器（不需要用户再次输入密码/密钥）
- *   3. 将 SSH Shell 流通过 WebSocket 双向转发给前端 XTerm.js
- *   4. 支持独立的命令执行通道（exec），用于 SOP 命令的输出捕获
+ * 认证方式对应 paramiko 的 key_filename + passphrase：
+ *   ssh.connect({ privateKey, passphrase })  ← 同等于 paramiko 的行为
  *
- * WebSocket 消息协议：
- *   Client → Server:
- *     { type: 'connect',    host, port, username, agent }
- *     { type: 'data',       data: string }          ← 用户键盘输入
- *     { type: 'resize',     cols, rows }
- *     { type: 'exec',       cmd, id }               ← 独立命令执行
- *     { type: 'disconnect' }
+ * WebSocket 消息协议
+ * ─────────────────────────────────────────────────────────
+ * Client → Server:
+ *   { type: 'connect',      host, port, username,
+ *                           authType: 'privateKey'|'password'|'agent',
+ *                           keyContent?,    // 私钥内容（直接粘贴）
+ *                           keyFilePath?,   // 私钥文件路径（proxy 读取）
+ *                           passphrase?,    // 私钥加密口令
+ *                           password?,      // 密码登录时使用
+ *                           agent?,         // agent socket 路径
+ *                           cols?, rows? }
  *
- *   Server → Client:
- *     { type: 'status',     status: 'connected'|'disconnected'|'error', msg? }
- *     { type: 'data',       data: string (base64) } ← 终端输出
- *     { type: 'exec_result', id, stdout, stderr, exitCode, durationMs }
- *     { type: 'agent_keys', count }                 ← 当前 Agent 持有的密钥数
+ *   { type: 'data',         data: string }        ← 交互终端键盘输入
+ *   { type: 'resize',       cols, rows }
+ *   { type: 'exec',         cmd, id }             ← 单条命令（独立通道）
+ *   { type: 'exec_plan',    id, steps: [{ id, cmd, timeout? }] }  ← SOP 批量执行
+ *   { type: 'exec_plan_cancel' }
+ *   { type: 'disconnect' }
+ *
+ * Server → Client:
+ *   { type: 'status',       status: 'connecting'|'connected'|'error'|'disconnected', msg? }
+ *   { type: 'data',         data: string (base64) }
+ *   { type: 'exec_result',  id, stdout, stderr, exitCode, durationMs }
+ *   { type: 'plan_step',    planId, stepId, status: 'running'|'done'|'failed',
+ *                           stdout?, stderr?, exitCode?, durationMs? }
+ *   { type: 'plan_done',    planId, aborted }
  */
 
-const express  = require('express');
+const express = require('express');
 const { WebSocketServer } = require('ws');
 const { Client }          = require('ssh2');
-const cors   = require('cors');
-const http   = require('http');
-const os     = require('os');
+const cors  = require('cors');
+const http  = require('http');
+const fs    = require('fs');
+const path  = require('path');
 
 const app    = express();
 const server = http.createServer(app);
@@ -36,146 +47,165 @@ const wss    = new WebSocketServer({ server, path: '/terminal' });
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-// ─── REST API ──────────────────────────────────────────────────────────────
+// ─── REST ──────────────────────────────────────────────────────────────────
 
-/** 健康检查 */
 app.get('/api/health', (_req, res) =>
   res.json({ ok: true, platform: process.platform, pid: process.pid })
 );
 
-/**
- * 返回当前平台可用的 SSH Agent 列表
- * 前端据此展示下拉选项，用户选择后通过 WebSocket connect 消息传递
- */
+/** 返回当前平台可用的 Agent 列表（兼容旧版，也支持 agent 模式） */
 app.get('/api/agents', (_req, res) => {
   const agents = [];
-
   if (process.platform === 'win32') {
-    // Windows OpenSSH Authentication Agent（Windows 10/11 内置）
-    agents.push({
-      id:    'openssh-win',
-      name:  'Windows OpenSSH Agent',
-      value: '\\\\.\\pipe\\openssh-ssh-agent',
-      hint:  '需要在服务管理器中启动 "OpenSSH Authentication Agent" 服务',
-    });
-    // Pageant（PuTTY / XShell 的外部 Agent）
-    agents.push({
-      id:    'pageant',
-      name:  'Pageant (PuTTY / XShell)',
-      value: 'pageant',
-      hint:  '需要 Pageant 进程正在运行且已加载密钥',
-    });
+    agents.push({ id: 'openssh-win', name: 'Windows OpenSSH Agent',
+      value: '\\\\.\\pipe\\openssh-ssh-agent' });
+    agents.push({ id: 'pageant', name: 'Pageant', value: 'pageant' });
   } else {
-    // Linux / macOS：通过 SSH_AUTH_SOCK 环境变量
     const sock = process.env.SSH_AUTH_SOCK;
-    if (sock) {
-      agents.push({
-        id:    'unix-agent',
-        name:  `SSH Agent (${sock})`,
-        value: sock,
-        hint:  'ssh-add -l 查看已加载的密钥',
-      });
-    } else {
-      agents.push({
-        id:    'no-agent',
-        name:  '未检测到 SSH_AUTH_SOCK',
-        value: '',
-        hint:  '请先启动 ssh-agent 并用 ssh-add 加载密钥',
-      });
-    }
+    if (sock) agents.push({ id: 'unix', name: `ssh-agent (${sock})`, value: sock });
   }
-
   res.json({ agents });
 });
 
-// ─── WebSocket 处理 ────────────────────────────────────────────────────────
+/** 检查私钥文件路径是否可读（前端填写路径后实时验证） */
+app.post('/api/check-key', (req, res) => {
+  const { keyFilePath } = req.body;
+  if (!keyFilePath) return res.json({ ok: false, msg: '路径为空' });
+  const resolved = keyFilePath.startsWith('~')
+    ? path.join(process.env.HOME || process.env.USERPROFILE || '', keyFilePath.slice(1))
+    : keyFilePath;
+  try {
+    fs.accessSync(resolved, fs.constants.R_OK);
+    res.json({ ok: true, resolved });
+  } catch (e) {
+    res.json({ ok: false, msg: e.message });
+  }
+});
 
-wss.on('connection', (ws) => {
-  let ssh   = null;   // ssh2 Client 实例
-  let shell = null;   // 交互式 Shell 流
+// ─── 工具函数 ──────────────────────────────────────────────────────────────
 
-  /**
-   * 向前端发送结构化消息
-   */
-  function send(obj) {
-    if (ws.readyState === ws.OPEN) {
-      ws.send(JSON.stringify(obj));
+/**
+ * 从消息中构造 ssh2 的连接配置
+ * 对应 paramiko 的 key_filename + passphrase 认证方式
+ */
+function buildConnectConfig(msg) {
+  const cfg = {
+    host:              msg.host,
+    port:              msg.port || 22,
+    username:          msg.username,
+    readyTimeout:      msg.readyTimeout || 30000,
+    keepaliveInterval: 10000,
+    keepaliveCountMax: 5,
+  };
+
+  const authType = msg.authType || 'privateKey';
+
+  if (authType === 'privateKey') {
+    // 优先使用直接传入的 key 内容，否则从文件读取
+    if (msg.keyContent) {
+      cfg.privateKey = msg.keyContent;
+    } else if (msg.keyFilePath) {
+      const resolved = msg.keyFilePath.startsWith('~')
+        ? path.join(process.env.HOME || process.env.USERPROFILE || '', msg.keyFilePath.slice(1))
+        : msg.keyFilePath;
+      cfg.privateKey = fs.readFileSync(resolved);
+    } else {
+      throw new Error('privateKey 模式需要提供 keyContent 或 keyFilePath');
     }
+    // passphrase 对应 paramiko 的 passphrase 参数
+    if (msg.passphrase) cfg.passphrase = msg.passphrase;
+
+  } else if (authType === 'password') {
+    if (!msg.password) throw new Error('password 模式需要提供 password');
+    cfg.password = msg.password;
+
+  } else if (authType === 'agent') {
+    cfg.agent = msg.agent || process.env.SSH_AUTH_SOCK;
+    if (!cfg.agent) throw new Error('agent 模式需要 SSH Agent 正在运行');
   }
 
-  /**
-   * 通过独立 exec 通道执行命令并捕获输出
-   * 注意：exec 通道有独立环境，不共享 shell 的 cwd / 环境变量
-   * 用于 SOP 的"孤立命令测试"场景（验证连通性、检查端口等）
-   */
-  function execCommand(cmd, id) {
-    if (!ssh) {
-      send({ type: 'exec_result', id, error: 'SSH 未连接' });
-      return;
-    }
+  return cfg;
+}
 
+/**
+ * 通过独立 exec 通道执行单条命令
+ * 返回 Promise<{ stdout, stderr, exitCode, durationMs }>
+ */
+function execCommand(ssh, cmd, timeoutMs = 30000) {
+  return new Promise((resolve) => {
     const startTs = Date.now();
     let stdout = '';
     let stderr = '';
+    let resolved = false;
+
+    const timer = setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        resolve({ stdout, stderr: stderr + '\n[TIMEOUT]', exitCode: -1,
+                  durationMs: Date.now() - startTs });
+      }
+    }, timeoutMs);
 
     ssh.exec(cmd, (err, stream) => {
       if (err) {
-        send({ type: 'exec_result', id, error: err.message });
+        clearTimeout(timer);
+        resolve({ stdout: '', stderr: err.message, exitCode: -1,
+                  durationMs: Date.now() - startTs });
         return;
       }
-
-      stream.on('data', (data) => { stdout += data.toString(); });
-      stream.stderr.on('data', (data) => { stderr += data.toString(); });
+      stream.on('data', (d) => { stdout += d.toString(); });
+      stream.stderr.on('data', (d) => { stderr += d.toString(); });
       stream.on('close', (code) => {
-        send({
-          type:       'exec_result',
-          id,
-          stdout:     stdout.trimEnd(),
-          stderr:     stderr.trimEnd(),
-          exitCode:   code,
-          durationMs: Date.now() - startTs,
-        });
+        clearTimeout(timer);
+        if (!resolved) {
+          resolved = true;
+          resolve({
+            stdout:     stdout.trimEnd(),
+            stderr:     stderr.trimEnd(),
+            exitCode:   code ?? 0,
+            durationMs: Date.now() - startTs,
+          });
+        }
       });
     });
+  });
+}
+
+// ─── WebSocket ─────────────────────────────────────────────────────────────
+
+wss.on('connection', (ws) => {
+  let ssh         = null;
+  let shell       = null;
+  let planAborted = false;
+
+  function send(obj) {
+    if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj));
   }
 
-  // ─── 消息路由 ─────────────────────────────────────────────────────────
-
-  ws.on('message', (raw) => {
+  ws.on('message', async (raw) => {
     let msg;
-    try { msg = JSON.parse(raw.toString()); }
-    catch { return; }
+    try { msg = JSON.parse(raw.toString()); } catch { return; }
 
     switch (msg.type) {
 
-      // ── 建立 SSH 连接 ──────────────────────────────────────────────────
+      // ── 建立 SSH 连接 ────────────────────────────────────────────────────
       case 'connect': {
-        if (ssh) ssh.end();   // 清理旧连接
+        if (ssh) ssh.end();
 
         ssh = new Client();
-
-        const cfg = {
-          host:         msg.host,
-          port:         msg.port || 22,
-          username:     msg.username,
-          readyTimeout: 15000,
-          // keepaliveInterval 防止内网长时间空闲被防火墙切断
-          keepaliveInterval: 10000,
-          keepaliveCountMax: 3,
-        };
-
-        // Agent 配置：直接使用前端传来的 agent socket 路径 / 'pageant'
-        if (msg.agent) {
-          cfg.agent = msg.agent;
-        } else if (process.platform !== 'win32' && process.env.SSH_AUTH_SOCK) {
-          cfg.agent = process.env.SSH_AUTH_SOCK;
+        let cfg;
+        try {
+          cfg = buildConnectConfig(msg);
+        } catch (e) {
+          send({ type: 'status', status: 'error', msg: e.message });
+          return;
         }
 
         ssh.on('ready', () => {
           send({ type: 'status', status: 'connected',
-                 host: msg.host, port: cfg.port, username: msg.username });
+                 host: cfg.host, port: cfg.port, username: cfg.username });
 
-          // 开启交互式 Shell
+          // 同时打开交互式 Shell（用于终端面板）
           ssh.shell(
             { term: 'xterm-256color', cols: msg.cols || 220, rows: msg.rows || 50 },
             (err, stream) => {
@@ -183,18 +213,13 @@ wss.on('connection', (ws) => {
                 send({ type: 'status', status: 'error', msg: err.message });
                 return;
               }
-
               shell = stream;
-
-              // 终端输出 → 前端（base64 编码避免 JSON 转义问题）
-              stream.on('data', (data) => {
-                send({ type: 'data', data: Buffer.from(data).toString('base64') });
-              });
-
-              stream.stderr.on('data', (data) => {
-                send({ type: 'data', data: Buffer.from(data).toString('base64') });
-              });
-
+              stream.on('data', (d) =>
+                send({ type: 'data', data: Buffer.from(d).toString('base64') })
+              );
+              stream.stderr?.on('data', (d) =>
+                send({ type: 'data', data: Buffer.from(d).toString('base64') })
+              );
               stream.on('close', () => {
                 send({ type: 'status', status: 'disconnected' });
                 shell = null;
@@ -204,43 +229,75 @@ wss.on('connection', (ws) => {
         });
 
         ssh.on('error', (err) => {
-          send({ type: 'status', status: 'error', msg: err.message });
+          // 常见错误增加友好提示
+          let userMsg = err.message;
+          if (/authentication/i.test(err.message))
+            userMsg = '认证失败：请检查私钥/口令是否正确，或确认服务器已授权该公钥';
+          if (/ECONNREFUSED/.test(err.message))
+            userMsg = `连接被拒绝：${cfg.host}:${cfg.port} 不可达，请检查地址和防火墙`;
+          if (/ETIMEDOUT/.test(err.message))
+            userMsg = `连接超时：${cfg.host}:${cfg.port} 无响应`;
+          send({ type: 'status', status: 'error', msg: userMsg });
         });
 
-        ssh.on('end', () => {
-          send({ type: 'status', status: 'disconnected' });
-        });
+        ssh.on('end', () => send({ type: 'status', status: 'disconnected' }));
 
-        send({ type: 'status', status: 'connecting', host: msg.host });
+        send({ type: 'status', status: 'connecting',
+               msg: `正在连接 ${cfg.username}@${cfg.host}:${cfg.port}…` });
         ssh.connect(cfg);
         break;
       }
 
-      // ── 键盘输入 → 终端 ───────────────────────────────────────────────
-      case 'data': {
-        shell?.write(msg.data);
-        break;
-      }
+      // ── 终端输入 ─────────────────────────────────────────────────────────
+      case 'data':   shell?.write(msg.data);                           break;
+      case 'resize': shell?.setWindow(msg.rows, msg.cols, 0, 0);      break;
 
-      // ── 终端窗口大小变化 ──────────────────────────────────────────────
-      case 'resize': {
-        shell?.setWindow(msg.rows, msg.cols, 0, 0);
-        break;
-      }
-
-      // ── 独立命令执行（SOP 步骤） ───────────────────────────────────────
+      // ── 单条命令（独立 exec 通道）───────────────────────────────────────
       case 'exec': {
-        execCommand(msg.cmd, msg.id);
+        if (!ssh) { send({ type: 'exec_result', id: msg.id, error: '未连接' }); return; }
+        const r = await execCommand(ssh, msg.cmd, msg.timeout || 30000);
+        send({ type: 'exec_result', id: msg.id, ...r });
         break;
       }
 
-      // ── 向 Shell 发送命令（共享 Shell 状态，cd/env 等会保留） ──────────
-      case 'shell_exec': {
-        if (shell) shell.write(msg.cmd + '\n');
+      // ── SOP 批量自动执行 ─────────────────────────────────────────────────
+      case 'exec_plan': {
+        if (!ssh) {
+          send({ type: 'plan_done', planId: msg.id, aborted: true, error: '未连接' });
+          return;
+        }
+
+        planAborted = false;
+        const planId = msg.id;
+
+        for (const step of msg.steps) {
+          if (planAborted) break;
+
+          // 通知前端该步骤开始
+          send({ type: 'plan_step', planId, stepId: step.id, status: 'running' });
+
+          const result = await execCommand(ssh, step.cmd, step.timeout || 30000);
+
+          send({
+            type:      'plan_step',
+            planId,
+            stepId:    step.id,
+            status:    result.exitCode === 0 ? 'done' : 'failed',
+            ...result,
+          });
+        }
+
+        send({ type: 'plan_done', planId, aborted: planAborted });
         break;
       }
 
-      // ── 断开连接 ──────────────────────────────────────────────────────
+      // ── 取消正在执行的计划 ───────────────────────────────────────────────
+      case 'exec_plan_cancel': {
+        planAborted = true;
+        break;
+      }
+
+      // ── 断开 ─────────────────────────────────────────────────────────────
       case 'disconnect': {
         ssh?.end();
         ssh   = null;
@@ -250,31 +307,20 @@ wss.on('connection', (ws) => {
     }
   });
 
-  ws.on('close', () => {
-    ssh?.end();
-    ssh   = null;
-    shell = null;
-  });
+  ws.on('close', () => { ssh?.end(); planAborted = true; });
 });
 
 // ─── 启动 ──────────────────────────────────────────────────────────────────
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, '127.0.0.1', () => {
-  console.log('\n╔══════════════════════════════════════════════╗');
-  console.log('║      DevUtility Hub - SSH Agent Proxy        ║');
-  console.log('╠══════════════════════════════════════════════╣');
-  console.log(`║  HTTP : http://127.0.0.1:${PORT}                ║`);
-  console.log(`║  WS   : ws://127.0.0.1:${PORT}/terminal         ║`);
-  console.log('╠══════════════════════════════════════════════╣');
-  console.log(`║  Platform : ${process.platform.padEnd(32)}║`);
-
-  if (process.platform === 'win32') {
-    console.log('║  Agents   : Windows OpenSSH Agent / Pageant  ║');
-  } else {
-    const sock = process.env.SSH_AUTH_SOCK || '(not set)';
-    console.log(`║  Agent    : ${sock.slice(0, 32).padEnd(32)}║`);
-  }
-
-  console.log('╚══════════════════════════════════════════════╝\n');
+  console.log('\n╔══════════════════════════════════════════════════╗');
+  console.log('║   DevUtility Hub — SSH Proxy (PrivateKey Mode)   ║');
+  console.log('╠══════════════════════════════════════════════════╣');
+  console.log(`║  HTTP : http://127.0.0.1:${PORT}                    ║`);
+  console.log(`║  WS   : ws://127.0.0.1:${PORT}/terminal             ║`);
+  console.log('╠══════════════════════════════════════════════════╣');
+  console.log('║  认证方式: 私钥+Passphrase / 密码 / Agent         ║');
+  console.log('║  等同 paramiko: key_filename + passphrase         ║');
+  console.log('╚══════════════════════════════════════════════════╝\n');
 });
