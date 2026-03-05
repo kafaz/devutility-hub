@@ -3,9 +3,10 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { Spin } from 'antd';
 import AppLayout from './components/Layout/AppLayout';
 
-const LogAnalyzer = lazy(() => import('./modules/LogAnalyzer'));
+const LogAnalyzer    = lazy(() => import('./modules/LogAnalyzer'));
 const CommandBuilder = lazy(() => import('./modules/CommandBuilder'));
-const SOPBuilder = lazy(() => import('./modules/SOPBuilder'));
+const SOPBuilder     = lazy(() => import('./modules/SOPBuilder'));
+const SSHManager     = lazy(() => import('./modules/SSHManager'));
 
 const Loading: React.FC = () => (
   <div
@@ -46,6 +47,14 @@ const App: React.FC = () => (
           element={
             <Suspense fallback={<Loading />}>
               <SOPBuilder />
+            </Suspense>
+          }
+        />
+        <Route
+          path="ssh-manager"
+          element={
+            <Suspense fallback={<Loading />}>
+              <SSHManager />
             </Suspense>
           }
         />

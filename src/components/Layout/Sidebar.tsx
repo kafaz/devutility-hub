@@ -5,6 +5,7 @@ import {
   FileSearchOutlined,
   CodeOutlined,
   ApartmentOutlined,
+  ConsoleSqlOutlined,
   SettingOutlined,
   BulbOutlined,
   MenuFoldOutlined,
@@ -16,29 +17,36 @@ const { Sider } = Layout;
 const { Text } = Typography;
 
 const ICON_MAP: Record<string, React.ReactNode> = {
-  FileSearch: <FileSearchOutlined />,
-  CodeOutlined: <CodeOutlined />,
+  FileSearch:        <FileSearchOutlined />,
+  CodeOutlined:      <CodeOutlined />,
   ApartmentOutlined: <ApartmentOutlined />,
+  ConsoleSqlOutlined: <ConsoleSqlOutlined />,
 };
 
 const tools = [
   {
-    id: 'log-analyzer',
+    id:   'log-analyzer',
     name: '日志分析器',
     icon: 'FileSearch',
     path: '/log-analyzer',
   },
   {
-    id: 'command-builder',
+    id:   'command-builder',
     name: '命令生成器',
     icon: 'CodeOutlined',
     path: '/command-builder',
   },
   {
-    id: 'sop-builder',
+    id:   'sop-builder',
     name: 'SOP 排查',
     icon: 'ApartmentOutlined',
     path: '/sop-builder',
+  },
+  {
+    id:   'ssh-manager',
+    name: 'SSH Manager',
+    icon: 'ConsoleSqlOutlined',
+    path: '/ssh-manager',
   },
 ];
 
