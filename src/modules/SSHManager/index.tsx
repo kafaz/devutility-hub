@@ -667,7 +667,12 @@ const SSHManager: React.FC = () => {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <Card
             size="small"
-            title="SOP 自动执行"
+            title={
+              <Space>
+                <Text strong>SOP 自动执行</Text>
+                <Tag color="blue" style={{ fontSize: 10 }}>复用当前终端 Shell</Tag>
+              </Space>
+            }
             style={{ background: cardBg, border: `1px solid ${borderColor}` }}
           >
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -743,6 +748,35 @@ const SSHManager: React.FC = () => {
 
               <Divider style={{ margin: '4px 0' }} />
 
+              {/* 预处理提示 */}
+              {isConn && (
+                <Alert
+                  type="info"
+                  showIcon={false}
+                  style={{ fontSize: 11, padding: '6px 10px' }}
+                  message={
+                    <div>
+                      <Text strong style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>
+                        ✅ 执行前请在左侧终端完成：
+                      </Text>
+                      {[
+                        '堡垒机跳转 / 切换到目标主机',
+                        'sudo su - root（如需 root 权限）',
+                        'cd 到目标工作目录',
+                        'source 环境变量文件（如需）',
+                      ].map((step, i) => (
+                        <Text key={i} type="secondary" style={{ fontSize: 11, display: 'block' }}>
+                          {i + 1}. {step}
+                        </Text>
+                      ))}
+                      <Text style={{ fontSize: 11, color: '#3b82f6', display: 'block', marginTop: 4 }}>
+                        SOP 命令将在同一 Shell 中顺序执行，完全继承以上状态。
+                      </Text>
+                    </div>
+                  }
+                />
+              )}
+
               {/* 执行/取消按钮 */}
               {!isRunning ? (
                 <Button
@@ -753,7 +787,7 @@ const SSHManager: React.FC = () => {
                   loading={executing}
                   block
                 >
-                  开始自动执行
+                  开始自动执行（复用当前 Shell）
                 </Button>
               ) : (
                 <Button danger icon={<StopOutlined />} onClick={cancelPlan} block>
