@@ -258,13 +258,24 @@ const StepRow: React.FC<{
         )}
       </div>
 
-      {/* 命令预览 */}
+      {/* 命令预览（优先显示渲染后的实际命令） */}
       <div style={{
         fontFamily: 'JetBrains Mono, Consolas, monospace', fontSize: 11,
         color: '#6b7280', marginTop: 2,
       }}>
-        $ {step.cmd}
+        $ {result?.resolvedCmd ?? step.cmd}
       </div>
+
+      {/* 变量捕获标记 */}
+      {result?.capturedVar && (
+        <div style={{ marginTop: 3 }}>
+          <Tag color="blue" style={{ fontSize: 10 }}>
+            🔵 已捕获 ${'{'}
+            {result.capturedVar.name}
+            {'}'} = <code style={{ fontSize: 10 }}>{result.capturedVar.value.slice(0, 40)}{result.capturedVar.value.length > 40 ? '…' : ''}</code>
+          </Tag>
+        </div>
+      )}
 
       {/* 输出展开区 */}
       {expanded && outputText && (
@@ -308,7 +319,10 @@ const SSHManager: React.FC = () => {
   } = useSSHStore();
 
   // SOP 数据
-  const { templates, instances, updateCheckResult, setInstanceStatus } = useSOPStore();
+  const {
+    templates, instances,
+    updateCheckResult, appendSubStepResult, setInstanceStatus,
+  } = useSOPStore();
 
   const [messageApi, ctx] = message.useMessage();
   const [profileModalOpen, setProfileModalOpen] = useState(false);
@@ -385,17 +399,47 @@ const SSHManager: React.FC = () => {
   const handleRunPlan = async () => {
     if (!selectedInstance) { messageApi.warning('请选择要执行的 SOP 实例'); return; }
 
-    const steps = [
+    // ── 展平子步骤：每个 SOPCheckResult 展开为若干 PlanStep ──────────────
+    const allCheckResults = [
       ...selectedInstance.checkResults,
       ...selectedInstance.extraChecks,
-    ].map((r) => ({
-      id:   r.checkId,
-      name: r.checkName,
-      cmd:  renderTemplate(r.command, varValues),
-    }));
+    ];
 
-    if (steps.some((s) => !s.cmd.trim())) {
-      messageApi.warning('部分步骤命令为空，请检查');
+    const planSteps: import('./store/sshStore').PlanStep[] = [];
+
+    for (const cr of allCheckResults) {
+      const subs = cr.subSteps ?? [];
+      if (subs.length > 0) {
+        subs.forEach((ss) => {
+          planSteps.push({
+            id:             ss.id,
+            name:           ss.name,
+            cmd:            renderTemplate(ss.command, varValues),  // 仅替换用户填写的变量
+            captureVar:     ss.captureVar,
+            capturePattern: ss.capturePattern,
+            timeout:        ss.timeoutMs ?? 30000,
+            checkId:        cr.checkId,
+            isSubStep:      true,
+          });
+        });
+      } else {
+        // 无子步骤：使用检查步骤的兜底命令
+        const cmd = renderTemplate(cr.command, varValues);
+        if (cmd.trim()) {
+          planSteps.push({
+            id:        cr.checkId,
+            name:      cr.checkName,
+            cmd,
+            timeout:   30000,
+            checkId:   cr.checkId,
+            isSubStep: false,
+          });
+        }
+      }
+    }
+
+    if (planSteps.length === 0) {
+      messageApi.warning('所有步骤命令均为空，请先完善 SOP 模板');
       return;
     }
 
@@ -403,30 +447,68 @@ const SSHManager: React.FC = () => {
     setActiveView('progress');
 
     try {
-      const plan = await runPlan(steps);
+      const plan = await runPlan(planSteps);
 
-      // 将执行结果写回 SOP 实例
+        // ── 将执行结果聚合写回 SOPInstance ──────────────────────────────────
+      // 按 checkId 分组
+      const resultsByCheck = new Map<string, typeof plan.results[string][]>();
       plan.steps.forEach((step) => {
         const r = plan.results[step.id];
-        if (!r) return;
-        updateCheckResult(selectedInstance.id, step.id, {
-          command:    step.cmd,
-          output:     [r.stdout, r.stderr].filter(Boolean).join('\n').trimEnd(),
-          status:     r.exitCode === 0 ? 'normal' : 'abnormal',
-          conclusion: r.exitCode === 0
-            ? `exit 0，耗时 ${r.durationMs}ms`
-            : `exit ${r.exitCode}，${r.stderr.split('\n')[0].slice(0, 80)}`,
-        });
+        if (!r || !step.checkId) return;
+        const list = resultsByCheck.get(step.checkId) ?? [];
+        list.push(r);
+        resultsByCheck.set(step.checkId, list);
+      });
+
+      resultsByCheck.forEach((stepResults, checkId) => {
+        const aggregatedOutput = stepResults
+          .map((r) => {
+            const step = plan.steps.find((s) => s.id === r.stepId);
+            return `[${step?.name ?? r.stepId}]${r.resolvedCmd ? ` $ ${r.resolvedCmd}` : ''}\n${r.stdout || r.stderr}`;
+          })
+          .join('\n\n');
+
+        // 如果是子步骤：通过 appendSubStepResult 逐条写入，聚合逻辑在 store 处理
+        if (plan.steps.find((s) => s.checkId === checkId && s.isSubStep)) {
+          stepResults.forEach((r) => {
+            const step = plan.steps.find((s) => s.id === r.stepId);
+            if (!step) return;
+            appendSubStepResult(selectedInstance.id, checkId, {
+              subStepId:   step.id,
+              name:        step.name,
+              command:     r.resolvedCmd ?? step.cmd,
+              stdout:      r.stdout,
+              stderr:      r.stderr,
+              exitCode:    r.exitCode,
+              durationMs:  r.durationMs,
+              capturedVar: r.capturedVar,
+            });
+          });
+        } else {
+          // 兜底命令：直接更新 checkResult
+          const r = stepResults[0];
+          if (r) {
+            updateCheckResult(selectedInstance.id, checkId, {
+              command:    r.resolvedCmd ?? plan.steps.find((s) => s.checkId === checkId)?.cmd ?? '',
+              output:     aggregatedOutput,
+              status:     r.exitCode === 0 ? 'normal' : 'abnormal',
+              conclusion: r.exitCode === 0
+                ? `exit 0，耗时 ${r.durationMs}ms`
+                : `exit ${r.exitCode}，${r.stderr.split('\n')[0].slice(0, 80)}`,
+            });
+          }
+        }
       });
 
       setInstanceStatus(selectedInstance.id, 'resolved');
 
       const abnormal = Object.values(plan.results).filter((r) => r.exitCode !== 0).length;
-      if (abnormal === 0) {
-        messageApi.success(`✅ 全部 ${steps.length} 步执行完成，无异常`);
-      } else {
-        messageApi.warning(`⚠️ 完成 ${steps.length} 步，${abnormal} 步异常（exit ≠ 0）`);
-      }
+      const capturedVarCount = Object.values(plan.results).filter((r) => r.capturedVar).length;
+      const msg = abnormal === 0
+        ? `✅ 全部 ${planSteps.length} 步执行完成，无异常${capturedVarCount > 0 ? `，捕获 ${capturedVarCount} 个变量` : ''}`
+        : `⚠️ 完成 ${planSteps.length} 步，${abnormal} 步异常`;
+      abnormal === 0 ? messageApi.success(msg) : messageApi.warning(msg);
+
     } catch (e) {
       messageApi.error(`执行出错: ${String(e)}`);
     } finally {
@@ -657,6 +739,34 @@ const SSHManager: React.FC = () => {
                       />
                     ))}
                   </div>
+
+                  {/* 变量上下文快照（plan 完成后显示） */}
+                  {currentPlan?.status === 'done' &&
+                    currentPlan.finalVarContext &&
+                    Object.keys(currentPlan.finalVarContext).length > 0 && (
+                    <div
+                      style={{
+                        marginTop: 12,
+                        padding: '8px 12px',
+                        background: isDark ? 'rgba(59,130,246,0.08)' : '#eff6ff',
+                        border: '1px solid rgba(59,130,246,0.25)',
+                        borderRadius: 6,
+                      }}
+                    >
+                      <Text strong style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>
+                        🔵 捕获变量（可在后续命令中引用）
+                      </Text>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                        {Object.entries(currentPlan.finalVarContext).map(([k, v]) => (
+                          <Tag key={k} color="blue" style={{ fontSize: 11, fontFamily: 'JetBrains Mono, Consolas, monospace' }}>
+                            ${'{'}
+                            {k}
+                            {'}'} = {v.slice(0, 40)}{v.length > 40 ? '…' : ''}
+                          </Tag>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </>
               )}
             </Card>

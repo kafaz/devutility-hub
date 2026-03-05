@@ -1,6 +1,9 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { SOPTemplate, SOPInstance, SOPCheck, SOPCheckResult } from '../../../types';
+import type {
+  SOPTemplate, SOPInstance, SOPCheck, SOPCheckResult,
+  SOPSubStepResult,
+} from '../../../types';
 import { generateId, renderTemplate, parseSOPTemplatesFromMarkdown } from '../../../utils';
 
 interface SOPStore {
@@ -21,6 +24,12 @@ interface SOPStore {
   startInstance: (templateId: string, incidentTitle: string) => string;
   setActiveInstance: (id: string | null) => void;
   updateCheckResult: (instanceId: string, checkId: string, data: Partial<SOPCheckResult>) => void;
+  // 追加单条子步骤结果（SSH 自动执行时实时写入）
+  appendSubStepResult: (
+    instanceId: string,
+    checkId: string,
+    result: SOPSubStepResult
+  ) => void;
   addExtraCheck: (instanceId: string, check: Omit<SOPCheckResult, 'checkId'>) => void;
   updateDiagnosis: (instanceId: string, field: keyof SOPInstance['diagnosis'], value: string) => void;
   setInstanceStatus: (instanceId: string, status: SOPInstance['status']) => void;
@@ -183,15 +192,23 @@ const defaultTemplates: SOPTemplate[] = [
   },
 ];
 
+// 确保所有默认模板的 checks 都有 subSteps 字段（兼容旧数据）
+defaultTemplates.forEach((t) => {
+  t.checks.forEach((c) => { if (!c.subSteps) c.subSteps = []; });
+});
+
 // 初始化实例的 checkResults（基于模板的 checks）
 function initCheckResults(checks: SOPCheck[]): SOPCheckResult[] {
   return checks.map((c) => ({
-    checkId: c.id,
-    checkName: c.name,
-    command: c.command,
-    output: '',
-    conclusion: '',
-    status: 'pending',
+    checkId:        c.id,
+    checkName:      c.name,
+    command:        c.command,
+    output:         '',
+    conclusion:     '',
+    status:         'pending',
+    // 创建实例时快照子步骤，后续模板修改不影响已有实例
+    subSteps:       (c.subSteps ?? []).map((s) => ({ ...s })),
+    subStepResults: [],
   }));
 }
 
@@ -308,6 +325,38 @@ export const useSOPStore = create<SOPStore>()(
         }));
       },
 
+      appendSubStepResult: (instanceId, checkId, result) => {
+        set((s) => ({
+          instances: s.instances.map((inst) => {
+            if (inst.id !== instanceId) return inst;
+            return {
+              ...inst,
+              checkResults: inst.checkResults.map((r) => {
+                if (r.checkId !== checkId) return r;
+                const subStepResults = [...(r.subStepResults ?? []), result];
+                // 聚合输出：所有子步骤 stdout 合并
+                const output = subStepResults
+                  .map((sr) => `[${sr.name}]\n${sr.stdout}`)
+                  .join('\n\n');
+                // 若有任一子步骤 exit ≠ 0，检查步骤标记为异常
+                const hasFailure = subStepResults.some((sr) => sr.exitCode !== 0);
+                const allDone = subStepResults.length === (r.subSteps?.length || 0);
+                return {
+                  ...r,
+                  subStepResults,
+                  output,
+                  status: hasFailure
+                    ? 'abnormal'
+                    : allDone
+                    ? 'normal'
+                    : r.status,
+                };
+              }),
+            };
+          }),
+        }));
+      },
+
       addExtraCheck: (instanceId, check) => {
         const checkId = generateId();
         set((s) => ({
@@ -317,7 +366,9 @@ export const useSOPStore = create<SOPStore>()(
               ...inst,
               extraChecks: [
                 ...inst.extraChecks,
-                { ...check, checkId, status: 'pending' },
+                { ...check, checkId, status: 'pending',
+                  subSteps: check.subSteps ?? [],
+                  subStepResults: check.subStepResults ?? [] },
               ],
             };
           }),

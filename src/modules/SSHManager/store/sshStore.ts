@@ -32,21 +32,29 @@ export interface SSHProfile {
 }
 
 export interface PlanStep {
-  id: string;
-  cmd: string;
-  name: string;
-  timeout?: number;
+  id:             string;
+  cmd:            string;          // 原始命令（可含 ${VAR} 占位符）
+  name:           string;
+  captureVar?:    string;          // 将 stdout 捕获为此变量名
+  capturePattern?: string;         // 正则，取第 1 组
+  timeout?:       number;
+  // 元信息（用于结果回写到 SOPInstance）
+  checkId?:       string;          // 所属检查步骤 ID
+  isSubStep?:     boolean;         // true = 是子步骤，false = 检查步骤兜底命令
 }
 
 export type PlanStepStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped';
 
 export interface PlanStepResult {
-  stepId:    string;
-  status:    PlanStepStatus;
-  stdout:    string;
-  stderr:    string;
-  exitCode:  number;
-  durationMs: number;
+  stepId:       string;
+  status:       PlanStepStatus;
+  stdout:       string;
+  stderr:       string;
+  exitCode:     number;
+  durationMs:   number;
+  resolvedCmd?: string;                              // 变量替换后的实际命令
+  capturedVar?: { name: string; value: string };     // 本步骤捕获的变量
+  varSnapshot?: Record<string, string>;              // 执行后累积的全局变量快照
 }
 
 export interface ExecPlan {
@@ -55,7 +63,8 @@ export interface ExecPlan {
   results:   Record<string, PlanStepResult>;
   status:    'idle' | 'running' | 'done' | 'aborted';
   startedAt?: number;
-  doneAt?:   number;
+  doneAt?:    number;
+  finalVarContext?: Record<string, string>;           // plan 完成后的全量变量表
 }
 
 // ─── 常量 ──────────────────────────────────────────────────────────────────
@@ -222,19 +231,21 @@ export const useSSHStore = create<SSHStore>()(
             }
 
             case 'plan_step': {
-              const { planId, stepId, status, stdout, stderr, exitCode, durationMs } =
-                msg as Record<string, unknown>;
+              const m = msg as Record<string, unknown>;
               set((s) => {
-                if (!s.currentPlan || s.currentPlan.id !== planId) return {};
+                if (!s.currentPlan || s.currentPlan.id !== m.planId) return {};
                 const results = {
                   ...s.currentPlan.results,
-                  [stepId as string]: {
-                    stepId:     stepId as string,
-                    status:     status as PlanStepStatus,
-                    stdout:     (stdout  as string) ?? '',
-                    stderr:     (stderr  as string) ?? '',
-                    exitCode:   (exitCode  as number) ?? 0,
-                    durationMs: (durationMs as number) ?? 0,
+                  [m.stepId as string]: {
+                    stepId:      m.stepId     as string,
+                    status:      m.status     as PlanStepStatus,
+                    stdout:      (m.stdout     as string) ?? '',
+                    stderr:      (m.stderr     as string) ?? '',
+                    exitCode:    (m.exitCode   as number) ?? 0,
+                    durationMs:  (m.durationMs as number) ?? 0,
+                    resolvedCmd: (m.resolvedCmd as string) ?? undefined,
+                    capturedVar: m.capturedVar as { name: string; value: string } | undefined,
+                    varSnapshot: m.varSnapshot as Record<string, string> | undefined,
                   },
                 };
                 return { currentPlan: { ...s.currentPlan, results } };
@@ -247,8 +258,9 @@ export const useSSHStore = create<SSHStore>()(
                 if (!s.currentPlan) return {};
                 const plan: ExecPlan = {
                   ...s.currentPlan,
-                  status:  (msg.aborted as boolean) ? 'aborted' : 'done',
-                  doneAt:  Date.now(),
+                  status:           (msg.aborted as boolean) ? 'aborted' : 'done',
+                  doneAt:           Date.now(),
+                  finalVarContext:  msg.finalVarContext as Record<string, string> | undefined,
                 };
                 _planResolve?.(plan);
                 _planResolve = null;

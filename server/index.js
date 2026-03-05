@@ -390,6 +390,19 @@ wss.on('connection', (ws) => {
        *   - source env.sh 设置的环境变量得到保留
        *   - 堡垒机跳转后的网络上下文得到保留
        */
+      /**
+       * SOP 批量执行计划（支持变量捕获与上下文渲染）
+       *
+       * msg.steps 结构：
+       *   { id, cmd, name, captureVar?, capturePattern?, timeout?, checkId?, isSubStep? }
+       *
+       * 执行流程（每一步）：
+       *   1. 用 varContext 渲染 cmd 中的 ${VAR} 占位符
+       *   2. 在已有 Shell PTY 中执行渲染后的命令（保留 sudo/cwd/env 状态）
+       *   3. 若设置了 captureVar，从 stdout 中提取值（可选 capturePattern 正则）
+       *   4. 将捕获值写入 varContext，后续步骤可立即引用
+       *   5. 发送 plan_step 事件（含 resolvedCmd、capturedVar 字段）
+       */
       case 'exec_plan': {
         if (!shell) {
           send({ type: 'plan_done', planId: msg.id, aborted: true,
@@ -400,26 +413,59 @@ wss.on('connection', (ws) => {
         planAborted = false;
         const planId = msg.id;
 
+        // 变量上下文：在整个 plan 生命周期内累积，步骤间共享
+        const varContext = {};
+
         for (const step of msg.steps) {
           if (planAborted) break;
 
-          send({ type: 'plan_step', planId, stepId: step.id, status: 'running' });
+          // 1. 渲染变量：将 cmd 中的 ${VAR} 替换为已捕获的值
+          const resolvedCmd = step.cmd.replace(
+            /\$\{([^}]+)\}/g,
+            (_, name) => varContext[name] !== undefined ? varContext[name] : `\${${name}}`
+          );
 
-          // 通过队列在同一 Shell 中顺序执行
-          const result = await enqueueShellCmd(step.cmd, step.timeout || 30000);
+          send({ type: 'plan_step', planId, stepId: step.id, status: 'running',
+                 resolvedCmd });
+
+          // 2. 在 Shell PTY 中执行（复用 sudo/cwd/env 状态）
+          const result = await enqueueShellCmd(resolvedCmd, step.timeout || 30000);
+
+          // 3. 变量捕获
+          let capturedVar = undefined;
+          if (step.captureVar && result.exitCode === 0) {
+            let value = result.stdout.trim();
+            if (step.capturePattern) {
+              try {
+                const re = new RegExp(step.capturePattern);
+                const m  = re.exec(result.stdout);
+                if (m) value = m[1] !== undefined ? m[1] : m[0];
+              } catch { /* 正则无效，使用整个 stdout */ }
+            }
+            // 只在值非空时写入 context
+            if (value) {
+              varContext[step.captureVar] = value;
+              capturedVar = { name: step.captureVar, value };
+            }
+          }
 
           send({
-            type: 'plan_step', planId,
-            stepId:    step.id,
-            status:    result.exitCode === 0 ? 'done' : 'failed',
-            stdout:    result.stdout,
-            stderr:    result.stderr,
-            exitCode:  result.exitCode,
+            type:       'plan_step',
+            planId,
+            stepId:     step.id,
+            status:     result.exitCode === 0 ? 'done' : 'failed',
+            stdout:     result.stdout,
+            stderr:     result.stderr,
+            exitCode:   result.exitCode,
             durationMs: result.durationMs,
+            resolvedCmd,          // 实际执行的命令（变量已替换）
+            capturedVar,          // 本步骤捕获的变量（name + value）
+            varSnapshot: { ...varContext },  // 当前累积变量快照（供前端展示）
           });
         }
 
-        send({ type: 'plan_done', planId, aborted: planAborted });
+        send({ type: 'plan_done', planId, aborted: planAborted,
+               finalVarContext: varContext });
         break;
       }
 

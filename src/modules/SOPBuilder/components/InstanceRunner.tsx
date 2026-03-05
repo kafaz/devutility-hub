@@ -398,11 +398,13 @@ const InstanceRunner: React.FC<Props> = ({
   const handleAddExtra = async () => {
     const values = await extraForm.validateFields();
     onAddExtraCheck({
-      checkName: values.name,
-      command: values.command,
-      output: '',
-      conclusion: '',
-      status: 'pending',
+      checkName:      values.name,
+      command:        values.command,
+      output:         '',
+      conclusion:     '',
+      status:         'pending',
+      subSteps:       [],
+      subStepResults: [],
     });
     extraForm.resetFields();
     setExtraModalOpen(false);

@@ -115,15 +115,50 @@ export interface GrepGroup {
 
 // ======================== SOP 故障排查工具类型 ========================
 
-// SOP 模板中的单个检查步骤
+/**
+ * 子步骤（SubStep）— SOPCheck 的原子执行单元
+ *
+ * 设计目标：
+ *   1. 一个 SOPCheck 包含若干 SubStep，SubStep 按顺序在同一 Shell 中执行
+ *   2. 每个 SubStep 可将 stdout 捕获为命名变量（captureVar）
+ *   3. 后续 SubStep 的 command 可引用已捕获变量：${VAR_NAME}
+ *   4. capturePattern 用正则从 stdout 精确提取目标值（默认取整个 stdout.trim()）
+ */
+export interface SOPSubStep {
+  id: string;
+  order: number;
+  name: string;
+  description?: string;
+  command: string;            // 支持 ${USER_VAR} 和 ${CAPTURED_VAR} 占位符
+  captureVar?: string;        // 将 stdout 保存为此变量名，后续步骤可引用
+  capturePattern?: string;    // 正则表达式，取第 1 捕获组作为变量值（可选）
+  expectedNormal?: string;
+  abnormalSigns?: string;
+  timeoutMs?: number;
+}
+
+// 子步骤运行结果（实例层，执行时填充）
+export interface SOPSubStepResult {
+  subStepId: string;
+  name: string;
+  command: string;            // 变量渲染后的实际命令
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  durationMs: number;
+  capturedVar?: { name: string; value: string };  // 本步骤捕获的变量
+}
+
+// SOP 模板中的检查步骤（一个检查 = 多个子步骤）
 export interface SOPCheck {
   id: string;
   order: number;
   name: string;
   description: string;
-  command: string;          // 支持 ${var} 占位符
-  expectedNormal?: string;  // 正常输出的描述/示例
-  abnormalSigns?: string;   // 异常特征描述
+  command: string;           // 兼容旧版：若 subSteps 为空则直接执行此命令
+  expectedNormal?: string;
+  abnormalSigns?: string;
+  subSteps?: SOPSubStep[];   // 子步骤列表（新版，优先级高于 command）
 }
 
 // SOP 模板（可复用的故障排查流程）
@@ -133,7 +168,7 @@ export interface SOPTemplate {
   category: string;
   description: string;
   checks: SOPCheck[];
-  diagnosisHints?: string; // 常见根因提示，Markdown 格式
+  diagnosisHints?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -142,10 +177,12 @@ export interface SOPTemplate {
 export interface SOPCheckResult {
   checkId: string;
   checkName: string;
-  command: string;     // 渲染后的实际命令（变量已替换）
-  output: string;      // 用户粘贴的命令输出
-  conclusion: string;  // 用户对该步骤的分析结论
+  command: string;
+  output: string;            // 聚合所有子步骤的输出（或单命令输出）
+  conclusion: string;
   status: 'pending' | 'normal' | 'abnormal' | 'skipped';
+  subSteps?: SOPSubStep[];              // 从模板复制（创建实例时快照）
+  subStepResults?: SOPSubStepResult[];  // 执行时填充
   executedAt?: number;
 }
 

@@ -505,6 +505,7 @@ const SOPBuilder: React.FC = () => {
       <TemplateEditor
         open={templateEditorOpen}
         initial={editingTemplate}
+        allTemplates={templates}
         onOk={handleTemplateOk}
         onCancel={() => setTemplateEditorOpen(false)}
       />
