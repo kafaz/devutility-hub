@@ -25,6 +25,7 @@ import 'xterm/css/xterm.css';
 
 import { useSSHStore } from './store/sshStore';
 import type { SSHSession, SSHProfile, PlanStepResult, NodeExecution } from './store/sshStore';
+import { useJournalStore } from './store/journalStore';
 import { useSOPStore } from '../SOPBuilder/store/sopStore';
 import {
   generateMultiNodeReport, renderTemplate,
@@ -32,6 +33,7 @@ import {
 import type { NodeReportData } from '../../utils';
 import { useGlobalStore } from '../../store/globalStore';
 import ResizableOutput from '../../components/shared/ResizableOutput';
+import SessionJournal from './components/SessionJournal';
 
 const { Title, Text } = Typography;
 const { Password } = Input;
@@ -50,13 +52,15 @@ const STATUS: Record<ConnStatus, { badge: 'default' | 'processing' | 'success' |
 // ─── 单个 XTerm 终端实例（每会话挂载一次，CSS 控制显隐） ─────────────────
 
 const TerminalInstance: React.FC<{
-  sessionId: string;
-  isDark:    boolean;
-  visible:   boolean;
-  onInput:   (data: string) => void;
-  onResize:  (cols: number, rows: number) => void;
+  sessionId:     string;
+  isDark:        boolean;
+  visible:       boolean;
+  onInput:       (data: string) => void;
+  onResize:      (cols: number, rows: number) => void;
   registerWrite: (fn: (b64: string) => void) => void;
-}> = ({ sessionId, isDark, visible, onInput, onResize, registerWrite }) => {
+  /** 注册"读取终端缓冲区文本"的函数，供快照使用 */
+  registerSnapshot: (fn: () => string) => void;
+}> = ({ sessionId, isDark, visible, onInput, onResize, registerWrite, registerSnapshot }) => {
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -82,6 +86,16 @@ const TerminalInstance: React.FC<{
       const buf = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
       term.write(buf);
+    });
+
+    // 注册快照函数：读取 XTerm 当前可见缓冲区的所有文本行
+    registerSnapshot(() => {
+      const lines: string[] = [];
+      for (let i = 0; i < term.buffer.active.length; i++) {
+        const line = term.buffer.active.getLine(i);
+        if (line) lines.push(line.translateToString(true));
+      }
+      return lines.join('\n').trim();
     });
 
     return () => { d1.dispose(); ro.disconnect(); term.dispose(); };
@@ -355,10 +369,15 @@ const SSHManager: React.FC = () => {
   const [targetedMap, setTargetedMap]     = useState<Record<string, string>>({});
   const [varValues,   setVarValues]       = useState<Record<string, string>>({});
   const [executing,   setExecuting]       = useState(false);
-  const [activeView,  setActiveView]      = useState<'terminal' | 'progress'>('terminal');
+  const [activeView,  setActiveView]      = useState<'terminal' | 'progress' | 'journal'>('terminal');
 
   // ── 终端写入函数 Map（每会话一个） ────────────────────────────────────────
-  const writeCallbacks = useRef<Map<string, (b64: string) => void>>(new Map());
+  const writeCallbacks    = useRef<Map<string, (b64: string) => void>>(new Map());
+  const snapshotCallbacks = useRef<Map<string, () => string>>(new Map());
+  // 每会话的键盘输入缓冲（检测手动命令行）
+  const cmdBuffers        = useRef<Map<string, string>>(new Map());
+
+  const { addEntry, addSOPNodeResults } = useJournalStore();
 
   // 定期检查代理
   useEffect(() => {
@@ -476,6 +495,29 @@ const SSHManager: React.FC = () => {
         });
         setInstanceStatus(inst.id, 'resolved');
       });
+
+      // 自动将执行结果写入每个会话的日志
+      if (run) {
+        addSOPNodeResults(
+          run.nodeExecutions.map((ne) => ({
+            sessionId:   ne.sessionId,
+            sessionName: ne.sessionName,
+            instanceId:  ne.instanceId,
+            steps: ne.steps.map((step) => {
+              const r = ne.results[step.id];
+              return {
+                name:        step.name,
+                command:     r?.resolvedCmd ?? step.cmd,
+                output:      r?.processedOutput ?? r?.stdout ?? '',
+                exitCode:    r?.exitCode ?? -1,
+                durationMs:  r?.durationMs ?? 0,
+                statusReason: r?.statusReason,
+                capturedVar:  r?.capturedVar,
+              };
+            }),
+          }))
+        );
+      }
 
       const failCount = run?.nodeExecutions.filter((ne) => ne.status === 'failed').length ?? 0;
       failCount === 0
@@ -726,6 +768,12 @@ const SSHManager: React.FC = () => {
                   : '多节点进度',
                 value: 'progress',
               },
+              {
+                label: activeSessionId
+                  ? `会话日志 (${(useJournalStore.getState().journals[activeSessionId] ?? []).length})`
+                  : '会话日志',
+                value: 'journal',
+              },
             ]}
           />
 
@@ -781,10 +829,32 @@ const SSHManager: React.FC = () => {
                       key={sess.id}
                       sessionId={sess.id}
                       isDark={isDark}
-                      visible={sess.id === activeSessionId}
-                      onInput={(data) => sendInputToSession(sess.id, data)}
+                      visible={sess.id === activeSessionId && activeView === 'terminal'}
+                      onInput={(data) => {
+                        sendInputToSession(sess.id, data);
+                        // 键盘截收：缓冲字符，Enter 时保存为 manual_cmd
+                        const buf = cmdBuffers.current.get(sess.id) ?? '';
+                        if (data === '\r') {
+                          const cmd = buf.trim();
+                          if (cmd) {
+                            addEntry({
+                              sessionId:   sess.id,
+                              sessionName: sess.name,
+                              type:        'manual_cmd',
+                              timestamp:   Date.now(),
+                              command:     cmd,
+                            });
+                          }
+                          cmdBuffers.current.set(sess.id, '');
+                        } else if (data === '\x7f' || data === '\b') {
+                          cmdBuffers.current.set(sess.id, buf.slice(0, -1));
+                        } else if (data.charCodeAt(0) >= 32 && !data.startsWith('\x1b')) {
+                          cmdBuffers.current.set(sess.id, buf + data);
+                        }
+                      }}
                       onResize={(cols, rows) => resizeSession(sess.id, cols, rows)}
                       registerWrite={(fn) => { writeCallbacks.current.set(sess.id, fn); }}
+                      registerSnapshot={(fn) => { snapshotCallbacks.current.set(sess.id, fn); }}
                     />
                   ))
                 )}
@@ -826,6 +896,34 @@ const SSHManager: React.FC = () => {
                 </div>
               )}
             </Card>
+          )}
+
+          {/* ── 会话日志视图 */}
+          {activeView === 'journal' && (
+            <div
+              style={{
+                border: `1px solid ${borderColor}`, borderRadius: 6,
+                minHeight: 400, display: 'flex', flexDirection: 'column',
+                overflow: 'hidden',
+              }}
+            >
+              {activeSessionId ? (
+                <SessionJournal
+                  sessionId={activeSessionId}
+                  sessionName={sessions.find((s) => s.id === activeSessionId)?.name ?? ''}
+                  onSnapshotRequest={() =>
+                    snapshotCallbacks.current.get(activeSessionId)?.() ?? ''
+                  }
+                />
+              ) : (
+                <div style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  flex: 1, color: '#6b7280', fontSize: 13, padding: 40,
+                }}>
+                  请先从左侧选择一个会话
+                </div>
+              )}
+            </div>
           )}
         </div>
 
