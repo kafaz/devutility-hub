@@ -132,8 +132,14 @@ export interface SOPSubStep {
   command: string;            // 支持 ${USER_VAR} 和 ${CAPTURED_VAR} 占位符
   captureVar?: string;        // 将 stdout 保存为此变量名，后续步骤可引用
   capturePattern?: string;    // 正则表达式，取第 1 捕获组作为变量值（可选）
-  expectedNormal?: string;
-  abnormalSigns?: string;
+  // ── 输出判断正则 ──────────────────────────────────────────────────────────
+  normalRegex?: string;       // stdout 匹配此正则 → 判定正常（优先级低于 abnormalRegex）
+  abnormalRegex?: string;     // stdout 匹配此正则 → 强制判定异常（最高优先级）
+  // ── Python 脚本后处理 ────────────────────────────────────────────────────
+  scriptPath?: string;        // 本地 Python 脚本路径；proxy 执行时将 stdout 传入 stdin，
+                              // 脚本 stdout 替换原始输出并作为 captureVar 的数据源
+  expectedNormal?: string;    // 人类可读的正常特征描述（UI 提示用）
+  abnormalSigns?: string;     // 人类可读的异常特征描述（UI 提示用）
   timeoutMs?: number;
 }
 
@@ -158,6 +164,8 @@ export interface SOPCheck {
   command: string;           // 兼容旧版：若 subSteps 为空则直接执行此命令
   expectedNormal?: string;
   abnormalSigns?: string;
+  normalRegex?: string;      // 检查级正则：对聚合输出做整体判断（优先于关键词匹配）
+  abnormalRegex?: string;
   subSteps?: SOPSubStep[];   // 子步骤列表（新版，优先级高于 command）
 }
 

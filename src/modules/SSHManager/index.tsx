@@ -15,7 +15,6 @@ import {
   PlusOutlined, EditOutlined, DeleteOutlined, PlayCircleOutlined,
   StopOutlined, CheckCircleOutlined, CloseCircleOutlined,
   ClockCircleOutlined, ReloadOutlined, FolderOpenOutlined,
-  CopyOutlined,
 } from '@ant-design/icons';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
@@ -24,6 +23,7 @@ import 'xterm/css/xterm.css';
 import { useSSHStore } from './store/sshStore';
 import type { SSHProfile, PlanStepResult } from './store/sshStore';
 import { useSOPStore } from '../SOPBuilder/store/sopStore';
+import ResizableOutput from '../../components/shared/ResizableOutput';
 import { generateInstanceReport } from '../../utils';
 import { useGlobalStore } from '../../store/globalStore';
 import { useClipboard } from '../../hooks/useClipboard';
@@ -213,7 +213,7 @@ const StepRow: React.FC<{
   isCurrent: boolean;
   isDark: boolean;
 }> = ({ step, result, isCurrent, isDark }) => {
-  const { copy } = useClipboard();
+  const { copy: _copy } = useClipboard(); void _copy;
   const [expanded, setExpanded] = useState(false);
 
   const icon =
@@ -223,7 +223,9 @@ const StepRow: React.FC<{
     : result.status === 'running'? <Spin size="small" />
     : <ClockCircleOutlined style={{ color: '#6b7280' }} />;
 
-  const outputText = [result?.stdout, result?.stderr].filter(Boolean).join('\n').trimEnd();
+  // 优先展示脚本处理后的输出，其次原始输出
+  const displayOutput = result?.processedOutput ?? result?.stdout ?? '';
+  const outputText = [displayOutput, result?.stderr].filter(Boolean).join('\n').trimEnd();
 
   return (
     <div
@@ -245,9 +247,23 @@ const StepRow: React.FC<{
             <Text type="secondary" style={{ fontSize: 11 }}>{result.durationMs}ms</Text>
           )}
           {result && (
-            <Tag color={result.exitCode === 0 ? 'success' : 'error'} style={{ fontSize: 10 }}>
-              exit {result.exitCode}
-            </Tag>
+            <>
+              <Tag color={result.exitCode === 0 ? 'success' : 'error'} style={{ fontSize: 10 }}>
+                exit {result.exitCode}
+              </Tag>
+              {result.statusReason && (
+                <Tooltip title={result.statusReason}>
+                  <Tag
+                    color={result.status === 'done' ? 'green' : 'red'}
+                    style={{ fontSize: 10, cursor: 'help' }}
+                  >
+                    {result.statusReason.startsWith('正常正则') ? '✅正则' :
+                     result.statusReason.startsWith('异常正则') ? '❌正则' :
+                     result.processedOutput !== undefined ? '🐍脚本' : ''}
+                  </Tag>
+                </Tooltip>
+              )}
+            </>
           )}
         </Space>
         {outputText && (
@@ -277,26 +293,27 @@ const StepRow: React.FC<{
         </div>
       )}
 
-      {/* 输出展开区 */}
+      {/* 输出展开区（ResizableOutput：可拖拽调整高度） */}
       {expanded && outputText && (
-        <div style={{ marginTop: 6, position: 'relative' }}>
-          <pre style={{
-            margin: 0, padding: '6px 10px',
-            background: isDark ? '#1e1e1e' : '#f4f4f5',
-            borderRadius: 4, fontSize: 11,
-            fontFamily: 'JetBrains Mono, Consolas, monospace',
-            whiteSpace: 'pre-wrap', wordBreak: 'break-all',
-            maxHeight: 200, overflowY: 'auto',
-            color: result?.stderr && !result.stdout ? '#ef4444' : undefined,
-          }}>
-            {outputText}
-          </pre>
-          <Tooltip title="复制输出">
-            <CopyOutlined
-              style={{ position: 'absolute', top: 6, right: 8, color: '#a1a1aa', cursor: 'pointer' }}
-              onClick={() => copy(outputText)}
-            />
-          </Tooltip>
+        <div style={{ marginTop: 6 }}>
+          {result?.processedOutput !== undefined && result.processedOutput !== result.stdout && (
+            <Tag color="purple" style={{ fontSize: 10, marginBottom: 4 }}>
+              🐍 已经 Python 脚本处理（原始 {result.stdout?.split('\n').length ?? 0} 行 →
+              处理后 {result.processedOutput?.split('\n').length ?? 0} 行）
+            </Tag>
+          )}
+          {result?.scriptError && (
+            <Tag color="red" style={{ fontSize: 10, display: 'block', marginBottom: 4 }}>
+              ⚠️ 脚本错误：{result.scriptError}
+            </Tag>
+          )}
+          <ResizableOutput
+            content={outputText}
+            isDark={isDark}
+            minHeight={80}
+            maxHeight={500}
+            showCopy={true}
+          />
         </div>
       )}
     </div>
@@ -414,9 +431,12 @@ const SSHManager: React.FC = () => {
           planSteps.push({
             id:             ss.id,
             name:           ss.name,
-            cmd:            renderTemplate(ss.command, varValues),  // 仅替换用户填写的变量
+            cmd:            renderTemplate(ss.command, varValues),
             captureVar:     ss.captureVar,
             capturePattern: ss.capturePattern,
+            normalRegex:    ss.normalRegex,    // 正常判断正则
+            abnormalRegex:  ss.abnormalRegex,  // 异常判断正则（最高优先级）
+            scriptPath:     ss.scriptPath,     // Python 后处理脚本
             timeout:        ss.timeoutMs ?? 30000,
             checkId:        cr.checkId,
             isSubStep:      true,

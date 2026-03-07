@@ -28,6 +28,7 @@
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const { Client }          = require('ssh2');
+const { spawn }           = require('child_process');
 const cors  = require('cors');
 const http  = require('http');
 const fs    = require('fs');
@@ -58,6 +59,98 @@ function makeMarkerId() {
 
 const mkS = (id) => `===S:${id}===`;          // 开始标记
 const mkE = (id) => `===E:${id}===:`;         // 结束标记前缀
+
+/**
+ * 执行本地 Python 脚本，通过 stdin 传入数据，返回 stdout
+ *
+ * 脚本使用场景：对子步骤的原始 stdout 做二次处理
+ *   - 提取特定字段（正则/JSON解析）
+ *   - 格式转换（bytes → human-readable）
+ *   - 聚合多行输出为单一值
+ *
+ * 示例脚本（提取 PID）：
+ *   import sys, re
+ *   data = sys.stdin.read()
+ *   m = re.search(r'(\d+)', data)
+ *   print(m.group(1) if m else '', end='')
+ */
+async function runPythonScript(scriptPath, inputData, timeoutMs = 15000) {
+  return new Promise((resolve) => {
+    // 路径处理：支持 ~ 前缀
+    const resolved = scriptPath.startsWith('~')
+      ? path.join(process.env.HOME || process.env.USERPROFILE || '', scriptPath.slice(1))
+      : scriptPath;
+
+    let stdout = '';
+    let stderr = '';
+
+    // 优先使用 python3，回退 python
+    const pythonBin = process.platform === 'win32' ? 'python' : 'python3';
+    let proc;
+    try {
+      proc = spawn(pythonBin, [resolved], { stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch (e) {
+      resolve({ stdout: '', stderr: String(e), exitCode: -1 });
+      return;
+    }
+
+    proc.stdout.on('data', (d) => { stdout += d.toString(); });
+    proc.stderr.on('data', (d) => { stderr += d.toString(); });
+
+    const timer = setTimeout(() => {
+      proc.kill();
+      resolve({ stdout: stdout.trimEnd(), stderr: '[TIMEOUT] ' + stderr, exitCode: -1 });
+    }, timeoutMs);
+
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ stdout: stdout.trimEnd(), stderr: stderr.trimEnd(), exitCode: code ?? 0 });
+    });
+
+    proc.on('error', (err) => {
+      clearTimeout(timer);
+      resolve({ stdout: '', stderr: err.message, exitCode: -1 });
+    });
+
+    // 将子步骤 stdout 写入脚本 stdin
+    proc.stdin.write(inputData ?? '');
+    proc.stdin.end();
+  });
+}
+
+/**
+ * 基于正则对输出做状态判断（服务器侧，与前端 evaluateStepOutput 逻辑一致）
+ *   priority: abnormalRegex > normalRegex > exitCode
+ */
+function evalOutputStatus(stdout, opts) {
+  const text = stdout ?? '';
+
+  if (opts.abnormalRegex) {
+    try {
+      if (new RegExp(opts.abnormalRegex, 'im').test(text)) {
+        return { status: 'failed', reason: `异常正则命中: /${opts.abnormalRegex}/` };
+      }
+    } catch { /* 无效正则，跳过 */ }
+  }
+
+  if (opts.normalRegex) {
+    try {
+      const matched = new RegExp(opts.normalRegex, 'im').test(text);
+      return {
+        status: matched ? 'done' : 'failed',
+        reason: matched
+          ? `正常正则命中: /${opts.normalRegex}/`
+          : `正常正则未匹配: /${opts.normalRegex}/`,
+      };
+    } catch { /* 无效正则，跳过 */ }
+  }
+
+  // 回退：exit code
+  return {
+    status: opts.exitCode === 0 ? 'done' : 'failed',
+    reason: `exit ${opts.exitCode}`,
+  };
+}
 
 /** 构造 paramiko 等效连接配置 */
 function buildConnectConfig(msg) {
@@ -431,18 +524,40 @@ wss.on('connection', (ws) => {
           // 2. 在 Shell PTY 中执行（复用 sudo/cwd/env 状态）
           const result = await enqueueShellCmd(resolvedCmd, step.timeout || 30000);
 
-          // 3. 变量捕获
+          // 3. Python 脚本后处理（可选）
+          let processedOutput    = result.stdout;
+          let scriptResult       = undefined;
+          let scriptError        = undefined;
+
+          if (step.scriptPath) {
+            const sr = await runPythonScript(step.scriptPath, result.stdout, 15000);
+            if (sr.exitCode === 0) {
+              processedOutput = sr.stdout;
+              scriptResult    = { exitCode: sr.exitCode, stdout: sr.stdout };
+            } else {
+              scriptError = `脚本执行失败(exit ${sr.exitCode}): ${sr.stderr}`;
+              // 脚本失败时保留原始输出，不中断流程
+            }
+          }
+
+          // 4. 正则状态判断（覆盖 exit code 的默认判断）
+          const evalResult = evalOutputStatus(processedOutput, {
+            abnormalRegex: step.abnormalRegex,
+            normalRegex:   step.normalRegex,
+            exitCode:      result.exitCode,
+          });
+
+          // 5. 变量捕获（使用处理后的输出）
           let capturedVar = undefined;
-          if (step.captureVar && result.exitCode === 0) {
-            let value = result.stdout.trim();
+          if (step.captureVar && evalResult.status !== 'failed') {
+            let value = processedOutput.trim();
             if (step.capturePattern) {
               try {
                 const re = new RegExp(step.capturePattern);
-                const m  = re.exec(result.stdout);
+                const m  = re.exec(processedOutput);
                 if (m) value = m[1] !== undefined ? m[1] : m[0];
-              } catch { /* 正则无效，使用整个 stdout */ }
+              } catch { /* 无效正则，使用整个 processedOutput */ }
             }
-            // 只在值非空时写入 context
             if (value) {
               varContext[step.captureVar] = value;
               capturedVar = { name: step.captureVar, value };
@@ -450,17 +565,21 @@ wss.on('connection', (ws) => {
           }
 
           send({
-            type:       'plan_step',
+            type:            'plan_step',
             planId,
-            stepId:     step.id,
-            status:     result.exitCode === 0 ? 'done' : 'failed',
-            stdout:     result.stdout,
-            stderr:     result.stderr,
-            exitCode:   result.exitCode,
-            durationMs: result.durationMs,
-            resolvedCmd,          // 实际执行的命令（变量已替换）
-            capturedVar,          // 本步骤捕获的变量（name + value）
-            varSnapshot: { ...varContext },  // 当前累积变量快照（供前端展示）
+            stepId:          step.id,
+            status:          evalResult.status,   // 正则判断后的最终状态
+            statusReason:    evalResult.reason,   // 状态依据（方便前端展示）
+            stdout:          result.stdout,       // 原始输出
+            processedOutput: step.scriptPath ? processedOutput : undefined,
+            scriptResult,
+            scriptError,
+            stderr:          result.stderr,
+            exitCode:        result.exitCode,
+            durationMs:      result.durationMs,
+            resolvedCmd,
+            capturedVar,
+            varSnapshot:     { ...varContext },
           });
         }
 

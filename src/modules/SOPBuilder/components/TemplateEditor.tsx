@@ -1,11 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import {
   Modal, Form, Input, Select, Button, Space, Typography,
-  Table, Popconfirm, Tag, Tooltip, Collapse, Alert,
+  Table, Popconfirm, Tag, Tooltip, Collapse, Alert, Divider,
 } from 'antd';
 import {
   PlusOutlined, DeleteOutlined, HolderOutlined,
-  ImportOutlined,
+  ImportOutlined, SettingOutlined,
 } from '@ant-design/icons';
 import type { SOPTemplate, SOPCheck, SOPSubStep } from '../../../types';
 import { generateId } from '../../../utils';
@@ -75,13 +75,23 @@ const SubStepTable: React.FC<SubStepTableProps> = ({
     setPickerOpen(false);
   };
 
+  const [expandedAdvanced, setExpandedAdvanced] = useState<Set<string>>(new Set());
+
+  const toggleAdvanced = (id: string) => {
+    setExpandedAdvanced((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
   const cols = [
     {
       title: '', width: 20,
       render: () => <HolderOutlined style={{ color: '#6b7280', cursor: 'grab' }} />,
     },
     {
-      title: '子步骤名称', dataIndex: 'name', width: 140,
+      title: '子步骤名称', dataIndex: 'name', width: 130,
       render: (v: string, rec: SOPSubStep) => (
         <Input size="small" value={v}
           onChange={(e) => update(rec.id, 'name', e.target.value)}
@@ -101,48 +111,54 @@ const SubStepTable: React.FC<SubStepTableProps> = ({
       render: (v: string, rec: SOPSubStep) => (
         <Input size="small" value={v}
           onChange={(e) => update(rec.id, 'command', e.target.value)}
-          placeholder="ps aux | grep ${service_name} 或引用 ${CAPTURED_VAR}"
+          placeholder="ps aux | grep ${service_name}"
           style={{ fontFamily: 'JetBrains Mono, Consolas, monospace', fontSize: 11 }} />
       ),
     },
     {
-      title: (
-        <Tooltip title="将 stdout 保存为变量，后续子步骤可用 ${VAR_NAME} 引用">
-          <span>捕获变量 ⓘ</span>
-        </Tooltip>
-      ),
-      dataIndex: 'captureVar', width: 120,
+      title: <Tooltip title="将 stdout 保存为变量，后续步骤可用 ${VAR} 引用"><span>捕获变量 ⓘ</span></Tooltip>,
+      dataIndex: 'captureVar', width: 110,
       render: (v: string, rec: SOPSubStep) => (
         <Input size="small" value={v ?? ''}
           onChange={(e) => update(rec.id, 'captureVar', e.target.value)}
-          placeholder="如 PID, PORT"
+          placeholder="如 PID"
           style={{ fontFamily: 'JetBrains Mono, Consolas, monospace', fontSize: 11 }} />
       ),
     },
     {
-      title: (
-        <Tooltip title="正则表达式，取第 1 捕获组作为变量值。留空则保存整个 stdout.trim()">
-          <span>提取模式 ⓘ</span>
-        </Tooltip>
-      ),
-      dataIndex: 'capturePattern', width: 130,
-      render: (v: string, rec: SOPSubStep) => (
-        <Input size="small" value={v ?? ''}
-          onChange={(e) => update(rec.id, 'capturePattern', e.target.value)}
-          placeholder="如 (\d+)"
-          style={{ fontFamily: 'JetBrains Mono, Consolas, monospace', fontSize: 11 }} />
-      ),
-    },
-    {
-      title: '超时(s)', dataIndex: 'timeoutMs', width: 70,
+      title: '超时(s)', dataIndex: 'timeoutMs', width: 60,
       render: (v: number, rec: SOPSubStep) => (
-        <Input size="small" type="number" value={v ? Math.round(v / 1000) : ''}
+        <Input size="small" type="number"
+          value={v ? Math.round(v / 1000) : ''}
           onChange={(e) => update(rec.id, 'timeoutMs', parseInt(e.target.value) * 1000 || 30000)}
           placeholder="30" />
       ),
     },
     {
-      title: '', width: 36,
+      title: (
+        <Tooltip title="高级设置：输出判断正则、Python后处理脚本">
+          <span>高级 ⓘ</span>
+        </Tooltip>
+      ),
+      width: 52,
+      render: (_: unknown, rec: SOPSubStep) => {
+        const hasAdvanced = rec.normalRegex || rec.abnormalRegex || rec.scriptPath || rec.capturePattern;
+        return (
+          <Tooltip title={expandedAdvanced.has(rec.id) ? '收起高级设置' : '展开高级设置（正则判断/Python脚本）'}>
+            <SettingOutlined
+              onClick={() => toggleAdvanced(rec.id)}
+              style={{
+                color:    hasAdvanced ? '#3b82f6' : '#a1a1aa',
+                cursor:   'pointer',
+                fontSize: 14,
+              }}
+            />
+          </Tooltip>
+        );
+      },
+    },
+    {
+      title: '', width: 32,
       render: (_: unknown, rec: SOPSubStep) => (
         <Popconfirm title="删除此子步骤？" onConfirm={() => remove(rec.id)}
           okText="删除" cancelText="取消" okButtonProps={{ danger: true }}>
@@ -181,8 +197,93 @@ const SubStepTable: React.FC<SubStepTableProps> = ({
         rowKey="id"
         size="small"
         pagination={false}
-        scroll={{ x: 760 }}
+        scroll={{ x: 700 }}
         locale={{ emptyText: '暂无子步骤，点击「添加」创建或从其他 SOP 导入' }}
+        expandable={{
+          expandedRowKeys: [...expandedAdvanced],
+          showExpandColumn: false,
+          expandedRowRender: (rec: SOPSubStep) => (
+            <div
+              style={{
+                padding: '10px 12px',
+                background: 'rgba(59,130,246,0.04)',
+                border: '1px solid rgba(59,130,246,0.15)',
+                borderRadius: 6,
+                margin: '4px 0',
+              }}
+            >
+              <Text strong style={{ fontSize: 12, display: 'block', marginBottom: 8 }}>
+                ⚙ 高级设置：{rec.name}
+              </Text>
+
+              {/* 输出判断正则 */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 12px', marginBottom: 10 }}>
+                <div>
+                  <Tooltip title="stdout 匹配此正则 → 判定正常。若同时定义了异常正则，异常正则优先。">
+                    <Text style={{ fontSize: 11 }}>✅ 正常判断正则 ⓘ</Text>
+                  </Tooltip>
+                  <Input
+                    size="small"
+                    value={rec.normalRegex ?? ''}
+                    onChange={(e) => update(rec.id, 'normalRegex', e.target.value)}
+                    placeholder="如 .*LISTEN.* 或 pid=\d+"
+                    style={{ fontFamily: 'JetBrains Mono, Consolas, monospace', fontSize: 11, marginTop: 2 }}
+                  />
+                </div>
+                <div>
+                  <Tooltip title="stdout 匹配此正则 → 强制判定异常（最高优先级，覆盖 exit code 和正常正则）">
+                    <Text style={{ fontSize: 11 }}>❌ 异常判断正则 ⓘ</Text>
+                  </Tooltip>
+                  <Input
+                    size="small"
+                    value={rec.abnormalRegex ?? ''}
+                    onChange={(e) => update(rec.id, 'abnormalRegex', e.target.value)}
+                    placeholder="如 OOM|Exception|FATAL"
+                    style={{ fontFamily: 'JetBrains Mono, Consolas, monospace', fontSize: 11, marginTop: 2 }}
+                  />
+                </div>
+              </div>
+
+              <Divider style={{ margin: '8px 0' }} />
+
+              {/* 捕获提取正则 */}
+              <div style={{ marginBottom: 10 }}>
+                <Tooltip title="从 stdout 提取变量值的正则（取第 1 捕获组）。留空则保存整个 stdout.trim()">
+                  <Text style={{ fontSize: 11 }}>🔍 变量提取正则 ⓘ</Text>
+                </Tooltip>
+                <Input
+                  size="small"
+                  value={rec.capturePattern ?? ''}
+                  onChange={(e) => update(rec.id, 'capturePattern', e.target.value)}
+                  placeholder="如 (\d+) 提取数字，或 pid=(\S+)"
+                  style={{ fontFamily: 'JetBrains Mono, Consolas, monospace', fontSize: 11, marginTop: 2, width: '50%' }}
+                />
+              </div>
+
+              <Divider style={{ margin: '8px 0' }} />
+
+              {/* Python 脚本后处理 */}
+              <div>
+                <Tooltip title="proxy 服务器本地的 Python 脚本路径。脚本通过 stdin 接收子步骤 stdout，脚本的 stdout 将替换原始输出，并作为捕获变量的数据源。留空则不处理。">
+                  <Text style={{ fontSize: 11 }}>🐍 Python 后处理脚本路径 ⓘ</Text>
+                </Tooltip>
+                <Input
+                  size="small"
+                  value={rec.scriptPath ?? ''}
+                  onChange={(e) => update(rec.id, 'scriptPath', e.target.value)}
+                  placeholder="/path/to/process_output.py 或 ~/scripts/parser.py"
+                  style={{ fontFamily: 'JetBrains Mono, Consolas, monospace', fontSize: 11, marginTop: 2 }}
+                />
+                {rec.scriptPath && (
+                  <Alert
+                    type="info" showIcon={false} style={{ marginTop: 4, fontSize: 11 }}
+                    message="脚本示例：import sys; data=sys.stdin.read(); print(data.split()[1])"
+                  />
+                )}
+              </div>
+            </div>
+          ),
+        }}
       />
 
       <Space style={{ marginTop: 8 }}>

@@ -9,7 +9,7 @@
  *   4. 结果实时写入 SOPInstance，最终一键导出报告
  */
 
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   Modal,
   Button,
@@ -37,6 +37,7 @@ import type { SOPInstance, SOPTemplate, SOPCheckResult } from '../../../types';
 import { useClipboard } from '../../../hooks/useClipboard';
 import { generateInstanceReport } from '../../../utils';
 import { useGlobalStore } from '../../../store/globalStore';
+import { evaluateStepOutput } from '../../../utils';
 
 const { Text, Title } = Typography;
 const { TextArea } = Input;
@@ -46,49 +47,63 @@ type StepStatus = SOPCheckResult['status'];
 // ─── 输出智能分析 ──────────────────────────────────────────────────────────
 
 /**
- * 根据粘贴的输出内容与模板中的正常/异常特征进行关键词匹配，
- * 返回建议状态及匹配到的线索，供用户参考（不强制覆盖用户判断）
+ * 分析输出内容，返回建议状态：
+ *   1. 优先使用正则（normalRegex / abnormalRegex）精确判断
+ *   2. 回退到关键词模糊匹配（expectedNormal / abnormalSigns 文本描述）
+ *   3. 最终回退：无任何依据 → null
  */
 function analyzeOutput(
   output: string,
-  expectedNormal?: string,
-  abnormalSigns?: string
+  opts: {
+    normalRegex?:   string;
+    abnormalRegex?: string;
+    expectedNormal?: string;
+    abnormalSigns?:  string;
+  }
 ): { suggestion: StepStatus | null; hints: string[] } {
   if (!output.trim()) {
-    // 空输出：若异常特征中提到"无输出"，建议异常
-    if (abnormalSigns && /无输出|empty|no output/i.test(abnormalSigns)) {
+    if (opts.abnormalSigns && /无输出|empty|no output/i.test(opts.abnormalSigns)) {
       return { suggestion: 'abnormal', hints: ['输出为空，与异常特征"无输出"匹配'] };
     }
     return { suggestion: null, hints: [] };
   }
 
+  // ① 正则判断（精确，优先）
+  const regexResult = evaluateStepOutput(output, {
+    normalRegex:   opts.normalRegex,
+    abnormalRegex: opts.abnormalRegex,
+  });
+  if (regexResult.status !== null) {
+    return {
+      suggestion: regexResult.status,
+      hints:      [regexResult.reason],
+    };
+  }
+
+  // ② 关键词模糊匹配（回退）
   const lowerOut = output.toLowerCase();
   const hints: string[] = [];
 
-  // 从异常特征中提取关键词（以分号、逗号、换行分割）
-  const abnormalKeywords = (abnormalSigns ?? '')
+  const abnKws = (opts.abnormalSigns ?? '')
     .split(/[;；,，\n]/)
-    .map((s) => s.replace(/^[-*✅❌\s]+/, '').trim())
+    .map((s) => s.replace(/^[-*✅❌\s]+/, '').replace(/[=：:（(].+/, '').trim().toLowerCase())
     .filter((s) => s.length > 2 && s.length < 40);
 
-  for (const kw of abnormalKeywords) {
-    const cleanKw = kw.replace(/[=：:（(].+/, '').trim().toLowerCase();
-    if (cleanKw && lowerOut.includes(cleanKw)) {
-      hints.push(`输出含异常关键词：「${cleanKw}」`);
+  for (const kw of abnKws) {
+    if (lowerOut.includes(kw)) {
+      hints.push(`含异常关键词：「${kw}」`);
       return { suggestion: 'abnormal', hints };
     }
   }
 
-  // 从正常特征中提取关键词
-  const normalKeywords = (expectedNormal ?? '')
+  const norKws = (opts.expectedNormal ?? '')
     .split(/[;；,，\n]/)
-    .map((s) => s.replace(/^[-*✅❌\s]+/, '').trim())
+    .map((s) => s.replace(/^[-*✅❌\s]+/, '').replace(/[=：:（(].+/, '').trim().toLowerCase())
     .filter((s) => s.length > 2 && s.length < 40);
 
-  for (const kw of normalKeywords) {
-    const cleanKw = kw.replace(/[=：:（(].+/, '').trim().toLowerCase();
-    if (cleanKw && lowerOut.includes(cleanKw)) {
-      hints.push(`输出含正常特征关键词：「${cleanKw}」`);
+  for (const kw of norKws) {
+    if (lowerOut.includes(kw)) {
+      hints.push(`含正常关键词：「${kw}」`);
       return { suggestion: 'normal', hints };
     }
   }
@@ -117,24 +132,25 @@ const StepCard: React.FC<StepCardProps> = ({
 }) => {
   const { copy, copied } = useClipboard();
   const [messageApi, ctx] = message.useMessage();
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const analysisOpts = {
+    normalRegex:    templateCheck?.normalRegex,
+    abnormalRegex:  templateCheck?.abnormalRegex,
+    expectedNormal: templateCheck?.expectedNormal,
+    abnormalSigns:  templateCheck?.abnormalSigns,
+  };
 
-  const analysis = analyzeOutput(
-    result.output,
-    templateCheck?.expectedNormal,
-    templateCheck?.abnormalSigns
-  );
+  const analysis = analyzeOutput(result.output, analysisOpts);
 
   // 粘贴输出时自动触发分析并建议状态
   const handleOutputChange = useCallback(
     (val: string) => {
       onUpdate({ output: val });
-      // 如果状态还是 pending，用分析结果自动建议
       if (result.status === 'pending' && val.trim()) {
-        const { suggestion } = analyzeOutput(val, templateCheck?.expectedNormal, templateCheck?.abnormalSigns);
+        const { suggestion } = analyzeOutput(val, analysisOpts);
         if (suggestion) onUpdate({ status: suggestion, output: val });
       }
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [result.status, templateCheck, onUpdate]
   );
 
@@ -263,16 +279,21 @@ const StepCard: React.FC<StepCardProps> = ({
         </div>
       )}
 
-      {/* ② 粘贴输出区 */}
+      {/* ② 粘贴输出区（可拖拽调整高度） */}
       <Card
         size="small"
-        title={<Text strong style={{ fontSize: 13 }}>② 粘贴命令输出</Text>}
+        title={
+          <Space size={6}>
+            <Text strong style={{ fontSize: 13 }}>② 粘贴命令输出</Text>
+            {(analysisOpts.normalRegex || analysisOpts.abnormalRegex) && (
+              <Tag color="blue" style={{ fontSize: 10 }}>已配置正则判断</Tag>
+            )}
+          </Space>
+        }
         style={{ background: cardBg, border: `1px solid ${borderColor}` }}
       >
+        {/* 输入模式：可编辑 textarea + 拖拽柄 */}
         <TextArea
-          ref={(el) => {
-            if (el) textareaRef.current = el.resizableTextArea?.textArea ?? null;
-          }}
           rows={6}
           value={result.output}
           onChange={(e) => handleOutputChange(e.target.value)}
@@ -281,32 +302,32 @@ const StepCard: React.FC<StepCardProps> = ({
             fontFamily: 'JetBrains Mono, Fira Code, Consolas, monospace',
             fontSize: 12,
             background: isDark ? '#1e1e1e' : '#f8f8f8',
-            resize: 'vertical',
+            resize:     'vertical',
+            minHeight:  80,
           }}
         />
 
-        {/* 智能分析结果 */}
+        {/* 自动分析结果 */}
         {result.output.trim() && analysis.hints.length > 0 && (
-          <div style={{ marginTop: 8 }}>
-            <Alert
-              type={
-                analysis.suggestion === 'normal'   ? 'success'
-              : analysis.suggestion === 'abnormal' ? 'error'
-              : 'info'
-              }
-              showIcon
-              message={
-                <span style={{ fontSize: 12 }}>
-                  <b>自动分析：</b>{analysis.hints.join('；')}
-                  {analysis.suggestion && (
-                    <span style={{ marginLeft: 8, fontWeight: 600 }}>
-                      建议标记为「{analysis.suggestion === 'normal' ? '正常' : '异常'}」
-                    </span>
-                  )}
-                </span>
-              }
-            />
-          </div>
+          <Alert
+            style={{ marginTop: 8 }}
+            type={
+              analysis.suggestion === 'normal'   ? 'success'
+            : analysis.suggestion === 'abnormal' ? 'error'
+            : 'info'
+            }
+            showIcon
+            message={
+              <span style={{ fontSize: 12 }}>
+                <b>自动分析：</b>{analysis.hints.join('；')}
+                {analysis.suggestion && (
+                  <span style={{ marginLeft: 8, fontWeight: 600 }}>
+                    → 建议「{analysis.suggestion === 'normal' ? '正常' : '异常'}」
+                  </span>
+                )}
+              </span>
+            }
+          />
         )}
       </Card>
 

@@ -33,14 +33,16 @@ export interface SSHProfile {
 
 export interface PlanStep {
   id:             string;
-  cmd:            string;          // 原始命令（可含 ${VAR} 占位符）
+  cmd:            string;
   name:           string;
-  captureVar?:    string;          // 将 stdout 捕获为此变量名
-  capturePattern?: string;         // 正则，取第 1 组
+  captureVar?:    string;
+  capturePattern?: string;
+  normalRegex?:   string;    // 正常判断正则（传给 server evalOutputStatus）
+  abnormalRegex?: string;    // 异常判断正则（最高优先级）
+  scriptPath?:    string;    // Python 后处理脚本路径
   timeout?:       number;
-  // 元信息（用于结果回写到 SOPInstance）
-  checkId?:       string;          // 所属检查步骤 ID
-  isSubStep?:     boolean;         // true = 是子步骤，false = 检查步骤兜底命令
+  checkId?:       string;
+  isSubStep?:     boolean;
 }
 
 export type PlanStepStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped';
@@ -52,9 +54,12 @@ export interface PlanStepResult {
   stderr:       string;
   exitCode:     number;
   durationMs:   number;
-  resolvedCmd?: string;                              // 变量替换后的实际命令
-  capturedVar?: { name: string; value: string };     // 本步骤捕获的变量
-  varSnapshot?: Record<string, string>;              // 执行后累积的全局变量快照
+  resolvedCmd?:     string;
+  capturedVar?:     { name: string; value: string };
+  varSnapshot?:     Record<string, string>;
+  statusReason?:    string;     // 正则命中原因 / exit code 说明
+  processedOutput?: string;     // Python 脚本处理后的输出
+  scriptError?:     string;     // 脚本失败错误信息
 }
 
 export interface ExecPlan {
@@ -237,15 +242,18 @@ export const useSSHStore = create<SSHStore>()(
                 const results = {
                   ...s.currentPlan.results,
                   [m.stepId as string]: {
-                    stepId:      m.stepId     as string,
-                    status:      m.status     as PlanStepStatus,
-                    stdout:      (m.stdout     as string) ?? '',
-                    stderr:      (m.stderr     as string) ?? '',
-                    exitCode:    (m.exitCode   as number) ?? 0,
-                    durationMs:  (m.durationMs as number) ?? 0,
-                    resolvedCmd: (m.resolvedCmd as string) ?? undefined,
-                    capturedVar: m.capturedVar as { name: string; value: string } | undefined,
-                    varSnapshot: m.varSnapshot as Record<string, string> | undefined,
+                    stepId:          m.stepId         as string,
+                    status:          m.status         as PlanStepStatus,
+                    stdout:          (m.stdout         as string) ?? '',
+                    stderr:          (m.stderr         as string) ?? '',
+                    exitCode:        (m.exitCode       as number) ?? 0,
+                    durationMs:      (m.durationMs     as number) ?? 0,
+                    resolvedCmd:     (m.resolvedCmd    as string) ?? undefined,
+                    capturedVar:     m.capturedVar     as { name: string; value: string } | undefined,
+                    varSnapshot:     m.varSnapshot     as Record<string, string> | undefined,
+                    statusReason:    (m.statusReason   as string) ?? undefined,
+                    processedOutput: (m.processedOutput as string) ?? undefined,
+                    scriptError:     (m.scriptError    as string) ?? undefined,
                   },
                 };
                 return { currentPlan: { ...s.currentPlan, results } };

@@ -605,6 +605,66 @@ export function generateMarkdownReport(params: {
   return `# 故障排查报告：${title}\n\n> 排查时间：${incidentTime}\n\n## 一、排查步骤\n\n${stepsSection}\n\n## 二、诊断结论\n\n### 故障现象\n\n${diagnosis.phenomenon || '（未填写）'}\n\n### 根因分析\n\n${diagnosis.rootCause || '（未填写）'}\n\n### 解决方案\n\n${diagnosis.solution || '（未填写）'}\n\n### 预防措施\n\n${diagnosis.prevention || '（未填写）'}\n\n---\n\n*由 DevUtility Hub SOP 工具生成*\n`;
 }
 
+/**
+ * 统一的步骤输出判断函数
+ *
+ * 优先级：
+ *   1. abnormalRegex 匹配 → 强制异常（无论 exit code）
+ *   2. normalRegex   匹配 → 正常
+ *   3. normalRegex   存在但未匹配 → 异常（期望匹配但没有）
+ *   4. exit code 0   → 正常，非 0 → 异常
+ *   5. 无任何信息    → null（由调用方决定）
+ */
+export function evaluateStepOutput(
+  output: string,
+  opts: {
+    normalRegex?:   string;
+    abnormalRegex?: string;
+    exitCode?:      number;
+  }
+): { status: 'normal' | 'abnormal' | null; reason: string } {
+  const text = output ?? '';
+
+  // ① 异常正则优先（最高优先级）
+  if (opts.abnormalRegex) {
+    try {
+      if (new RegExp(opts.abnormalRegex, 'im').test(text)) {
+        return {
+          status: 'abnormal',
+          reason: `异常正则命中: /${opts.abnormalRegex}/`,
+        };
+      }
+    } catch {
+      // 无效正则：跳过
+    }
+  }
+
+  // ② 正常正则
+  if (opts.normalRegex) {
+    try {
+      const matched = new RegExp(opts.normalRegex, 'im').test(text);
+      return {
+        status: matched ? 'normal' : 'abnormal',
+        reason: matched
+          ? `正常正则命中: /${opts.normalRegex}/`
+          : `正常正则未匹配: /${opts.normalRegex}/`,
+      };
+    } catch {
+      // 无效正则：跳过
+    }
+  }
+
+  // ③ exit code 回退
+  if (opts.exitCode !== undefined) {
+    return {
+      status: opts.exitCode === 0 ? 'normal' : 'abnormal',
+      reason: `exit ${opts.exitCode}`,
+    };
+  }
+
+  return { status: null, reason: '无判断依据' };
+}
+
 // 导出 JSON 数据为文件下载
 export function downloadJSON(data: unknown, filename: string): void {
   const blob = new Blob([JSON.stringify(data, null, 2)], {
