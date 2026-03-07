@@ -315,36 +315,23 @@ const CheckCard: React.FC<{
             </div>
           )}
 
-          {/* 命令输出区（可拖拽调整高度 / 可编辑粘贴） */}
-          {result.output ? (
-            <div style={{ marginBottom: 6 }}>
-              <ResizableOutput
-                content={result.output}
-                isDark={isDark}
-                minHeight={60}
-                maxHeight={500}
-                highlights={
-                  templateCheck?.abnormalRegex
-                    ? [{ pattern: templateCheck.abnormalRegex, color: 'rgba(239,68,68,0.2)', label: '异常' }]
-                    : []
-                }
-              />
-            </div>
-          ) : (
-            <TextArea
-              rows={3}
-              value={result.output}
-              onChange={(e) => onUpdate({ output: e.target.value })}
-              placeholder="粘贴命令输出结果..."
-              style={{
-                fontFamily: 'JetBrains Mono, Fira Code, Consolas, monospace',
-                fontSize: 11,
-                marginBottom: 6,
-                background: isDark ? '#1e1e1e' : '#fafafa',
-                resize: 'vertical',
-              }}
+          {/* 命令输出区 — 统一使用 ResizableOutput（支持编辑粘贴 + 底部拖拽展开） */}
+          <div style={{ marginBottom: 6 }}>
+            <ResizableOutput
+              content={result.output}
+              isDark={isDark}
+              minHeight={80}
+              maxHeight={600}
+              showCopy={!!result.output}
+              onChange={(val) => onUpdate({ output: val })}
+              placeholder="粘贴命令输出结果（向下拖拽底部柄可展开更多行）..."
+              highlights={
+                templateCheck?.abnormalRegex && result.output
+                  ? [{ pattern: templateCheck.abnormalRegex, color: 'rgba(239,68,68,0.2)', label: '异常' }]
+                  : []
+              }
             />
-          )}
+          </div>
 
           {/* 分析结论 */}
           <Input

@@ -35,12 +35,11 @@ import {
 } from '@ant-design/icons';
 import type { SOPInstance, SOPTemplate, SOPCheckResult } from '../../../types';
 import { useClipboard } from '../../../hooks/useClipboard';
-import { generateInstanceReport } from '../../../utils';
+import { generateInstanceReport, evaluateStepOutput } from '../../../utils';
 import { useGlobalStore } from '../../../store/globalStore';
-import { evaluateStepOutput } from '../../../utils';
+import ResizableOutput from '../../../components/shared/ResizableOutput';
 
 const { Text, Title } = Typography;
-const { TextArea } = Input;
 
 type StepStatus = SOPCheckResult['status'];
 
@@ -292,19 +291,15 @@ const StepCard: React.FC<StepCardProps> = ({
         }
         style={{ background: cardBg, border: `1px solid ${borderColor}` }}
       >
-        {/* 输入模式：可编辑 textarea + 拖拽柄 */}
-        <TextArea
-          rows={6}
-          value={result.output}
-          onChange={(e) => handleOutputChange(e.target.value)}
-          placeholder="在终端执行命令后，将输出结果粘贴到这里（Ctrl+A 全选 → Ctrl+C 复制）"
-          style={{
-            fontFamily: 'JetBrains Mono, Fira Code, Consolas, monospace',
-            fontSize: 12,
-            background: isDark ? '#1e1e1e' : '#f8f8f8',
-            resize:     'vertical',
-            minHeight:  80,
-          }}
+        {/* 输出区：可编辑粘贴 + 底部拖拽柄（向下拖动查看更多日志行） */}
+        <ResizableOutput
+          content={result.output}
+          isDark={isDark}
+          minHeight={100}
+          maxHeight={600}
+          showCopy={!!result.output}
+          onChange={handleOutputChange}
+          placeholder="在终端执行命令后，将输出结果粘贴到这里（Ctrl+A 全选 → Ctrl+C 复制，向下拖拽底部柄展开更多行）"
         />
 
         {/* 自动分析结果 */}
