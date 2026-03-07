@@ -665,6 +665,127 @@ export function evaluateStepOutput(
   return { status: null, reason: '无判断依据' };
 }
 
+// ======================== 多节点故障报告 ========================
+
+export interface NodeReportData {
+  sessionName:      string;
+  host?:            string;
+  instanceTitle:    string;
+  templateName:     string;
+  status:           'done' | 'failed' | 'pending' | 'running';
+  steps: Array<{
+    name:        string;
+    command:     string;
+    stdout:      string;
+    stderr:      string;
+    exitCode:    number;
+    durationMs:  number;
+    statusReason?: string;
+    capturedVar?: { name: string; value: string };
+  }>;
+  finalVarContext?: Record<string, string>;
+}
+
+/**
+ * 将多节点执行结果导出为 Markdown 格式报告
+ *
+ * 结构：
+ *   1. 执行摘要表格（节点 × 状态 × 异常数 × 耗时）
+ *   2. 每个节点的详细步骤执行记录
+ *   3. 各节点捕获的变量汇总
+ */
+export function generateMultiNodeReport(params: {
+  runId:    string;
+  mode:     'broadcast' | 'targeted';
+  startedAt: number;
+  nodes:    NodeReportData[];
+}): string {
+  const { mode, startedAt, nodes } = params;
+
+  const modeLabel = mode === 'broadcast' ? '广播模式（所有节点执行相同 SOP）' : '定向模式（各节点独立 SOP）';
+  const startTime = new Date(startedAt).toLocaleString('zh-CN');
+
+  const statusEmoji: Record<string, string> = {
+    done: '✅', failed: '❌', running: '⏳', pending: '⏸️',
+  };
+  const statusLabel: Record<string, string> = {
+    done: '正常', failed: '异常', running: '执行中', pending: '未执行',
+  };
+
+  // 摘要表格
+  const summaryRows = nodes
+    .map((n) => {
+      const abnormal = n.steps.filter((s) => s.exitCode !== 0).length;
+      const totalMs  = n.steps.reduce((acc, s) => acc + (s.durationMs ?? 0), 0);
+      return `| ${n.sessionName} | ${n.instanceTitle} | ${statusEmoji[n.status]} ${statusLabel[n.status]} | ${abnormal} | ${(totalMs / 1000).toFixed(2)}s |`;
+    })
+    .join('\n');
+
+  // 每个节点详情
+  const nodeDetails = nodes
+    .map((n) => {
+      const abnormal = n.steps.filter((s) => s.exitCode !== 0).length;
+      const stepsSection = n.steps
+        .map((s, i) => {
+          const emoji   = s.exitCode === 0 ? '✅' : '❌';
+          const reason  = s.statusReason ? ` _(${s.statusReason})_` : '';
+          const capVar  = s.capturedVar ? `\n> 🔵 已捕获 \`\${${s.capturedVar.name}}\` = \`${s.capturedVar.value}\`` : '';
+          return (
+            `#### ${emoji} 步骤 ${i + 1}：${s.name}${reason}\n\n` +
+            `**命令**\n\`\`\`bash\n${s.command}\n\`\`\`\n\n` +
+            (s.stdout ? `**输出**\n\`\`\`\n${s.stdout.slice(0, 2000)}${s.stdout.length > 2000 ? '\n...(截断)' : ''}\n\`\`\`\n` : '') +
+            (s.stderr ? `**错误**\n\`\`\`\n${s.stderr.slice(0, 500)}\n\`\`\`\n` : '') +
+            capVar
+          );
+        })
+        .join('\n---\n\n');
+
+      const varSection = n.finalVarContext && Object.keys(n.finalVarContext).length > 0
+        ? '\n#### 捕获变量汇总\n\n' +
+          Object.entries(n.finalVarContext)
+            .map(([k, v]) => `- \`\${${k}}\` = \`${v}\``)
+            .join('\n')
+        : '';
+
+      return (
+        `### ${statusEmoji[n.status]} ${n.sessionName}${n.host ? ` (${n.host})` : ''}\n\n` +
+        `> **SOP**：${n.instanceTitle} · **模板**：${n.templateName}\n` +
+        `> **状态**：${statusLabel[n.status]}，异常步骤 **${abnormal}** 项\n\n` +
+        stepsSection +
+        varSection
+      );
+    })
+    .join('\n\n---\n\n');
+
+  return `# 多节点故障排查报告
+
+## 执行概况
+
+| 项目 | 值 |
+|------|-----|
+| 执行时间 | ${startTime} |
+| 执行模式 | ${modeLabel} |
+| 节点数量 | ${nodes.length} |
+| 正常节点 | ${nodes.filter((n) => n.status === 'done').length} |
+| 异常节点 | ${nodes.filter((n) => n.status === 'failed').length} |
+
+## 节点摘要
+
+| 节点 | SOP 实例 | 状态 | 异常步骤 | 总耗时 |
+|------|---------|------|---------|--------|
+${summaryRows}
+
+## 节点详情
+
+${nodeDetails}
+
+---
+
+> 由 **DevUtility Hub · SSH Manager 多节点执行** 生成  
+> 生成时间：${new Date().toLocaleString('zh-CN')}
+`;
+}
+
 // 导出 JSON 数据为文件下载
 export function downloadJSON(data: unknown, filename: string): void {
   const blob = new Blob([JSON.stringify(data, null, 2)], {

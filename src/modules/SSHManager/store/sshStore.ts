@@ -1,23 +1,27 @@
 /**
- * SSH Manager Store
+ * SSH Manager Store — 多会话版本
  *
- * 认证模型对应 paramiko:
- *   authType: 'privateKey'  → key_filename + passphrase
- *   authType: 'password'    → username + password
- *   authType: 'agent'       → SSH Agent socket
+ * 架构设计：
+ *   - sessions[]: 每个 SSH 会话的元数据（持久化，不含凭证）
+ *   - runtimes Map: 每个会话的运行时状态（WebSocket、回调、不序列化）
+ *   - 一个会话 = 一个 WebSocket 连接 = 一个 SSH Shell PTY
+ *   - SOP 命令通过对应会话的 Shell PTY 执行（复用用户预处理的 Shell 状态）
  *
- * exec_plan: 对应 SOP 自动批量执行，每步独立 exec 通道，
- * 实时推送进度事件到前端，完成后结果写入 SOPInstance。
+ * 多节点执行：
+ *   - startMultiNodeRun: 并行向多个会话发送 exec_plan
+ *   - 每个会话的 plan_step 事件实时更新 multiNodeRun.nodeExecutions
+ *   - 支持 broadcast（所有节点执行同一 SOP）和 targeted（每节点独立 SOP）
  */
-
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { generateId } from '../../../utils';
 
 // ─── 类型定义 ──────────────────────────────────────────────────────────────
 
-export type AuthType = 'privateKey' | 'password' | 'agent';
-export type ConnStatus = 'idle' | 'connecting' | 'connected' | 'error' | 'disconnected';
+export type AuthType    = 'privateKey' | 'password' | 'agent';
+export type ConnStatus  = 'idle' | 'connecting' | 'connected' | 'error' | 'disconnected';
+export type RunMode     = 'broadcast' | 'targeted';
+export type PlanStepStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped';
 
 export interface SSHProfile {
   id: string;
@@ -26,50 +30,94 @@ export interface SSHProfile {
   port: number;
   username: string;
   authType: AuthType;
-  keyFilePath?: string;   // 私钥文件路径（等同 paramiko key_filename）
-  // passphrase / password 不持久化，每次连接时填入
+  keyFilePath?: string;
   createdAt: number;
 }
 
-export interface PlanStep {
-  id:             string;
-  cmd:            string;
-  name:           string;
-  captureVar?:    string;
-  capturePattern?: string;
-  normalRegex?:   string;    // 正常判断正则（传给 server evalOutputStatus）
-  abnormalRegex?: string;    // 异常判断正则（最高优先级）
-  scriptPath?:    string;    // Python 后处理脚本路径
-  timeout?:       number;
-  checkId?:       string;
-  isSubStep?:     boolean;
+// 一个命名的 SSH 会话（对应一个 WebSocket 连接）
+export interface SSHSession {
+  id: string;
+  name: string;          // 用户自定义会话名称，如 "主节点-01" / "从节点-DB"
+  profileId: string;     // 使用哪个连接档案
+  status: ConnStatus;
+  statusMsg: string;
+  connectedAt?: number;
 }
 
-export type PlanStepStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped';
+export interface PlanStep {
+  id: string;
+  cmd: string;
+  name: string;
+  captureVar?:     string;
+  capturePattern?: string;
+  normalRegex?:    string;
+  abnormalRegex?:  string;
+  scriptPath?:     string;
+  timeout?:        number;
+  checkId?:        string;
+  isSubStep?:      boolean;
+}
 
 export interface PlanStepResult {
-  stepId:       string;
-  status:       PlanStepStatus;
-  stdout:       string;
-  stderr:       string;
-  exitCode:     number;
-  durationMs:   number;
+  stepId:           string;
+  status:           PlanStepStatus;
+  stdout:           string;
+  stderr:           string;
+  exitCode:         number;
+  durationMs:       number;
   resolvedCmd?:     string;
   capturedVar?:     { name: string; value: string };
   varSnapshot?:     Record<string, string>;
-  statusReason?:    string;     // 正则命中原因 / exit code 说明
-  processedOutput?: string;     // Python 脚本处理后的输出
-  scriptError?:     string;     // 脚本失败错误信息
+  statusReason?:    string;
+  processedOutput?: string;
+  scriptError?:     string;
 }
 
-export interface ExecPlan {
-  id:        string;
-  steps:     PlanStep[];
-  results:   Record<string, PlanStepResult>;
-  status:    'idle' | 'running' | 'done' | 'aborted';
-  startedAt?: number;
-  doneAt?:    number;
-  finalVarContext?: Record<string, string>;           // plan 完成后的全量变量表
+// 单个节点的执行结果
+export interface NodeExecution {
+  sessionId:       string;
+  sessionName:     string;
+  instanceId:      string;   // SOPInstance ID
+  instanceTitle?:  string;   // 快照标题
+  templateName?:   string;   // 快照模板名
+  steps:           PlanStep[];
+  results:         Record<string, PlanStepResult>;
+  status:          'pending' | 'running' | 'done' | 'failed';
+  startedAt?:      number;
+  doneAt?:         number;
+  finalVarContext?: Record<string, string>;
+}
+
+// 多节点执行计划
+export interface MultiNodeRun {
+  id:               string;
+  mode:             RunMode;
+  nodeExecutions:   NodeExecution[];
+  startedAt:        number;
+  doneAt?:          number;
+}
+
+// ─── 运行时状态（不序列化，不放 Zustand） ─────────────────────────────────
+
+interface SessionRuntime {
+  ws:              WebSocket | null;
+  onTermData:      ((b64: string) => void) | null;
+  execResolvers:   Map<string, (r: { stdout: string; stderr: string; exitCode: number; durationMs: number }) => void>;
+  planNodeResolve: (() => void) | null;  // resolve 单个节点的 plan 完成
+  planAborted:     boolean;
+}
+
+const runtimes = new Map<string, SessionRuntime>();
+
+function getRT(sessionId: string): SessionRuntime {
+  if (!runtimes.has(sessionId)) {
+    runtimes.set(sessionId, {
+      ws: null, onTermData: null,
+      execResolvers: new Map(),
+      planNodeResolve: null, planAborted: false,
+    });
+  }
+  return runtimes.get(sessionId)!;
 }
 
 // ─── 常量 ──────────────────────────────────────────────────────────────────
@@ -80,98 +128,206 @@ const PROXY_WS   = 'ws://127.0.0.1:3001/terminal';
 // ─── Store ─────────────────────────────────────────────────────────────────
 
 interface SSHStore {
-  // 连接档案（持久化，不含密码/passphrase）
+  // 连接档案（持久化）
   profiles:       SSHProfile[];
-  activeProfileId: string | null;
   addProfile:     (p: Omit<SSHProfile, 'id' | 'createdAt'>) => string;
   updateProfile:  (id: string, p: Partial<SSHProfile>) => void;
   deleteProfile:  (id: string) => void;
-  setActiveProfile: (id: string | null) => void;
 
-  // 代理服务状态
-  proxyOnline:  boolean;
-  checkProxy:   () => Promise<void>;
+  // 命名会话（持久化元数据）
+  sessions:         SSHSession[];
+  activeSessionId:  string | null;
+  addSession:       (name: string, profileId: string) => string;
+  removeSession:    (sessionId: string) => void;
+  renameSession:    (sessionId: string, name: string) => void;
+  setActiveSession: (id: string | null) => void;
 
-  // 当前连接状态
-  status:    ConnStatus;
-  statusMsg: string;
-  ws:        WebSocket | null;
+  // 代理健康检查
+  proxyOnline: boolean;
+  checkProxy:  () => Promise<void>;
 
-  // 终端数据回调（由 TerminalPanel 注入）
-  onTermData: ((b64: string) => void) | null;
-  setOnTermData: (fn: ((b64: string) => void) | null) => void;
+  // 每会话连接操作
+  connectSession:         (sessionId: string, params: { passphrase?: string; password?: string; agent?: string; cols?: number; rows?: number }) => void;
+  disconnectSession:      (sessionId: string) => void;
+  sendInputToSession:     (sessionId: string, data: string) => void;
+  resizeSession:          (sessionId: string, cols: number, rows: number) => void;
+  setSessionTermCallback: (sessionId: string, cb: ((b64: string) => void) | null) => void;
 
-  // 执行计划
-  currentPlan: ExecPlan | null;
+  // 单会话命令执行（exec 通道，独立环境）
+  execCommandOnSession: (sessionId: string, cmd: string, timeout?: number) => Promise<{ stdout: string; stderr: string; exitCode: number; durationMs: number }>;
 
-  // 单条命令历史（exec 通道）
-  execHistory: Array<{ id: string; cmd: string; stdout: string; stderr: string; exitCode: number; durationMs: number; ts: number }>;
+  // 多节点执行
+  multiNodeRun:    MultiNodeRun | null;
+  startMultiNodeRun: (configs: Array<{ sessionId: string; instanceId: string; instanceTitle?: string; templateName?: string; steps: PlanStep[] }>, mode: RunMode) => Promise<void>;
+  cancelMultiNodeRun: () => void;
+  clearMultiNodeRun:  () => void;
 
-  // 操作
-  connect: (params: {
-    profile:     SSHProfile;
-    passphrase?: string;
-    password?:   string;
-    agent?:      string;
-    cols?:       number;
-    rows?:       number;
-  }) => void;
-  disconnect:   () => void;
-  sendInput:    (data: string) => void;
-  resize:       (cols: number, rows: number) => void;
-  execCommand:  (cmd: string, timeoutMs?: number) => Promise<{ stdout: string; stderr: string; exitCode: number; durationMs: number }>;
-  runPlan:      (steps: PlanStep[]) => Promise<ExecPlan>;
-  cancelPlan:   () => void;
-  clearHistory: () => void;
-
-  // 验证私钥文件路径是否可读
-  checkKeyFile: (path: string) => Promise<{ ok: boolean; msg?: string }>;
+  // 私钥路径验证
+  checkKeyFile: (path: string) => Promise<{ ok: boolean; resolved?: string; msg?: string }>;
 }
 
-// 存放 Promise resolver（exec 单条命令用）
-const _execResolvers = new Map<string, (r: { stdout: string; stderr: string; exitCode: number; durationMs: number }) => void>();
+// ─── WebSocket 消息处理器（每会话一个） ──────────────────────────────────────
 
-// 存放 exec_plan 的 resolve
-let _planResolve: ((plan: ExecPlan) => void) | null = null;
+function makeWSHandler(sessionId: string, set: (fn: (s: SSHStore) => Partial<SSHStore>) => void) {
+  return (event: MessageEvent) => {
+    let msg: Record<string, unknown>;
+    try { msg = JSON.parse(event.data as string); } catch { return; }
+
+    const rt = runtimes.get(sessionId);
+    if (!rt) return;
+
+    switch (msg.type) {
+
+      case 'status':
+        set((s) => ({
+          sessions: s.sessions.map((sess) =>
+            sess.id !== sessionId ? sess : {
+              ...sess,
+              status:      (msg.status as ConnStatus),
+              statusMsg:   (msg.msg as string) ?? '',
+              connectedAt: msg.status === 'connected' ? Date.now() : sess.connectedAt,
+            }
+          ),
+        }));
+        break;
+
+      case 'data':
+        rt.onTermData?.(msg.data as string);
+        break;
+
+      case 'exec_result': {
+        const resolver = rt.execResolvers.get(msg.id as string);
+        if (resolver) {
+          resolver({
+            stdout:     (msg.stdout    as string) ?? '',
+            stderr:     (msg.stderr    as string) ?? '',
+            exitCode:   (msg.exitCode  as number) ?? 0,
+            durationMs: (msg.durationMs as number) ?? 0,
+          });
+          rt.execResolvers.delete(msg.id as string);
+        }
+        break;
+      }
+
+      case 'plan_step': {
+        const m = msg as Record<string, unknown>;
+        set((s) => {
+          if (!s.multiNodeRun) return {};
+          const nodeExecutions = s.multiNodeRun.nodeExecutions.map((ne) => {
+            if (ne.sessionId !== sessionId) return ne;
+            return {
+              ...ne,
+              status: 'running' as const,
+              results: {
+                ...ne.results,
+                [m.stepId as string]: {
+                  stepId:          m.stepId         as string,
+                  status:          m.status         as PlanStepStatus,
+                  stdout:          (m.stdout         as string) ?? '',
+                  stderr:          (m.stderr         as string) ?? '',
+                  exitCode:        (m.exitCode       as number) ?? 0,
+                  durationMs:      (m.durationMs     as number) ?? 0,
+                  resolvedCmd:     m.resolvedCmd     as string | undefined,
+                  capturedVar:     m.capturedVar     as { name: string; value: string } | undefined,
+                  varSnapshot:     m.varSnapshot     as Record<string, string> | undefined,
+                  statusReason:    m.statusReason    as string | undefined,
+                  processedOutput: m.processedOutput as string | undefined,
+                  scriptError:     m.scriptError     as string | undefined,
+                },
+              },
+            };
+          });
+          return { multiNodeRun: { ...s.multiNodeRun, nodeExecutions } };
+        });
+        break;
+      }
+
+      case 'plan_done': {
+        set((s) => {
+          if (!s.multiNodeRun) return {};
+          const aborted = msg.aborted as boolean;
+          const nodeExecutions = s.multiNodeRun.nodeExecutions.map((ne) => {
+            if (ne.sessionId !== sessionId) return ne;
+            return {
+              ...ne,
+              status:          (aborted ? 'failed' : 'done') as NodeExecution['status'],
+              doneAt:           Date.now(),
+              finalVarContext:  msg.finalVarContext as Record<string, string> | undefined,
+            };
+          });
+          // 检查是否所有节点都已完成
+          const allDone = nodeExecutions.every((ne) => ne.status !== 'running' && ne.status !== 'pending');
+          return {
+            multiNodeRun: {
+              ...s.multiNodeRun,
+              nodeExecutions,
+              doneAt: allDone ? Date.now() : s.multiNodeRun.doneAt,
+            },
+          };
+        });
+        // 通知等待中的 Promise
+        rt.planNodeResolve?.();
+        rt.planNodeResolve = null;
+        break;
+      }
+    }
+  };
+}
+
+// ─── Store 实现 ────────────────────────────────────────────────────────────
 
 export const useSSHStore = create<SSHStore>()(
   persist(
     (set, get) => ({
       profiles:        [],
-      activeProfileId: null,
+      sessions:        [],
+      activeSessionId: null,
       proxyOnline:     false,
-      status:          'idle',
-      statusMsg:       '',
-      ws:              null,
-      onTermData:      null,
-      currentPlan:     null,
-      execHistory:     [],
+      multiNodeRun:    null,
 
-      // ── 档案管理 ────────────────────────────────────────────────────────
+      // ── 档案管理 ──────────────────────────────────────────────────────────
 
       addProfile: (p) => {
         const id = generateId();
+        set((s) => ({ profiles: [...s.profiles, { ...p, id, createdAt: Date.now() }] }));
+        return id;
+      },
+      updateProfile: (id, p) =>
+        set((s) => ({ profiles: s.profiles.map((x) => x.id === id ? { ...x, ...p } : x) })),
+      deleteProfile: (id) =>
+        set((s) => ({ profiles: s.profiles.filter((x) => x.id !== id) })),
+
+      // ── 会话管理 ──────────────────────────────────────────────────────────
+
+      addSession: (name, profileId) => {
+        const id = generateId();
         set((s) => ({
-          profiles: [...s.profiles, { ...p, id, createdAt: Date.now() }],
-          activeProfileId: id,
+          sessions:        [...s.sessions, { id, name, profileId, status: 'idle', statusMsg: '' }],
+          activeSessionId: id,
         }));
         return id;
       },
 
-      updateProfile: (id, p) =>
+      removeSession: (sessionId) => {
+        const rt = runtimes.get(sessionId);
+        rt?.ws?.close();
+        runtimes.delete(sessionId);
         set((s) => ({
-          profiles: s.profiles.map((x) => (x.id === id ? { ...x, ...p } : x)),
+          sessions:        s.sessions.filter((x) => x.id !== sessionId),
+          activeSessionId: s.activeSessionId === sessionId
+            ? (s.sessions.find((x) => x.id !== sessionId)?.id ?? null)
+            : s.activeSessionId,
+        }));
+      },
+
+      renameSession: (sessionId, name) =>
+        set((s) => ({
+          sessions: s.sessions.map((x) => x.id === sessionId ? { ...x, name } : x),
         })),
 
-      deleteProfile: (id) =>
-        set((s) => ({
-          profiles:        s.profiles.filter((x) => x.id !== id),
-          activeProfileId: s.activeProfileId === id ? null : s.activeProfileId,
-        })),
+      setActiveSession: (id) => set({ activeSessionId: id }),
 
-      setActiveProfile: (id) => set({ activeProfileId: id }),
-
-      // ── 代理健康检查 ─────────────────────────────────────────────────────
+      // ── 代理健康检查 ──────────────────────────────────────────────────────
 
       checkProxy: async () => {
         try {
@@ -182,183 +338,179 @@ export const useSSHStore = create<SSHStore>()(
         }
       },
 
-      setOnTermData: (fn) => set({ onTermData: fn }),
+      setSessionTermCallback: (sessionId, cb) => {
+        getRT(sessionId).onTermData = cb;
+      },
 
-      // ── SSH 连接 ─────────────────────────────────────────────────────────
+      // ── 建立 SSH 连接 ─────────────────────────────────────────────────────
 
-      connect: ({ profile, passphrase, password, agent, cols = 220, rows = 50 }) => {
-        const { ws: existing } = get();
-        if (existing) existing.close();
+      connectSession: (sessionId, { passphrase, password, agent, cols = 220, rows = 50 }) => {
+        const profile = get().profiles.find(
+          (p) => p.id === get().sessions.find((s) => s.id === sessionId)?.profileId
+        );
+        if (!profile) return;
+
+        const rt = getRT(sessionId);
+        rt.ws?.close();
 
         const socket = new WebSocket(PROXY_WS);
+        rt.ws = socket;
 
         socket.onopen = () => {
           socket.send(JSON.stringify({
-            type:        'connect',
-            host:        profile.host,
-            port:        profile.port,
-            username:    profile.username,
-            authType:    profile.authType,
-            keyFilePath: profile.keyFilePath,
-            passphrase,
-            password,
-            agent,
-            cols,
-            rows,
+            type: 'connect',
+            host: profile.host, port: profile.port, username: profile.username,
+            authType: profile.authType, keyFilePath: profile.keyFilePath,
+            passphrase, password, agent, cols, rows,
           }));
         };
 
-        socket.onmessage = (event) => {
-          let msg: Record<string, unknown>;
-          try { msg = JSON.parse(event.data); } catch { return; }
+        socket.onmessage = makeWSHandler(sessionId, set as Parameters<typeof makeWSHandler>[1]);
+        socket.onclose   = () => set((s) => ({
+          sessions: s.sessions.map((x) =>
+            x.id === sessionId ? { ...x, status: 'disconnected', statusMsg: '' } : x
+          ),
+        }));
+        socket.onerror = () => set((s) => ({
+          sessions: s.sessions.map((x) =>
+            x.id === sessionId ? { ...x, status: 'error', statusMsg: '无法连接到 SSH Proxy' } : x
+          ),
+        }));
 
-          switch (msg.type) {
-            case 'status':
-              set({ status: msg.status as ConnStatus, statusMsg: (msg.msg as string) ?? '' });
-              break;
-
-            case 'data':
-              get().onTermData?.(msg.data as string);
-              break;
-
-            case 'exec_result': {
-              const resolver = _execResolvers.get(msg.id as string);
-              if (resolver) {
-                resolver({
-                  stdout:    (msg.stdout as string)    ?? '',
-                  stderr:    (msg.stderr as string)    ?? '',
-                  exitCode:  (msg.exitCode as number)  ?? -1,
-                  durationMs:(msg.durationMs as number) ?? 0,
-                });
-                _execResolvers.delete(msg.id as string);
-              }
-              break;
-            }
-
-            case 'plan_step': {
-              const m = msg as Record<string, unknown>;
-              set((s) => {
-                if (!s.currentPlan || s.currentPlan.id !== m.planId) return {};
-                const results = {
-                  ...s.currentPlan.results,
-                  [m.stepId as string]: {
-                    stepId:          m.stepId         as string,
-                    status:          m.status         as PlanStepStatus,
-                    stdout:          (m.stdout         as string) ?? '',
-                    stderr:          (m.stderr         as string) ?? '',
-                    exitCode:        (m.exitCode       as number) ?? 0,
-                    durationMs:      (m.durationMs     as number) ?? 0,
-                    resolvedCmd:     (m.resolvedCmd    as string) ?? undefined,
-                    capturedVar:     m.capturedVar     as { name: string; value: string } | undefined,
-                    varSnapshot:     m.varSnapshot     as Record<string, string> | undefined,
-                    statusReason:    (m.statusReason   as string) ?? undefined,
-                    processedOutput: (m.processedOutput as string) ?? undefined,
-                    scriptError:     (m.scriptError    as string) ?? undefined,
-                  },
-                };
-                return { currentPlan: { ...s.currentPlan, results } };
-              });
-              break;
-            }
-
-            case 'plan_done': {
-              set((s) => {
-                if (!s.currentPlan) return {};
-                const plan: ExecPlan = {
-                  ...s.currentPlan,
-                  status:           (msg.aborted as boolean) ? 'aborted' : 'done',
-                  doneAt:           Date.now(),
-                  finalVarContext:  msg.finalVarContext as Record<string, string> | undefined,
-                };
-                _planResolve?.(plan);
-                _planResolve = null;
-                return { currentPlan: plan };
-              });
-              break;
-            }
-          }
-        };
-
-        socket.onclose  = () => set({ status: 'disconnected', ws: null });
-        socket.onerror  = () =>
-          set({ status: 'error', statusMsg: '无法连接到 SSH Proxy，请确认代理服务已启动', ws: null });
-
-        set({ ws: socket, status: 'connecting', statusMsg: '' });
-      },
-
-      disconnect: () => {
-        const { ws } = get();
-        ws?.send(JSON.stringify({ type: 'disconnect' }));
-        ws?.close();
-        set({ ws: null, status: 'idle', statusMsg: '', currentPlan: null });
-      },
-
-      sendInput: (data) => get().ws?.send(JSON.stringify({ type: 'data', data })),
-      resize:    (cols, rows) => get().ws?.send(JSON.stringify({ type: 'resize', cols, rows })),
-
-      // ── 单条命令 exec ────────────────────────────────────────────────────
-
-      execCommand: (cmd, timeoutMs = 30000) =>
-        new Promise((resolve) => {
-          const id      = generateId();
-          const timeout = setTimeout(() => {
-            _execResolvers.delete(id);
-            resolve({ stdout: '', stderr: '[TIMEOUT]', exitCode: -1, durationMs: timeoutMs });
-          }, timeoutMs + 1000);
-
-          _execResolvers.set(id, (r) => {
-            clearTimeout(timeout);
-            set((s) => ({
-              execHistory: [
-                { id, cmd, ...r, ts: Date.now() },
-                ...s.execHistory,
-              ].slice(0, 200),
-            }));
-            resolve(r);
-          });
-
-          get().ws?.send(JSON.stringify({ type: 'exec', cmd, id, timeout: timeoutMs }));
-        }),
-
-      // ── SOP 批量执行计划 ─────────────────────────────────────────────────
-
-      runPlan: (steps) =>
-        new Promise((resolve) => {
-          const planId = generateId();
-          const plan: ExecPlan = {
-            id:        planId,
-            steps,
-            results:   {},
-            status:    'running',
-            startedAt: Date.now(),
-          };
-          set({ currentPlan: plan });
-          _planResolve = resolve;
-
-          get().ws?.send(JSON.stringify({
-            type:  'exec_plan',
-            id:    planId,
-            steps: steps.map((s) => ({ id: s.id, cmd: s.cmd, timeout: s.timeout })),
-          }));
-        }),
-
-      cancelPlan: () => {
-        get().ws?.send(JSON.stringify({ type: 'exec_plan_cancel' }));
         set((s) => ({
-          currentPlan: s.currentPlan
-            ? { ...s.currentPlan, status: 'aborted', doneAt: Date.now() }
-            : null,
+          sessions: s.sessions.map((x) =>
+            x.id === sessionId ? { ...x, status: 'connecting', statusMsg: `连接中…` } : x
+          ),
         }));
       },
 
-      clearHistory: () => set({ execHistory: [] }),
+      disconnectSession: (sessionId) => {
+        const rt = runtimes.get(sessionId);
+        rt?.ws?.send(JSON.stringify({ type: 'disconnect' }));
+        rt?.ws?.close();
+        if (rt) rt.ws = null;
+        set((s) => ({
+          sessions: s.sessions.map((x) =>
+            x.id === sessionId ? { ...x, status: 'idle', statusMsg: '' } : x
+          ),
+        }));
+      },
 
-      // ── 私钥文件路径验证 ─────────────────────────────────────────────────
+      sendInputToSession:  (sessionId, data) =>
+        runtimes.get(sessionId)?.ws?.send(JSON.stringify({ type: 'data', data })),
+
+      resizeSession: (sessionId, cols, rows) =>
+        runtimes.get(sessionId)?.ws?.send(JSON.stringify({ type: 'resize', cols, rows })),
+
+      // ── 单会话独立命令（exec 通道） ───────────────────────────────────────
+
+      execCommandOnSession: (sessionId, cmd, timeout = 30000) =>
+        new Promise((resolve) => {
+          const rt  = getRT(sessionId);
+          const id  = generateId();
+          const timer = setTimeout(() => {
+            rt.execResolvers.delete(id);
+            resolve({ stdout: '', stderr: '[TIMEOUT]', exitCode: -1, durationMs: timeout });
+          }, timeout + 1000);
+
+          rt.execResolvers.set(id, (r) => {
+            clearTimeout(timer);
+            resolve(r);
+          });
+
+          rt.ws?.send(JSON.stringify({ type: 'exec', cmd, id, timeout }));
+        }),
+
+      // ── 多节点执行 ────────────────────────────────────────────────────────
+
+      startMultiNodeRun: async (configs, mode) => {
+        if (get().multiNodeRun && !get().multiNodeRun?.doneAt) return;
+
+        const runId = generateId();
+        const nodeExecutions: NodeExecution[] = configs.map((c) => {
+          const sess = get().sessions.find((s) => s.id === c.sessionId);
+          return {
+            sessionId:     c.sessionId,
+            sessionName:   sess?.name ?? c.sessionId,
+            instanceId:    c.instanceId,
+            instanceTitle: c.instanceTitle,
+            templateName:  c.templateName,
+            steps:         c.steps,
+            results:       {},
+            status:        'pending',
+            startedAt:     Date.now(),
+          };
+        });
+
+        set({ multiNodeRun: { id: runId, mode, nodeExecutions, startedAt: Date.now() } });
+
+        // 并行向每个节点发送 exec_plan，各自独立跑
+        await Promise.allSettled(
+          configs.map((c) => new Promise<void>((resolve) => {
+            const rt = runtimes.get(c.sessionId);
+            if (!rt?.ws || rt.ws.readyState !== WebSocket.OPEN) {
+              set((s) => ({
+                multiNodeRun: s.multiNodeRun ? {
+                  ...s.multiNodeRun,
+                  nodeExecutions: s.multiNodeRun.nodeExecutions.map((ne) =>
+                    ne.sessionId === c.sessionId ? { ...ne, status: 'failed', doneAt: Date.now() } : ne
+                  ),
+                } : null,
+              }));
+              resolve();
+              return;
+            }
+
+            rt.planAborted    = false;
+            rt.planNodeResolve = resolve;
+
+            const planId = generateId();
+            set((s) => ({
+              multiNodeRun: s.multiNodeRun ? {
+                ...s.multiNodeRun,
+                nodeExecutions: s.multiNodeRun.nodeExecutions.map((ne) =>
+                  ne.sessionId === c.sessionId ? { ...ne, status: 'running' } : ne
+                ),
+              } : null,
+            }));
+
+            rt.ws.send(JSON.stringify({
+              type: 'exec_plan',
+              id:   planId,
+              steps: c.steps.map((s) => ({
+                id: s.id, cmd: s.cmd, name: s.name,
+                captureVar: s.captureVar, capturePattern: s.capturePattern,
+                normalRegex: s.normalRegex, abnormalRegex: s.abnormalRegex,
+                scriptPath: s.scriptPath, timeout: s.timeout,
+              })),
+            }));
+          }))
+        );
+
+        set((s) => ({
+          multiNodeRun: s.multiNodeRun ? { ...s.multiNodeRun, doneAt: Date.now() } : null,
+        }));
+      },
+
+      cancelMultiNodeRun: () => {
+        // 取消每个节点的执行
+        get().multiNodeRun?.nodeExecutions.forEach((ne) => {
+          const rt = runtimes.get(ne.sessionId);
+          if (rt?.ws?.readyState === WebSocket.OPEN) {
+            rt.ws.send(JSON.stringify({ type: 'exec_plan_cancel' }));
+          }
+          rt?.planNodeResolve?.();
+        });
+      },
+
+      clearMultiNodeRun: () => set({ multiNodeRun: null }),
+
+      // ── 私钥文件验证 ──────────────────────────────────────────────────────
 
       checkKeyFile: async (keyPath) => {
         try {
           const r = await fetch(`${PROXY_HTTP}/api/check-key`, {
-            method:  'POST',
+            method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body:    JSON.stringify({ keyFilePath: keyPath }),
             signal:  AbortSignal.timeout(3000),
@@ -370,8 +522,12 @@ export const useSSHStore = create<SSHStore>()(
       },
     }),
     {
-      name:        'devutility-ssh',
-      partialize:  (s) => ({ profiles: s.profiles, activeProfileId: s.activeProfileId }),
+      name:        'devutility-ssh-v2',
+      partialize:  (s) => ({
+        profiles:        s.profiles,
+        sessions:        s.sessions,
+        activeSessionId: s.activeSessionId,
+      }),
     }
   )
 );
