@@ -5,8 +5,9 @@ import AppLayout from './components/Layout/AppLayout';
 
 const LogAnalyzer    = lazy(() => import('./modules/LogAnalyzer'));
 const CommandBuilder = lazy(() => import('./modules/CommandBuilder'));
-const SOPBuilder     = lazy(() => import('./modules/SOPBuilder'));
-const SSHManager     = lazy(() => import('./modules/SSHManager'));
+const SOPBuilder        = lazy(() => import('./modules/SOPBuilder'));
+const SSHManager        = lazy(() => import('./modules/SSHManager'));
+const NumberConverter   = lazy(() => import('./modules/NumberConverter'));
 
 const Loading: React.FC = () => (
   <div
@@ -55,6 +56,14 @@ const App: React.FC = () => (
           element={
             <Suspense fallback={<Loading />}>
               <SSHManager />
+            </Suspense>
+          }
+        />
+        <Route
+          path="number-converter"
+          element={
+            <Suspense fallback={<Loading />}>
+              <NumberConverter />
             </Suspense>
           }
         />

@@ -25,6 +25,14 @@ const toolsConfig: ToolConfig[] = [
     category: 'utility',
     version: '1.0.0',
   },
+  {
+    id: 'number-converter',
+    name: '进制转换',
+    icon: 'NumberOutlined',
+    description: '二进制/八进制/十进制/十六进制实时互转，二进制 4 位分组',
+    category: 'utility',
+    version: '1.0.0',
+  },
 ];
 
 export default toolsConfig;
