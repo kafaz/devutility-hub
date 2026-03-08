@@ -129,15 +129,23 @@ export function parseCFormat(pattern: string): CFormatToken[] {
  * 对 %s 采用智能边界处理：若后面紧跟非空字面量定界符，
  * 则使用非贪婪 (.*?) 替代 (\S+)，避免过度匹配。
  */
-export function buildRegexFromTokens(tokens: CFormatToken[]): string {
-  let result = '^';
+/**
+ * 将 CFormatToken 列表转换为最终正则表达式字符串
+ *
+ * anchored（默认 true）：在首尾加 ^ $ 锚点，适合整行匹配。
+ * anchored=false：去掉锚点，允许在日志行的任意位置匹配（有时间戳前缀时使用）。
+ */
+export function buildRegexFromTokens(
+  tokens: CFormatToken[],
+  anchored = true
+): string {
+  let result = anchored ? '^' : '';
 
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i];
     if (tok.type === 'literal') {
       result += escapeRegex(tok.raw);
     } else {
-      // %s 智能边界：若下一个 token 是非空字面量，则用非贪婪
       if (
         tok.formatType === 's' &&
         i + 1 < tokens.length &&
@@ -151,17 +159,17 @@ export function buildRegexFromTokens(tokens: CFormatToken[]): string {
     }
   }
 
-  result += '$';
+  result += anchored ? '$' : '';
   return result;
 }
 
 // 解析 C 格式字符串，返回 { regex, fields }
-export function cFormatToRegex(pattern: string): {
+export function cFormatToRegex(pattern: string, anchored = true): {
   regex: string;
   tokens: CFormatToken[];
 } {
   const tokens = parseCFormat(pattern);
-  const regex = buildRegexFromTokens(tokens);
+  const regex = buildRegexFromTokens(tokens, anchored);
   return { regex, tokens };
 }
 
@@ -784,6 +792,191 @@ ${nodeDetails}
 > 由 **DevUtility Hub · SSH Manager 多节点执行** 生成  
 > 生成时间：${new Date().toLocaleString('zh-CN')}
 `;
+}
+
+// ======================== C 日志函数调用解析 ========================
+
+export interface ParsedCLogCall {
+  macroName:   string;         // 宏/函数名，如 LOG_ERROR_WITH_TRACE
+  formatString: string;        // 格式字符串内容（去掉外层引号）
+  paramExprs:  string[];       // 原始参数表达式，如 ["ctx->fail_times", "age+1"]
+  paramNames:  string[];       // 推导出的显示名，如 ["fail_times", "age"]
+  specifierCount: number;      // 格式串中的格式符数量
+  mismatch:    boolean;        // paramNames.length !== specifierCount
+}
+
+/**
+ * 从 C 结构体成员访问表达式中提取最后一个标识符作为显示名
+ *
+ * 规则（优先级从高到低）：
+ *   1. a->b->c   → "c"（最后箭头运算符右侧）
+ *   2. a.b.c     → "c"（最后点运算符右侧）
+ *   3. (type)expr → 去掉类型转换，递归处理 expr
+ *   4. func(...)  → "func"（函数名）
+ *   5. arr[i]    → "arr"
+ *   6. 其他       → 取第一个标识符，或原串截断 30 字符
+ */
+function extractParamDisplayName(expr: string): string {
+  const s = expr.trim();
+
+  // 去除 C 强制类型转换 (type)expr
+  const castMatch = s.match(/^\(\s*[A-Za-z_][\w\s*]*\)\s*(.+)$/);
+  if (castMatch) return extractParamDisplayName(castMatch[1]);
+
+  // 箭头运算符 a->b  取最后一段（去数组下标）
+  if (s.includes('->')) {
+    const last = s.split('->').pop()!;
+    return last.replace(/\[.*?\]/g, '').match(/^[A-Za-z_]\w*/)?.[0] ?? last.slice(0, 30);
+  }
+
+  // 点运算符 a.b  取最后一段
+  // 但先过滤掉浮点字面量 1.5
+  if (s.includes('.') && !/^\d/.test(s)) {
+    const parts = s.split('.');
+    const last  = parts[parts.length - 1];
+    return last.replace(/\[.*?\]/g, '').match(/^[A-Za-z_]\w*/)?.[0] ?? last.slice(0, 30);
+  }
+
+  // 函数调用 func(...)  取函数名
+  const funcMatch = s.match(/^([A-Za-z_]\w*)\s*\(/);
+  if (funcMatch) return funcMatch[1];
+
+  // 数组变量 arr[i]  取变量名
+  const arrMatch = s.match(/^([A-Za-z_]\w*)\s*\[/);
+  if (arrMatch) return arrMatch[1];
+
+  // 普通标识符（含前置 * & 等）
+  const identMatch = s.match(/[A-Za-z_]\w*/);
+  if (identMatch) return identMatch[0];
+
+  return s.slice(0, 30);
+}
+
+/**
+ * 按顶层逗号分割 C 函数参数列表
+ *
+ * 跳过字符串字面量内的逗号，以及括号/方括号内的逗号（嵌套函数调用）。
+ */
+function splitCArgs(argsStr: string): string[] {
+  const args: string[] = [];
+  let   cur      = '';
+  let   depth    = 0;
+  let   inStr    = false;
+  let   i        = 0;
+
+  while (i < argsStr.length) {
+    const ch = argsStr[i];
+
+    if (inStr) {
+      if (ch === '\\') { cur += ch + (argsStr[i + 1] ?? ''); i += 2; continue; }
+      if (ch === '"')  inStr = false;
+      cur += ch;
+    } else {
+      if (ch === '"')  { inStr = true;  cur += ch; }
+      else if (ch === '(' || ch === '[') { depth++; cur += ch; }
+      else if (ch === ')' || ch === ']') { depth--; cur += ch; }
+      else if (ch === ',' && depth === 0) {
+        args.push(cur);
+        cur = '';
+        i++;
+        continue;
+      } else {
+        cur += ch;
+      }
+    }
+    i++;
+  }
+  if (cur.trim()) args.push(cur);
+  return args;
+}
+
+/**
+ * 解析 C 日志宏调用，提取宏名、格式字符串和参数列表
+ *
+ * 支持格式：
+ *   LOG_ERROR("%u ,%u", age, status);
+ *   LOG_DEBUG_WITH_TRACE("[%s] val=%d", ctx->name, ctx->val);
+ *   printf("count=%lu\n", (unsigned long)count);
+ *
+ * 返回 null 表示解析失败（非函数调用格式 / 首参不是字符串字面量）。
+ */
+export function parseCLogMacroCall(source: string): ParsedCLogCall | null {
+  // 去除行尾分号和空白
+  const s = source.trim().replace(/;+$/, '').trim();
+
+  // 提取宏名
+  const nameMatch = s.match(/^([A-Za-z_]\w*)\s*\(/);
+  if (!nameMatch) return null;
+  const macroName = nameMatch[1];
+
+  // 找到最外层括号的内容
+  const openIdx = s.indexOf('(');
+  if (openIdx === -1) return null;
+
+  let depth = 0, closeIdx = -1;
+  for (let i = openIdx; i < s.length; i++) {
+    if (s[i] === '(') depth++;
+    else if (s[i] === ')') { depth--; if (depth === 0) { closeIdx = i; break; } }
+  }
+  if (closeIdx === -1) return null;
+
+  const argsStr = s.slice(openIdx + 1, closeIdx);
+  const args    = splitCArgs(argsStr);
+  if (args.length === 0) return null;
+
+  // 第一个参数必须是字符串字面量（格式串）
+  const firstArg = args[0].trim();
+  // 支持 "fmt" 和 L"fmt"（宽字符）
+  const fmtMatch = firstArg.match(/^L?"((?:[^"\\]|\\.)*)"$/);
+  if (!fmtMatch) return null;
+
+  const formatString   = fmtMatch[1];                      // 去掉外层引号
+  const paramExprs     = args.slice(1).map((a) => a.trim());
+  const paramNames     = paramExprs.map(extractParamDisplayName);
+
+  // 统计格式串中的格式符数量（用于检测不匹配）
+  const tokens         = parseCFormat(formatString);
+  const specifierCount = tokens.filter((t) => t.type === 'format').length;
+
+  return {
+    macroName,
+    formatString,
+    paramExprs,
+    paramNames,
+    specifierCount,
+    mismatch: paramNames.length !== specifierCount,
+  };
+}
+
+/**
+ * 对一行日志文本应用已解析的 C 函数调用规则，返回字段→值映射
+ *
+ * anchored=false：允许前缀（时间戳、日志级别等），只要格式串内容出现在行中即可匹配。
+ */
+export function applyCLogRule(
+  line:   string,
+  parsed: ParsedCLogCall,
+  anchored = false
+): { matched: boolean; fields: Record<string, string>; rawGroups: string[] } {
+  const { regex, tokens } = cFormatToRegex(parsed.formatString, anchored);
+  let re: RegExp;
+  try { re = new RegExp(regex); } catch { return { matched: false, fields: {}, rawGroups: [] }; }
+
+  const m = re.exec(line);
+  if (!m) return { matched: false, fields: {}, rawGroups: [] };
+
+  const formatTokens = tokens.filter((t) => t.type === 'format');
+  const fields: Record<string, string> = {};
+  const rawGroups: string[] = [];
+
+  formatTokens.forEach((_, i) => {
+    const val   = m[i + 1] ?? '';
+    const name  = parsed.paramNames[i] ?? `field${i + 1}`;
+    fields[name] = val;
+    rawGroups.push(val);
+  });
+
+  return { matched: true, fields, rawGroups };
 }
 
 // 导出 JSON 数据为文件下载

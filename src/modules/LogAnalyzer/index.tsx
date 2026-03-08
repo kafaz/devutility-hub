@@ -19,6 +19,7 @@ import {
   UploadOutlined,
   DownloadOutlined,
   MergeCellsOutlined,
+  FunctionOutlined,
 } from '@ant-design/icons';
 import { useLogStore } from './store/logStore';
 import RuleManager from './components/RuleManager';
@@ -26,6 +27,7 @@ import RegexRuleModal from './components/RegexRuleModal';
 import CFormatRuleModal from './components/CFormatRuleModal';
 import ResultTable from './components/ResultTable';
 import GrepGroupTable from './components/GrepGroupTable';
+import CFunctionAnalyzer from './components/CFunctionAnalyzer';
 import type { ParseRule } from '../../types';
 import { useGlobalStore } from '../../store/globalStore';
 import { downloadJSON, cFormatToRegex } from '../../utils';
@@ -70,6 +72,7 @@ const LogAnalyzer: React.FC = () => {
     clearResults,
   } = useLogStore();
 
+  const [activeTab, setActiveTab] = useState<'log' | 'cfunc'>('log');
   const [regexModalOpen, setRegexModalOpen] = useState(false);
   const [cFormatModalOpen, setCFormatModalOpen] = useState(false);
   const [editingRule, setEditingRule] = useState<ParseRule | null>(null);
@@ -173,7 +176,7 @@ const LogAnalyzer: React.FC = () => {
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          marginBottom: 20,
+          marginBottom: 16,
         }}
       >
         <div>
@@ -181,7 +184,7 @@ const LogAnalyzer: React.FC = () => {
             日志分析器
           </Title>
           <Text type="secondary" style={{ fontSize: 13 }}>
-            通过正则表达式或 C 格式串解析结构化日志
+            正则 / C格式 / C函数调用 — 三种模式解析结构化日志
           </Text>
         </div>
         <Tooltip title="导出所有解析规则">
@@ -190,6 +193,29 @@ const LogAnalyzer: React.FC = () => {
           </Button>
         </Tooltip>
       </div>
+
+      {/* 顶层 Tab 切换 */}
+      <Segmented
+        value={activeTab}
+        onChange={(v) => setActiveTab(v as 'log' | 'cfunc')}
+        style={{ marginBottom: 16 }}
+        options={[
+          {
+            label: <Space size={4}><PlayCircleOutlined />日志解析</Space>,
+            value: 'log',
+          },
+          {
+            label: <Space size={4}><FunctionOutlined />C函数调用分析</Space>,
+            value: 'cfunc',
+          },
+        ]}
+      />
+
+      {/* C函数分析面板 */}
+      {activeTab === 'cfunc' && <CFunctionAnalyzer />}
+
+      {/* 以下是「日志解析」面板内容 */}
+      {activeTab === 'log' && <>
 
       {/* 规则选择区 */}
       <Card
@@ -372,6 +398,7 @@ const LogAnalyzer: React.FC = () => {
         onOk={handleCFormatOk}
         onCancel={() => setCFormatModalOpen(false)}
       />
+      </>}
     </div>
   );
 };
