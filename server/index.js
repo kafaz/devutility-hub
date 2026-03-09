@@ -2268,7 +2268,7 @@ app.post('/api/sop/git-sync', async (req, res) => {
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         collectFiles(fullPath);
-      } else if (/\.(md|json)$/i.test(entry.name)) {
+      } else if (/\.(md|json)$/i.test(entry.name) && !/^readme\.(md|txt)$/i.test(entry.name)) {
         try {
           const content      = fs.readFileSync(fullPath, 'utf-8');
           const relativePath = path.relative(targetDir, fullPath);

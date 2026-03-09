@@ -336,7 +336,7 @@ const SOPBuilder: React.FC = () => {
                                   {tpl.category}
                                 </Tag>
                                 <Tag style={{ fontSize: 11 }}>
-                                  {tpl.checks.length} 步
+                                  {tpl.checks?.length ?? 0} 步
                                 </Tag>
                               </div>
                               {tpl.description && (

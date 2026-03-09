@@ -80,8 +80,12 @@ async function syncSource(
   const files: { name: string; relativePath: string; content: string; ext: string }[] = data.files;
   let totalImported = 0;
   let totalSkipped  = 0;
+  const now = Date.now();
 
   for (const file of files) {
+    // 跳过 README 及各类文档性文件（大小写不敏感）
+    if (/^readme\.(md|txt|rst)$/i.test(file.name)) continue;
+
     try {
       if (file.ext === 'md') {
         const r = importMarkdown(file.content);
@@ -92,18 +96,32 @@ async function syncSource(
         try { parsed = JSON.parse(file.content); } catch { continue; }
 
         // 支持两种 JSON 格式：单个模板对象 or 模板数组
-        const tpls: SOPTemplate[] = Array.isArray(parsed)
-          ? (parsed as SOPTemplate[])
-          : [parsed as SOPTemplate];
+        const raw: unknown[] = Array.isArray(parsed) ? parsed : [parsed];
 
-        // 确保每个模板有合法 id（防止重复 id 冲突）
-        const normalised = tpls.map((t) => ({
-          ...t,
-          id:        t.id        || generateId(),
-          createdAt: t.createdAt || Date.now(),
-          updatedAt: t.updatedAt || Date.now(),
-        }));
+        // 规范化：确保每个条目都有合法的必要字段，缺失的补默认值
+        const normalised: SOPTemplate[] = raw
+          .filter((t): t is Record<string, unknown> =>
+            !!t && typeof t === 'object' &&
+            typeof (t as Record<string, unknown>).name === 'string' &&
+            !!(t as Record<string, unknown>).name
+          )
+          .map((t) => ({
+            ...(t as unknown as SOPTemplate),
+            id:        (t.id        as string)  || generateId(),
+            name:      t.name       as string,
+            category:  (t.category  as string)  || '其他',
+            description: (t.description as string) || '',
+            checks:    Array.isArray(t.checks)
+              ? (t.checks as SOPTemplate['checks']).map((c) => ({
+                  ...c,
+                  subSteps: Array.isArray(c.subSteps) ? c.subSteps : [],
+                }))
+              : [],
+            createdAt: (t.createdAt as number)  || now,
+            updatedAt: (t.updatedAt as number)  || now,
+          }));
 
+        if (normalised.length === 0) continue;
         const r = importJSON(normalised);
         totalImported += r.imported;
         totalSkipped  += r.skipped;

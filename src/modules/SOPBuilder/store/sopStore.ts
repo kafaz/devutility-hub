@@ -201,9 +201,9 @@ defaultTemplates.forEach((t) => {
   t.checks.forEach((c) => { if (!c.subSteps) c.subSteps = []; });
 });
 
-// 初始化实例的 checkResults（基于模板的 checks）
-function initCheckResults(checks: SOPCheck[]): SOPCheckResult[] {
-  return checks.map((c) => ({
+// 初始化实例的 checkResults（基于模板的 checks，兼容历史脏数据）
+function initCheckResults(checks: SOPCheck[] | undefined): SOPCheckResult[] {
+  return (checks ?? []).map((c) => ({
     checkId:        c.id,
     checkName:      c.name,
     command:        c.command,
@@ -274,13 +274,30 @@ export const useSOPStore = create<SOPStore>()(
       importTemplatesFromJSON: (templates) => {
         let imported = 0;
         let skipped = 0;
+        const now = Date.now();
         set((s) => {
           const existingIds = new Set(s.templates.map((t) => t.id));
-          const newTemplates = templates.filter((t) => {
-            if (existingIds.has(t.id)) { skipped++; return false; }
+          const newTemplates: SOPTemplate[] = [];
+          for (const raw of templates) {
+            // 跳过无效对象（null、非对象、缺少必要字段）
+            if (!raw || typeof raw !== 'object') continue;
+            if (!raw.name || typeof raw.name !== 'string') continue;
+            if (existingIds.has(raw.id)) { skipped++; continue; }
+
+            // 规范化：确保 checks 是合法数组，子步骤同样合法
+            const checks: SOPCheck[] = Array.isArray(raw.checks) ? raw.checks : [];
+            checks.forEach((c) => { if (!Array.isArray(c.subSteps)) c.subSteps = []; });
+
+            newTemplates.push({
+              ...raw,
+              id:        raw.id        || generateId(),
+              createdAt: raw.createdAt || now,
+              updatedAt: raw.updatedAt || now,
+              checks,
+            });
+            existingIds.add(raw.id);
             imported++;
-            return true;
-          });
+          }
           return { templates: [...s.templates, ...newTemplates] };
         });
         return { imported, skipped };
