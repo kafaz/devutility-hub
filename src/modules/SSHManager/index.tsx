@@ -54,6 +54,7 @@ import {
 } from '../../utils';
 import { useSOPStore } from '../SOPBuilder/store/sopStore';
 import SessionJournal from './components/SessionJournal';
+import { useCronStore } from './store/cronStore';
 import { useJournalStore } from './store/journalStore';
 import type { NodeExecution, PlanStepResult, SSHProfile, SSHSession } from './store/sshStore';
 import { useSSHStore } from './store/sshStore';
@@ -359,6 +360,7 @@ const ProfileModal: React.FC<{
 };
 
 // ─── 主组件 ────────────────────────────────────────────────────────────────
+const CronJobList = React.lazy(() => import('./components/CronJobList'));
 
 const SSHManager: React.FC = () => {
   const { theme } = useGlobalStore();
@@ -393,6 +395,7 @@ const SSHManager: React.FC = () => {
   const [varValues,   setVarValues]       = useState<Record<string, string>>({});
   const [executing,   setExecuting]       = useState(false);
   const [activeView,  setActiveView]      = useState<'terminal' | 'progress' | 'journal'>('terminal');
+  const [activeTab, setActiveTab] = useState('connect'); // 'connect' | 'multi_node' | 'cron'
 
   // ── 终端写入函数 Map（每会话一个） ────────────────────────────────────────
   const writeCallbacks    = useRef<Map<string, (b64: string) => void>>(new Map());
@@ -401,6 +404,162 @@ const SSHManager: React.FC = () => {
   const cmdBuffers        = useRef<Map<string, string>>(new Map());
 
   const { addEntry, addSOPNodeResults } = useJournalStore();
+  const { evaluateJobs } = useCronStore();
+
+  useEffect(() => {
+    // 定时任务 (Cron) 每分钟轮询
+    const intervalId = setInterval(async () => {
+        const jobsToRun = evaluateJobs();
+        if (!jobsToRun || jobsToRun.length === 0) return;
+
+        // 对每一个需要执行的 Job 进行自动派发
+        for (const job of jobsToRun) {
+          console.log(`[Cron] Executing job: ${job.name} (${job.id})`);
+          
+          // 解析目标 Session IDs
+          // 计算当前组别的映射
+          const profiles = useSSHStore.getState().profiles;
+          const localGroupsMap = new Map<string, { id: string; name: string; children: string[] }>();
+          profiles.forEach(p => {
+             const parts = p.name.split('-');
+             const groupName = parts.length > 1 ? parts[0] : '其他';
+             const groupId = `group-${groupName}`;
+             if (!localGroupsMap.has(groupId)) {
+               localGroupsMap.set(groupId, { id: groupId, name: groupName, children: [] });
+             }
+          });
+          useSSHStore.getState().sessions.forEach(sess => {
+              const p = profiles.find(x => x.id === sess.profileId);
+              if (p) {
+                 const parts = p.name.split('-');
+                 const groupName = parts.length > 1 ? parts[0] : '其他';
+                 const groupId = `group-${groupName}`;
+                 localGroupsMap.get(groupId)?.children.push(sess.id);
+              }
+          });
+          const localGroups = Array.from(localGroupsMap.values());
+
+          const targetSessionIds = new Set(job.targetSessions);
+          job.targetGroupIds.forEach(gid => {
+            const g = localGroups.find(gp => gp.id === gid);
+            if (g) {
+              g.children.forEach(sid => targetSessionIds.add(sid));
+            }
+          });
+
+          // 取当前所有激活的连线
+          const activeSessionIds = Array.from(targetSessionIds).filter(sid => {
+            const s = useSSHStore.getState().sessions.find(sess => sess.id === sid);
+            return s?.status === 'connected';
+          });
+
+          if (activeSessionIds.length === 0) {
+            console.warn(`[Cron] Job ${job.name} skipped: no connected target sessions.`);
+            continue;
+          }
+
+          // 构造该 Job 对应的临时 Instance 列表
+          const configs: any[] = [];
+          
+          for (const sessionId of activeSessionIds) {
+            // （暂只处理广播模式）如果是 targeted 模式也可以按需从 job.targetedConfigs 里去取
+            const templateId = job.execMode === 'broadcast' ? job.broadcastTemplateId : undefined;
+            if (!templateId) continue;
+
+            const tpl = useSOPStore.getState().templates.find(t => t.id === templateId);
+            if (!tpl) continue;
+
+            // 为这次触发在 sopStore 里面新建一个追踪实例
+            const instanceId = useSOPStore.getState().startInstance(templateId, `[定时任务] ${job.name} - 自动触发`);
+            const inst = useSOPStore.getState().instances.find(i => i.id === instanceId);
+            if (!inst) continue;
+
+            // 构建用于到底层分发的执行步骤 (这里复用了 SSHManager 本地的 buildSteps 逻辑框架)
+            const mergedVars = { ...job.broadcastVars };
+            if (inst.variables) {
+              inst.variables.forEach(v => {
+                if (mergedVars[v.name] === undefined && v.defaultValue !== undefined) {
+                  mergedVars[v.name] = String(v.defaultValue);
+                }
+              });
+            }
+
+            const steps: import('./store/sshStore').PlanStep[] = [];
+            [...inst.checkResults, ...inst.extraChecks].forEach((cr) => {
+              const subs = cr.subSteps ?? [];
+              if (subs.length > 0) {
+                subs.forEach((ss) => steps.push({
+                  id: ss.id, name: ss.name,
+                  cmd: renderTemplate(ss.command, mergedVars),
+                  captureVar: ss.captureVar, capturePattern: ss.capturePattern,
+                  normalRegex: ss.normalRegex, abnormalRegex: ss.abnormalRegex,
+                  scriptPath: ss.scriptPath, timeout: ss.timeoutMs ?? 30000,
+                  checkId: cr.checkId, isSubStep: true,
+                } as any)); // cast since properties expanded recently locally
+              } else {
+                const cmd = renderTemplate(cr.command, mergedVars);
+                if (cmd.trim()) steps.push({
+                  id: cr.checkId, name: cr.checkName, cmd,
+                  checkId: cr.checkId, isSubStep: false,
+                });
+              }
+            });
+
+            if (steps.length > 0) {
+              configs.push({
+                sessionId,
+                instanceId,
+                instanceTitle: inst.incidentTitle,
+                templateName: inst.templateName,
+                steps
+              });
+            }
+          }
+
+          if (configs.length > 0) {
+            // 背景执行，不阻塞 UI 
+            useSSHStore.getState().startMultiNodeRun(configs, job.execMode).then(() => {
+              // 执行结束后把结果写回 instances。
+              const run = useSSHStore.getState().multiNodeRun;
+              run?.nodeExecutions.forEach((ne) => {
+                const currentInsts = useSOPStore.getState().instances;
+                const inst = currentInsts.find((i) => i.id === ne.instanceId);
+                if (!inst) return;
+                
+                ne.steps.forEach((step) => {
+                  const r = ne.results[step.id];
+                  if (!r) return;
+                  if (step.isSubStep && step.checkId) {
+                    useSOPStore.getState().appendSubStepResult(inst.id, step.checkId, {
+                      subStepId: step.id, name: step.name,
+                      command: r.resolvedCmd ?? step.cmd,
+                      stdout: r.stdout, stderr: r.stderr,
+                      exitCode: r.exitCode, durationMs: r.durationMs,
+                      capturedVar: r.capturedVar,
+                    });
+                  } else if (step.checkId) {
+                    useSOPStore.getState().updateCheckResult(inst.id, step.checkId, {
+                      output: r.processedOutput ?? r.stdout,
+                      status: r.exitCode === 0 ? 'normal' : 'abnormal',
+                      conclusion: r.statusReason ?? `exit ${r.exitCode}`,
+                    });
+                  }
+                });
+                useSOPStore.getState().setInstanceStatus(inst.id, 'resolved');
+              });
+              messageApi.success(`定时任务 [${job.name}] 执行完成。`);
+            }).catch(e => {
+              console.error(`Jobs execution failed for cron ${job.name}`, e);
+            });
+          }
+        }
+    }, 60000);
+    
+    // 立即执行一次以防页面刚好错过一分钟的跳变
+    evaluateJobs();
+
+    return () => clearInterval(intervalId);
+  }, [evaluateJobs, messageApi]);
 
   // 定期检查代理
   useEffect(() => {
@@ -837,6 +996,12 @@ const SSHManager: React.FC = () => {
               border: `1px solid ${borderColor}`, borderRadius: 6,
               overflow: 'hidden', minHeight: 400, background: isDark ? '#1e1e1e' : '#fafafa',
             }}>
+            {/* ----------------- 定时任务列表面板 ----------------- */}
+            <div style={{ display: activeTab === 'cron' ? 'block' : 'none', flex: 1, overflowY: 'auto' }}>
+              <React.Suspense fallback={<Spin />}>
+                {activeTab === 'cron' && <CronJobList />}
+              </React.Suspense>
+            </div>
               {/* Tab 切换 */}
               {sessions.length > 0 && (
                 <div style={{
@@ -989,6 +1154,18 @@ const SSHManager: React.FC = () => {
 
         {/* ══ 右栏：多节点执行配置 */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <Segmented
+            options={[
+              { label: '连接及会话', value: 'connect' },
+              { label: '多节点执行', value: 'multi_node' },
+              { label: '定时任务(Cron)', value: 'cron' },
+            ]}
+            value={activeTab}
+            onChange={(v) => setActiveTab(v as any)}
+            block
+            size="small"
+            style={{ marginBottom: 12 }}
+          />
           <Card size="small"
             title={
               <Space>

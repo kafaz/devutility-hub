@@ -215,6 +215,33 @@ export interface SOPInstance {
   resolvedAt?: number;
 }
 
+// ======================= 定时任务 (Cron) =======================
+
+export interface CronJob {
+  id: string;
+  name: string;             // 任务名称
+  cronExpr: string;         // Cron 表达式 (如 * * * * *)
+  enabled: boolean;         // 是否启用
+  targetGroupIds: string[]; // 目标会话组 ID
+  targetSessions: string[]; // 额外独立选择的会话 ID
+  
+  // 执行配置（与现有多节点执行一致）
+  execMode: 'broadcast' | 'targeted';
+  // 广播模式配置:
+  broadcastTemplateId?: string;
+  broadcastVars?: Record<string, string>;
+  
+  // 定向模式配置: Record<SessionId, { templateId, vars }>
+  targetedConfigs?: Record<string, {
+    templateId: string;
+    vars: Record<string, string>;
+  }>;
+
+  lastRunAt?: number;       // 上次派发时间
+  nextRunAt?: number;       // 下次执行预测时间
+  createdAt: number;
+}
+
 // ======================== SOP Git 仓库源类型 ========================
 
 /**
