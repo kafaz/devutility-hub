@@ -47,28 +47,27 @@ interface MatchResult {
 
 const FieldCard: React.FC<{
   result:     MatchResult;
-  paramNames: string[];
+  paramNames: string[];  // 完整表达式，如 data->attr.key.value
   isDark:     boolean;
 }> = ({ result, paramNames, isDark }) => {
   const { copy } = useClipboard();
-  const maxLen = Math.max(...paramNames.map((n) => n.length), 4);
 
   return (
     <div
       style={{
-        padding:       '10px 14px',
-        background:    isDark ? '#2d2d30' : '#fafafa',
-        border:        `1px solid ${result.matched
+        padding:      '10px 14px',
+        background:   isDark ? '#2d2d30' : '#fafafa',
+        border:       `1px solid ${result.matched
           ? isDark ? '#22c55e33' : '#bbf7d0'
           : isDark ? '#ef444433' : '#fecaca'}`,
-        borderLeft:    `4px solid ${result.matched ? '#22c55e' : '#ef4444'}`,
-        borderRadius:   6,
-        marginBottom:   8,
-        fontFamily:    'JetBrains Mono, Fira Code, Consolas, monospace',
+        borderLeft:   `4px solid ${result.matched ? '#22c55e' : '#ef4444'}`,
+        borderRadius:  6,
+        marginBottom:  8,
+        fontFamily:   'JetBrains Mono, Fira Code, Consolas, monospace',
       }}
     >
       {/* 行号 + 原始行 */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
         <Space size={6}>
           {result.matched
             ? <CheckCircleOutlined style={{ color: '#22c55e' }} />
@@ -76,10 +75,19 @@ const FieldCard: React.FC<{
           <Text type="secondary" style={{ fontSize: 11 }}>
             行 {result.lineIndex + 1}
           </Text>
+          <Text
+            type="secondary"
+            style={{
+              fontSize: 11, maxWidth: 360,
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}
+          >
+            {result.rawLine}
+          </Text>
         </Space>
         <Tooltip title="复制原始行">
           <CopyOutlined
-            style={{ fontSize: 12, color: '#6b7280', cursor: 'pointer' }}
+            style={{ fontSize: 12, color: '#6b7280', cursor: 'pointer', flexShrink: 0 }}
             onClick={() => copy(result.rawLine)}
           />
         </Tooltip>
@@ -87,45 +95,73 @@ const FieldCard: React.FC<{
 
       {!result.matched ? (
         <Text type="danger" style={{ fontSize: 12 }}>
-          ✗ 未匹配：{result.rawLine}
+          ✗ 未匹配此行，请检查格式串是否与日志格式一致
         </Text>
       ) : (
-        <div>
-          {paramNames.map((name) => (
-            <div
-              key={name}
-              style={{
-                display:      'flex',
-                alignItems:   'baseline',
-                gap:           12,
-                marginBottom:  4,
-                fontSize:      13,
-              }}
-            >
-              {/* 参数名（对齐） */}
-              <span
-                style={{
-                  minWidth:   maxLen * 8,
-                  color:      isDark ? '#93c5fd' : '#1d4ed8',
-                  fontWeight: 600,
-                  flexShrink:  0,
-                }}
-              >
-                {name.padEnd(maxLen)}
-              </span>
-              <span style={{ color: isDark ? '#9ca3af' : '#6b7280', flexShrink: 0 }}>:</span>
-              {/* 值 */}
-              <span
-                style={{
-                  color:    isDark ? '#fbbf24' : '#92400e',
-                  wordBreak: 'break-all',
-                }}
-              >
-                {result.fields[name] ?? '—'}
-              </span>
-            </div>
-          ))}
-        </div>
+        /* 表格式布局：变量名 | : | 值 */
+        <table style={{ borderCollapse: 'collapse', width: '100%' }}>
+          <tbody>
+            {paramNames.map((name, idx) => (
+              <tr key={`${name}-${idx}`}>
+                {/* 变量名列：完整显示，hover 展示全称 */}
+                <td
+                  style={{
+                    verticalAlign:  'top',
+                    paddingBottom:   4,
+                    paddingRight:    8,
+                    whiteSpace:     'nowrap',
+                    maxWidth:        280,
+                    overflow:       'hidden',
+                    textOverflow:   'ellipsis',
+                  }}
+                >
+                  <Tooltip title={name} placement="topLeft">
+                    <span
+                      style={{
+                        color:      isDark ? '#93c5fd' : '#1d4ed8',
+                        fontWeight:  600,
+                        fontSize:    13,
+                        display:    'inline-block',
+                        maxWidth:    280,
+                        overflow:   'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        verticalAlign: 'bottom',
+                      }}
+                    >
+                      {name}
+                    </span>
+                  </Tooltip>
+                </td>
+                {/* 分隔符列 */}
+                <td style={{ color: isDark ? '#6b7280' : '#9ca3af', paddingRight: 8, verticalAlign: 'top', paddingBottom: 4 }}>:</td>
+                {/* 值列：可换行 */}
+                <td style={{ verticalAlign: 'top', paddingBottom: 4 }}>
+                  <span
+                    style={{
+                      color:      isDark ? '#fbbf24' : '#92400e',
+                      fontSize:    13,
+                      wordBreak:  'break-all',
+                    }}
+                  >
+                    {result.fields[name] !== undefined ? result.fields[name] : '—'}
+                  </span>
+                </td>
+                {/* 复制值 */}
+                <td style={{ verticalAlign: 'top', paddingBottom: 4, paddingLeft: 8 }}>
+                  {result.fields[name] !== undefined && (
+                    <Tooltip title="复制值">
+                      <CopyOutlined
+                        style={{ fontSize: 11, color: '#6b7280', cursor: 'pointer' }}
+                        onClick={() => copy(result.fields[name])}
+                      />
+                    </Tooltip>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       )}
     </div>
   );
@@ -216,22 +252,49 @@ const CFunctionAnalyzer: React.FC = () => {
               : <CloseCircleOutlined style={{ color: '#ef4444' }} />,
         },
         ...parsed.paramNames.map((name) => ({
-          title:      name,
-          key:        name,
-          ellipsis:   { showTitle: false },
-          render:     (_: unknown, rec: MatchResult) => (
-            <Tooltip title={rec.fields[name]}>
-              <Text
+          // 列宽：短名 120px，长名按字符数自适应（最宽 280px）
+          width:    Math.min(280, Math.max(120, name.length * 9 + 24)),
+          ellipsis: { showTitle: false },
+          // 列头：hover 展示完整变量名
+          title: (
+            <Tooltip title={name} placement="topLeft">
+              <span
                 style={{
-                  fontFamily: 'JetBrains Mono, Consolas, monospace',
-                  fontSize:    12,
-                  color:       isDark ? '#fbbf24' : '#92400e',
+                  fontFamily:    'JetBrains Mono, Consolas, monospace',
+                  fontSize:       12,
+                  display:       'inline-block',
+                  maxWidth:       260,
+                  overflow:      'hidden',
+                  textOverflow:  'ellipsis',
+                  whiteSpace:    'nowrap',
+                  verticalAlign: 'bottom',
+                  color:          isDark ? '#93c5fd' : '#1d4ed8',
+                  fontWeight:     600,
                 }}
               >
-                {rec.matched ? (rec.fields[name] ?? '—') : <Text type="secondary">—</Text>}
-              </Text>
+                {name}
+              </span>
             </Tooltip>
           ),
+          key:      name,
+          render:   (_: unknown, rec: MatchResult) => {
+            const val = rec.matched ? (rec.fields[name] ?? '—') : '—';
+            return (
+              <Tooltip title={rec.matched && rec.fields[name] ? rec.fields[name] : undefined}>
+                <Text
+                  style={{
+                    fontFamily: 'JetBrains Mono, Consolas, monospace',
+                    fontSize:    12,
+                    color:       rec.matched && rec.fields[name] !== undefined
+                      ? (isDark ? '#fbbf24' : '#92400e')
+                      : (isDark ? '#6b7280' : '#9ca3af'),
+                  }}
+                >
+                  {val}
+                </Text>
+              </Tooltip>
+            );
+          },
         })),
         {
           title:      '原始行',
@@ -336,7 +399,7 @@ const CFunctionAnalyzer: React.FC = () => {
               </div>
             </div>
 
-            {/* 参数列表 */}
+            {/* 参数列表：展示完整表达式，长名截断后 hover 显示全称 */}
             <div style={{ flex: 2, minWidth: 280 }}>
               <Text type="secondary" style={{ fontSize: 11 }}>
                 参数名（{parsed.paramNames.length} 个）
@@ -345,15 +408,21 @@ const CFunctionAnalyzer: React.FC = () => {
                 {parsed.paramNames.map((name, i) => (
                   <Tooltip
                     key={i}
-                    title={
-                      parsed.paramExprs[i] !== name
-                        ? `原始表达式: ${parsed.paramExprs[i]}`
-                        : undefined
-                    }
+                    title={name.length > 30 ? name : undefined}
+                    placement="top"
                   >
                     <Tag
                       color="blue"
-                      style={{ fontFamily: 'JetBrains Mono, Consolas, monospace', fontSize: 12 }}
+                      style={{
+                        fontFamily: 'JetBrains Mono, Consolas, monospace',
+                        fontSize:    12,
+                        maxWidth:    240,
+                        overflow:   'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        display:    'inline-block',
+                        verticalAlign: 'middle',
+                      }}
                     >
                       {name}
                     </Tag>

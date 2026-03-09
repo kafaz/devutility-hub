@@ -806,50 +806,21 @@ export interface ParsedCLogCall {
 }
 
 /**
- * 从 C 结构体成员访问表达式中提取最后一个标识符作为显示名
+ * 将参数表达式规范化为字段名称（保留完整路径，仅清理空白）
  *
- * 规则（优先级从高到低）：
- *   1. a->b->c   → "c"（最后箭头运算符右侧）
- *   2. a.b.c     → "c"（最后点运算符右侧）
- *   3. (type)expr → 去掉类型转换，递归处理 expr
- *   4. func(...)  → "func"（函数名）
- *   5. arr[i]    → "arr"
- *   6. 其他       → 取第一个标识符，或原串截断 30 字符
+ * 原则：保留完整表达式供用户识别，例如：
+ *   data->attr.key.value  →  data->attr.key.value（完整保留）
+ *   (int)ctx->size        →  ctx->size（去掉类型转换前缀）
+ *   get_val(ptr)          →  get_val(ptr)（完整保留）
  */
 function extractParamDisplayName(expr: string): string {
-  const s = expr.trim();
+  let s = expr.trim().replace(/\s+/g, ' ');
 
-  // 去除 C 强制类型转换 (type)expr
+  // 去除最外层的 C 强制类型转换 (type) 前缀，保留后面的表达式
   const castMatch = s.match(/^\(\s*[A-Za-z_][\w\s*]*\)\s*(.+)$/);
-  if (castMatch) return extractParamDisplayName(castMatch[1]);
+  if (castMatch) s = castMatch[1].trim();
 
-  // 箭头运算符 a->b  取最后一段（去数组下标）
-  if (s.includes('->')) {
-    const last = s.split('->').pop()!;
-    return last.replace(/\[.*?\]/g, '').match(/^[A-Za-z_]\w*/)?.[0] ?? last.slice(0, 30);
-  }
-
-  // 点运算符 a.b  取最后一段
-  // 但先过滤掉浮点字面量 1.5
-  if (s.includes('.') && !/^\d/.test(s)) {
-    const parts = s.split('.');
-    const last  = parts[parts.length - 1];
-    return last.replace(/\[.*?\]/g, '').match(/^[A-Za-z_]\w*/)?.[0] ?? last.slice(0, 30);
-  }
-
-  // 函数调用 func(...)  取函数名
-  const funcMatch = s.match(/^([A-Za-z_]\w*)\s*\(/);
-  if (funcMatch) return funcMatch[1];
-
-  // 数组变量 arr[i]  取变量名
-  const arrMatch = s.match(/^([A-Za-z_]\w*)\s*\[/);
-  if (arrMatch) return arrMatch[1];
-
-  // 普通标识符（含前置 * & 等）
-  const identMatch = s.match(/[A-Za-z_]\w*/);
-  if (identMatch) return identMatch[0];
-
-  return s.slice(0, 30);
+  return s;
 }
 
 /**
