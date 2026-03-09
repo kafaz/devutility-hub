@@ -29,10 +29,13 @@ const express = require('express');
 const { WebSocketServer } = require('ws');
 const { Client }          = require('ssh2');
 const { spawn }           = require('child_process');
-const cors  = require('cors');
-const http  = require('http');
-const fs    = require('fs');
-const path  = require('path');
+const cors   = require('cors');
+const http   = require('http');
+const fs     = require('fs');
+const path   = require('path');
+const os     = require('os');
+const crypto = require('crypto');
+const { simpleGit } = require('simple-git');
 
 const app    = express();
 const server = http.createServer(app);
@@ -219,6 +222,114 @@ app.post('/api/check-key', (req, res) => {
   } catch (e) {
     res.json({ ok: false, msg: e.message });
   }
+});
+
+// ─── SOP Git 仓库同步 ──────────────────────────────────────────────────────
+
+/**
+ * POST /api/sop/git-sync
+ *
+ * 从指定 Git 仓库的特定路径批量读取 SOP 模板文件（.md / .json）。
+ * 流程：
+ *   1. 以 URL + branch 的 MD5 哈希作为缓存目录名，避免重复 clone
+ *   2. 目录已存在 → pull 最新；不存在 → shallow clone (--depth 1)
+ *   3. 遍历 path 指定的子目录，读取所有 .md 和 .json 文件内容
+ *   4. 返回文件列表供前端解析并导入模板
+ *
+ * 鉴权：将 token 以 Basic Auth 形式嵌入 URL（兼容 GitHub / GitLab / Gitea）
+ *   https://<token>@github.com/org/repo.git
+ *
+ * Request body:
+ *   { url: string, branch?: string, path?: string, token?: string }
+ *
+ * Response:
+ *   { ok: true, files: [{name, relativePath, content, ext}], branch, count }
+ *   { ok: false, error: string }
+ */
+app.post('/api/sop/git-sync', async (req, res) => {
+  const { url, branch = 'main', path: repoSubPath = '', token } = req.body;
+
+  if (!url) {
+    return res.status(400).json({ ok: false, error: '仓库 URL 不能为空' });
+  }
+
+  // 构造带鉴权的克隆 URL（仅用于 git 操作，不对外暴露）
+  let cloneUrl = url;
+  if (token) {
+    try {
+      const parsed = new URL(url);
+      // GitHub/GitLab PAT: https://oauth2:TOKEN@host/org/repo.git
+      parsed.username = 'oauth2';
+      parsed.password = token;
+      cloneUrl = parsed.toString();
+    } catch (e) {
+      return res.status(400).json({ ok: false, error: `无效的仓库 URL: ${e.message}` });
+    }
+  }
+
+  // 缓存目录：用 url+branch 做哈希，避免同仓库不同分支冲突
+  const cacheKey  = crypto.createHash('md5').update(`${url}#${branch}`).digest('hex').slice(0, 12);
+  const cacheDir  = path.join(os.tmpdir(), 'devutility-git', cacheKey);
+  const gitMarker = path.join(cacheDir, '.git');
+
+  try {
+    if (fs.existsSync(gitMarker)) {
+      // 已有缓存：pull 最新
+      const git = simpleGit(cacheDir);
+      await git.fetch(['--depth', '1', 'origin', branch]);
+      await git.checkout(branch);
+      await git.reset(['--hard', `origin/${branch}`]);
+    } else {
+      // 首次克隆：shallow clone 节省空间和时间
+      fs.mkdirSync(cacheDir, { recursive: true });
+      const git = simpleGit();
+      await git.clone(cloneUrl, cacheDir, ['--branch', branch, '--depth', '1']);
+    }
+  } catch (e) {
+    // 清理可能损坏的缓存目录，下次重试会重新 clone
+    try { fs.rmSync(cacheDir, { recursive: true, force: true }); } catch (_) {}
+    return res.status(500).json({ ok: false, error: `Git 操作失败: ${e.message}` });
+  }
+
+  // 确定读取目录
+  const targetDir = repoSubPath
+    ? path.join(cacheDir, repoSubPath)
+    : cacheDir;
+
+  if (!fs.existsSync(targetDir)) {
+    return res.status(400).json({
+      ok: false,
+      error: `路径在仓库中不存在: "${repoSubPath}"`,
+    });
+  }
+
+  // 递归遍历目录，收集 .md / .json 文件
+  const files = [];
+
+  function collectFiles(dir) {
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
+    catch (_) { return; }
+
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        collectFiles(fullPath);
+      } else if (/\.(md|json)$/i.test(entry.name)) {
+        try {
+          const content      = fs.readFileSync(fullPath, 'utf-8');
+          const relativePath = path.relative(targetDir, fullPath);
+          const ext          = path.extname(entry.name).toLowerCase().slice(1);
+          files.push({ name: entry.name, relativePath, content, ext });
+        } catch (_) { /* 跳过无法读取的文件 */ }
+      }
+    }
+  }
+
+  collectFiles(targetDir);
+
+  res.json({ ok: true, files, branch, count: files.length });
 });
 
 // ─── WebSocket ─────────────────────────────────────────────────────────────

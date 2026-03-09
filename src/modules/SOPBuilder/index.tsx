@@ -27,11 +27,14 @@ import {
   DownloadOutlined,
   UploadOutlined,
   MoreOutlined,
+  GithubOutlined,
 } from '@ant-design/icons';
 import { useSOPStore } from './store/sopStore';
+import { useSOPGitStore } from './store/sopGitStore';
 import TemplateEditor from './components/TemplateEditor';
 import InstanceRunner from './components/InstanceRunner';
 import ImportModal from './components/ImportModal';
+import GitRepoConfig from './components/GitRepoConfig';
 import type { SOPTemplate, SOPInstance } from '../../types';
 import {
   exportSOPTemplatesToMarkdown,
@@ -86,11 +89,15 @@ const SOPBuilder: React.FC = () => {
     deleteInstance,
   } = useSOPStore();
 
+  const { sources: gitSources } = useSOPGitStore();
+  const gitSourceCount = gitSources.filter((s) => s.enabled).length;
+
   const [templateEditorOpen, setTemplateEditorOpen] = useState(false);
   const [editingTemplate, setEditingTemplate] = useState<SOPTemplate | null>(null);
   const [startModalOpen, setStartModalOpen] = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>('');
   const [importModalOpen, setImportModalOpen] = useState(false);
+  const [gitConfigOpen, setGitConfigOpen] = useState(false);
   const [startForm] = Form.useForm();
   const [messageApi, contextHolder] = message.useMessage();
   const [activeTab, setActiveTab] = useState<'templates' | 'history'>('templates');
@@ -203,6 +210,16 @@ const SOPBuilder: React.FC = () => {
           </Text>
         </div>
         <Space>
+          {/* Git 仓库源管理 */}
+          <Badge count={gitSourceCount} size="small" color="#3b82f6" offset={[-4, 4]}>
+            <Button
+              icon={<GithubOutlined />}
+              onClick={() => setGitConfigOpen(true)}
+            >
+              Git 仓库
+            </Button>
+          </Badge>
+
           {/* 导入按钮 */}
           <Button
             icon={<UploadOutlined />}
@@ -516,6 +533,12 @@ const SOPBuilder: React.FC = () => {
         onOk={handleImportMarkdown}
         onOkJSON={handleImportJSON}
         onCancel={() => setImportModalOpen(false)}
+      />
+
+      {/* Git 仓库源管理弹窗 */}
+      <GitRepoConfig
+        open={gitConfigOpen}
+        onClose={() => setGitConfigOpen(false)}
       />
 
       {/* 开始排查弹窗 */}

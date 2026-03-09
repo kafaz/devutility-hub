@@ -213,6 +213,33 @@ export interface SOPInstance {
   resolvedAt?: number;
 }
 
+// ======================== SOP Git 仓库源类型 ========================
+
+/**
+ * Git 仓库 SOP 模板源配置
+ *
+ * 支持从公共/私有 Git 仓库批量加载 SOP 模板（.md / .json 文件），
+ * 每个源对应一个仓库的特定路径，可独立启用/禁用、手动触发同步。
+ */
+export interface GitRepoSource {
+  id: string;
+  name: string;          // 用户自定义显示名称
+  url: string;           // Git 仓库 URL（https/ssh）
+  branch: string;        // 目标分支（默认 main）
+  path: string;          // 仓库内子路径（留空表示根目录，如 "sops/templates"）
+  token?: string;        // Personal Access Token（私有仓库鉴权，可选）
+  enabled: boolean;      // 是否启用此源
+  lastSynced?: number;   // 最后一次成功同步的时间戳
+  lastResult?: {
+    imported: number;    // 本次新增模板数
+    skipped: number;     // 跳过（重名/重复）数
+    files: number;       // 读取到的文件总数
+    error?: string;      // 同步失败时的错误信息
+  };
+  createdAt: number;
+  updatedAt: number;
+}
+
 // ======================== 全局状态类型 ========================
 
 export type ThemeMode = 'dark' | 'light';
