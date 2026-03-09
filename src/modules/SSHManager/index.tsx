@@ -6,34 +6,57 @@
  *   中栏:        Tab 终端（每会话一个 Tab，含独立 XTerm 实例）
  *   右栏(380px): 多节点 SOP 执行配置 + 实时进度
  */
-import React, { useEffect, useRef, useState } from 'react';
 import {
-  Typography, Button, Input, InputNumber, Select, Space, Card,
-  Tag, Alert, Tooltip, Divider, Form, Modal, Progress, Badge,
-  Spin, message, Segmented, Popconfirm,
-} from 'antd';
-import {
-  ApiOutlined, DisconnectOutlined, KeyOutlined, LockOutlined,
-  PlusOutlined, EditOutlined, DeleteOutlined, PlayCircleOutlined,
-  StopOutlined, CheckCircleOutlined, CloseCircleOutlined,
-  ClockCircleOutlined, ReloadOutlined, FolderOpenOutlined,
-  ExportOutlined, GlobalOutlined,
+    ApiOutlined,
+    CheckCircleOutlined,
+    ClockCircleOutlined,
+    CloseCircleOutlined,
+    DeleteOutlined,
+    DisconnectOutlined,
+    EditOutlined,
+    ExportOutlined,
+    FolderOpenOutlined,
+    GlobalOutlined,
+    KeyOutlined, LockOutlined,
+    PlayCircleOutlined,
+    PlusOutlined,
+    ReloadOutlined,
+    StopOutlined,
 } from '@ant-design/icons';
+import {
+    Alert,
+    Badge,
+    Button,
+    Card,
+    Divider, Form,
+    Input, InputNumber,
+    message,
+    Modal,
+    Popconfirm,
+    Progress,
+    Segmented,
+    Select, Space,
+    Spin,
+    Tag,
+    Tooltip,
+    Typography,
+} from 'antd';
+import React, { useEffect, useRef, useState } from 'react';
 import { Terminal } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import 'xterm/css/xterm.css';
 
-import { useSSHStore } from './store/sshStore';
-import type { SSHSession, SSHProfile, PlanStepResult, NodeExecution } from './store/sshStore';
-import { useJournalStore } from './store/journalStore';
-import { useSOPStore } from '../SOPBuilder/store/sopStore';
-import {
-  generateMultiNodeReport, renderTemplate,
-} from '../../utils';
-import type { NodeReportData } from '../../utils';
-import { useGlobalStore } from '../../store/globalStore';
 import ResizableOutput from '../../components/shared/ResizableOutput';
+import { useGlobalStore } from '../../store/globalStore';
+import type { NodeReportData } from '../../utils';
+import {
+    generateMultiNodeReport, renderTemplate,
+} from '../../utils';
+import { useSOPStore } from '../SOPBuilder/store/sopStore';
 import SessionJournal from './components/SessionJournal';
+import { useJournalStore } from './store/journalStore';
+import type { NodeExecution, PlanStepResult, SSHProfile, SSHSession } from './store/sshStore';
+import { useSSHStore } from './store/sshStore';
 
 const { Title, Text } = Typography;
 const { Password } = Input;
@@ -405,8 +428,20 @@ const SSHManager: React.FC = () => {
 
   const connectedSessions = sessions.filter((s) => s.status === 'connected');
 
-  // ── 变量收集（来自选中实例中的占位符） ────────────────────────────────────
-  const allVarNames = Array.from(new Set(
+  // ── 变量收集（来自选中实例中的占位符和预定义配置） ──────────────────────────
+  const definedVars = React.useMemo(() => {
+    const map = new Map<string, import('../../types').VariableConfig>();
+    [...selectedNodes].forEach((sessionId) => {
+      const instId = execMode === 'broadcast' ? broadcastInstanceId : targetedMap[sessionId];
+      const inst   = instances.find((i) => i.id === instId);
+      if (inst?.variables) {
+        inst.variables.forEach(v => map.set(v.name, v));
+      }
+    });
+    return map;
+  }, [selectedNodes, execMode, broadcastInstanceId, targetedMap, instances]);
+
+  const extractedVarNames = Array.from(new Set(
     [...selectedNodes].flatMap((sessionId) => {
       const instId = execMode === 'broadcast' ? broadcastInstanceId : targetedMap[sessionId];
       const inst   = instances.find((i) => i.id === instId);
@@ -420,24 +455,36 @@ const SSHManager: React.FC = () => {
     })
   ));
 
+  const allVarNames = Array.from(new Set([...extractedVarNames, ...Array.from(definedVars.keys())]));
+
   // ── 构建单会话的执行步骤列表 ──────────────────────────────────────────────
   function buildSteps(instanceId: string) {
     const inst = instances.find((i) => i.id === instanceId);
     if (!inst) return [];
+
+    const mergedVars = { ...varValues };
+    if (inst.variables) {
+      inst.variables.forEach(v => {
+        if (mergedVars[v.name] === undefined && v.defaultValue !== undefined) {
+          mergedVars[v.name] = v.defaultValue;
+        }
+      });
+    }
+
     const steps: import('./store/sshStore').PlanStep[] = [];
     [...inst.checkResults, ...inst.extraChecks].forEach((cr) => {
       const subs = cr.subSteps ?? [];
       if (subs.length > 0) {
         subs.forEach((ss) => steps.push({
           id: ss.id, name: ss.name,
-          cmd: renderTemplate(ss.command, varValues),
+          cmd: renderTemplate(ss.command, mergedVars),
           captureVar: ss.captureVar, capturePattern: ss.capturePattern,
           normalRegex: ss.normalRegex, abnormalRegex: ss.abnormalRegex,
           scriptPath: ss.scriptPath, timeout: ss.timeoutMs ?? 30000,
           checkId: cr.checkId, isSubStep: true,
         }));
       } else {
-        const cmd = renderTemplate(cr.command, varValues);
+        const cmd = renderTemplate(cr.command, mergedVars);
         if (cmd.trim()) steps.push({
           id: cr.checkId, name: cr.checkName, cmd,
           checkId: cr.checkId, isSubStep: false,
@@ -1061,15 +1108,36 @@ const SSHManager: React.FC = () => {
               {/* 变量填写 */}
               {allVarNames.length > 0 && (
                 <div>
-                  <Text style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>命令变量</Text>
-                  {allVarNames.map((v) => (
-                    <Input key={v} size="small"
-                      prefix={<Text type="secondary" style={{ fontSize: 11 }}>{v}:</Text>}
-                      value={varValues[v] ?? ''}
-                      onChange={(e) => setVarValues((prev) => ({ ...prev, [v]: e.target.value }))}
-                      style={{ marginBottom: 4, fontFamily: 'JetBrains Mono, Consolas, monospace', fontSize: 11 }}
-                    />
-                  ))}
+                  <Text style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>变量配置</Text>
+                  {allVarNames.map((v) => {
+                    const def = definedVars.get(v);
+                    const labelStr = def?.label ? `${def.label} (${v})` : v;
+                    return (
+                      <div key={v} style={{ marginBottom: 6 }}>
+                        <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 2 }}>
+                          {labelStr}{def?.required && <span style={{ color: '#ef4444' }}> *</span>}
+                        </Text>
+                        {def?.type === 'select' ? (
+                          <Select
+                            size="small"
+                            value={varValues[v] ?? def.defaultValue ?? ''}
+                            onChange={(val) => setVarValues((prev) => ({ ...prev, [v]: val }))}
+                            style={{ width: '100%', fontSize: 11 }}
+                            options={(def.options ?? []).map((o) => ({ label: o, value: o }))}
+                          />
+                        ) : (
+                          <Input
+                            size="small"
+                            type={def?.type === 'number' ? 'number' : 'text'}
+                            value={varValues[v] ?? def?.defaultValue ?? ''}
+                            onChange={(e) => setVarValues((prev) => ({ ...prev, [v]: e.target.value }))}
+                            placeholder={def?.placeholder ?? `输入 ${v}`}
+                            style={{ fontFamily: 'JetBrains Mono, Consolas, monospace', fontSize: 11 }}
+                          />
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
 

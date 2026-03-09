@@ -1,36 +1,36 @@
+import {
+    CheckCircleOutlined,
+    ClockCircleOutlined,
+    CloseCircleOutlined,
+    CopyOutlined,
+    ExportOutlined,
+    MinusCircleOutlined,
+    PlusOutlined,
+    ThunderboltOutlined,
+} from '@ant-design/icons';
+import {
+    Alert,
+    Badge,
+    Button,
+    Card,
+    Collapse,
+    Form,
+    Input,
+    message,
+    Modal,
+    Popconfirm,
+    Select,
+    Space,
+    Tag,
+    Tooltip,
+    Typography,
+} from 'antd';
 import React, { useState } from 'react';
 import ResizableOutput from '../../../components/shared/ResizableOutput';
-import {
-  Typography,
-  Button,
-  Space,
-  Card,
-  Tag,
-  Input,
-  Tooltip,
-  Badge,
-  Collapse,
-  Alert,
-  Modal,
-  Form,
-  Select,
-  message,
-  Popconfirm,
-} from 'antd';
-import {
-  CopyOutlined,
-  CheckCircleOutlined,
-  CloseCircleOutlined,
-  MinusCircleOutlined,
-  PlusOutlined,
-  ExportOutlined,
-  ClockCircleOutlined,
-  ThunderboltOutlined,
-} from '@ant-design/icons';
-import type { SOPInstance, SOPTemplate, SOPCheckResult } from '../../../types';
 import { useClipboard } from '../../../hooks/useClipboard';
-import { generateInstanceReport } from '../../../utils';
 import { useGlobalStore } from '../../../store/globalStore';
+import type { SOPCheckResult, SOPInstance, SOPTemplate } from '../../../types';
+import { generateInstanceReport } from '../../../utils';
 
 const { Title, Text } = Typography;
 const { TextArea } = Input;
@@ -82,17 +82,25 @@ interface Props {
   onDelete: () => void;
 }
 
-// 单个检查步骤卡片
 const CheckCard: React.FC<{
   result: SOPCheckResult;
   stepNum: number;
   templateCheck?: SOPTemplate['checks'][0];
   isDark: boolean;
+  instanceVariables?: import('../../../types').VariableConfig[];
   onUpdate: (data: Partial<SOPCheckResult>) => void;
-}> = ({ result, stepNum, templateCheck, isDark, onUpdate }) => {
+}> = ({ result, stepNum, templateCheck, isDark, instanceVariables, onUpdate }) => {
   const { copy } = useClipboard();
   const [messageApi, contextHolder] = message.useMessage();
-  const [varValues, setVarValues] = useState<Record<string, string>>({});
+  const [varValues, setVarValues] = useState<Record<string, string>>(() => {
+    const init: Record<string, string> = {};
+    if (instanceVariables) {
+      instanceVariables.forEach(v => {
+        if (v.defaultValue) init[v.name] = v.defaultValue;
+      });
+    }
+    return init;
+  });
 
   const cardBg = isDark ? '#2d2d30' : '#ffffff';
   const borderColor = isDark ? '#3e3e42' : '#e4e4e7';
@@ -214,23 +222,37 @@ const CheckCard: React.FC<{
                 marginBottom: 6,
               }}
             >
-              {vars.map((v) => (
-                <Input
-                  key={v}
-                  size="small"
-                  prefix={
-                    <Text type="secondary" style={{ fontSize: 11 }}>
-                      {v}:
-                    </Text>
-                  }
-                  value={varValues[v] || ''}
-                  onChange={(e) =>
-                    setVarValues((prev) => ({ ...prev, [v]: e.target.value }))
-                  }
-                  placeholder={`填写 ${v}`}
-                  style={{ fontSize: 12 }}
-                />
-              ))}
+              {vars.map((v) => {
+                const def = instanceVariables?.find(cfg => cfg.name === v);
+                const labelStr = def?.label ? `${def.label} (${v})` : v;
+                return def?.type === 'select' ? (
+                  <Select
+                    key={v}
+                    size="small"
+                    value={varValues[v] || ''}
+                    onChange={(val) => setVarValues((prev) => ({ ...prev, [v]: val }))}
+                    style={{ width: '100%', fontSize: 12, marginBottom: 4 }}
+                    options={(def.options ?? []).map((o) => ({ label: o, value: o }))}
+                  />
+                ) : (
+                  <Input
+                    key={v}
+                    size="small"
+                    prefix={
+                      <Text type="secondary" style={{ fontSize: 11 }}>
+                        {labelStr}:
+                      </Text>
+                    }
+                    type={def?.type === 'number' ? 'number' : 'text'}
+                    value={varValues[v] || ''}
+                    onChange={(e) =>
+                      setVarValues((prev) => ({ ...prev, [v]: e.target.value }))
+                    }
+                    placeholder={def?.placeholder ?? `填写 ${v}`}
+                    style={{ fontSize: 12, marginBottom: 4 }}
+                  />
+                );
+              })}
             </div>
           )}
 
@@ -524,6 +546,7 @@ const InstanceRunner: React.FC<Props> = ({
               stepNum={i + 1}
               templateCheck={templateCheck}
               isDark={isDark}
+              instanceVariables={instance.variables}
               onUpdate={(data) => onUpdateCheck(result.checkId, data)}
             />
           );
@@ -536,6 +559,7 @@ const InstanceRunner: React.FC<Props> = ({
             result={result}
             stepNum={instance.checkResults.length + i + 1}
             isDark={isDark}
+            instanceVariables={instance.variables}
             onUpdate={(data) => onUpdateCheck(result.checkId, data)}
           />
         ))}

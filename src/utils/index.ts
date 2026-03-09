@@ -1,4 +1,4 @@
-import type { GrepContextLine, GrepGroup, SOPTemplate, SOPCheck, SOPInstance } from '../types';
+import type { GrepContextLine, GrepGroup, SOPCheck, SOPInstance, SOPTemplate } from '../types';
 
 // 生成唯一 ID
 export function generateId(): string {
@@ -293,17 +293,37 @@ export function parseGrepCOutput(text: string): GrepGroup[] {
  * 将 SOPTemplate 序列化为 Markdown 字符串
  */
 export function exportSOPTemplateToMarkdown(tpl: SOPTemplate): string {
+  const variablesSection = (tpl.variables && tpl.variables.length > 0)
+    ? `## 变量设置\n\n` + tpl.variables.map(v => `- **${v.name}**: ${v.label} (类型: \`${v.type}\`, 必填: \`${v.required}\`, 默认: \`${v.defaultValue || ''}\`)`).join('\n') + `\n\n`
+    : '';
+
   const checksSection = tpl.checks
     .sort((a, b) => a.order - b.order)
-    .map(
-      (c, i) =>
-        `### 步骤 ${i + 1}: ${c.name}\n\n` +
-        (c.description ? `> ${c.description}\n\n` : '') +
-        `\`\`\`bash\n${c.command}\n\`\`\`\n\n` +
-        (c.expectedNormal ? `- ✅ **正常**: ${c.expectedNormal}\n` : '') +
-        (c.abnormalSigns ? `- ❌ **异常**: ${c.abnormalSigns}\n` : '')
-    )
-    .join('\n---\n\n');
+    .map((c, i) => {
+      let checkStr = `### 步骤 ${i + 1}: ${c.name}\n\n`;
+      if (c.description) checkStr += `> ${c.description}\n\n`;
+
+      if (c.subSteps && c.subSteps.length > 0) {
+        checkStr += c.subSteps.map((ss, j) => {
+          let ssStr = `#### 子步骤 ${j + 1}: ${ss.name}\n\n`;
+          if (ss.description) ssStr += `> ${ss.description}\n\n`;
+          ssStr += `\`\`\`bash\n${ss.command}\n\`\`\`\n\n`;
+          if (ss.captureVar) ssStr += `- 📥 **捕获变量**: ${ss.captureVar}${ss.capturePattern ? ` (提取: \`${ss.capturePattern}\`)` : ''}\n`;
+          if (ss.normalRegex) ssStr += `- ✅ **正常正则**: \`${ss.normalRegex}\`\n`;
+          if (ss.abnormalRegex) ssStr += `- ❌ **异常正则**: \`${ss.abnormalRegex}\`\n`;
+          if (ss.scriptPath) ssStr += `- 🐍 **处理脚本**: \`${ss.scriptPath}\`\n`;
+          if (ss.timeoutMs) ssStr += `- 🕒 **超时**: ${ss.timeoutMs}ms\n`;
+          return ssStr.trimEnd();
+        }).join('\n\n');
+        checkStr += '\n';
+      } else {
+        checkStr += `\`\`\`bash\n${c.command}\n\`\`\`\n\n`;
+        if (c.expectedNormal) checkStr += `- ✅ **正常**: ${c.expectedNormal}\n`;
+        if (c.abnormalSigns) checkStr += `- ❌ **异常**: ${c.abnormalSigns}\n`;
+      }
+      return checkStr.trimEnd();
+    })
+    .join('\n\n---\n\n');
 
   return `# SOP: ${tpl.name}
 
@@ -314,7 +334,7 @@ export function exportSOPTemplateToMarkdown(tpl: SOPTemplate): string {
 
 ${tpl.diagnosisHints || '（暂无）'}
 
-## 排查步骤
+${variablesSection}## 排查步骤
 
 ${checksSection}
 `;
@@ -347,12 +367,10 @@ export function parseSOPTemplateFromMarkdown(
 ): Omit<SOPTemplate, 'id' | 'createdAt' | 'updatedAt'> | null {
   const lines = md.split('\n');
 
-  // 提取模板名称
   const titleLine = lines.find((l) => /^#\s+SOP:\s+/.test(l));
   if (!titleLine) return null;
   const name = titleLine.replace(/^#\s+SOP:\s+/, '').trim();
 
-  // 提取元信息字段
   const getMeta = (key: string): string => {
     const line = lines.find((l) => l.startsWith(`**${key}**:`));
     return line ? line.replace(`**${key}**:`, '').trim() : '';
@@ -360,7 +378,6 @@ export function parseSOPTemplateFromMarkdown(
   const category = getMeta('分类') || '其他';
   const description = getMeta('描述');
 
-  // 提取常见根因提示（## 常见根因提示 到下一个 ## 之间的内容）
   let diagnosisHints = '';
   const hintsStart = lines.findIndex((l) => /^##\s+常见根因提示/.test(l));
   if (hintsStart !== -1) {
@@ -373,12 +390,52 @@ export function parseSOPTemplateFromMarkdown(
     if (diagnosisHints === '（暂无）') diagnosisHints = '';
   }
 
-  // 提取排查步骤（以 ### 步骤 N: 开头的段落）
+  const variables: import('../types').VariableConfig[] = [];
+  const varStart = lines.findIndex((l) => /^##\s+变量设置/.test(l));
+  if (varStart !== -1) {
+    for (let i = varStart + 1; i < lines.length; i++) {
+      if (/^##\s/.test(lines[i])) break;
+      const m = lines[i].match(/[-*]\s+\*\*([^]+)\*\*:\s+([^]+)\s+\(类型:\s+`([^]+)`,\s+必填:\s+`([^]+)`,\s+默认:\s+`(.*)`\)/);
+      if (m) {
+        variables.push({
+          name: m[1],
+          label: m[2],
+          type: m[3] as any,
+          required: m[4] === 'true',
+          defaultValue: m[5] || undefined,
+        });
+      }
+    }
+  }
+
   const checks: SOPCheck[] = [];
   let inCodeBlock = false;
   let currentCheck: Partial<SOPCheck> | null = null;
+  let currentSubStep: Partial<import('../types').SOPSubStep> | null = null;
   let codeLines: string[] = [];
   let inChecksSection = false;
+
+  const pushCurrentCheck = () => {
+    if (currentCheck) {
+      if (currentSubStep) {
+        if (codeLines.length > 0) currentSubStep.command = codeLines.join('\n').trim();
+        currentCheck.subSteps = currentCheck.subSteps || [];
+        currentCheck.subSteps.push(finalizeSubStep(currentSubStep, currentCheck.subSteps.length));
+        currentSubStep = null;
+      } else if (codeLines.length > 0) {
+        currentCheck.command = codeLines.join('\n').trim();
+      }
+      checks.push(finalizeCheck(currentCheck, checks.length));
+    }
+  };
+
+  const pushCurrentSubStep = () => {
+    if (currentSubStep && currentCheck) {
+      if (codeLines.length > 0) currentSubStep.command = codeLines.join('\n').trim();
+      currentCheck.subSteps = currentCheck.subSteps || [];
+      currentCheck.subSteps.push(finalizeSubStep(currentSubStep, currentCheck.subSteps.length));
+    }
+  };
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -389,22 +446,27 @@ export function parseSOPTemplateFromMarkdown(
     }
     if (!inChecksSection) continue;
 
-    // 新步骤开始
     const stepMatch = line.match(/^###\s+步骤\s+\d+:\s+(.+)$/);
     if (stepMatch) {
-      if (currentCheck) {
-        currentCheck.command = codeLines.join('\n').trim();
-        checks.push(finalizeCheck(currentCheck, checks.length));
-      }
-      currentCheck = { name: stepMatch[1].trim(), description: '', command: '', expectedNormal: '', abnormalSigns: '' };
+      pushCurrentCheck();
+      currentCheck = { name: stepMatch[1].trim(), description: '', command: '', expectedNormal: '', abnormalSigns: '', subSteps: [] };
+      currentSubStep = null;
       codeLines = [];
       inCodeBlock = false;
       continue;
     }
 
-    if (!currentCheck) continue;
+    const subStepMatch = line.match(/^####\s+子步骤\s+\d+:\s+(.+)$/);
+    if (subStepMatch) {
+      pushCurrentSubStep();
+      currentSubStep = { name: subStepMatch[1].trim(), description: '', command: '' };
+      codeLines = [];
+      inCodeBlock = false;
+      continue;
+    }
 
-    // 代码块开闭
+    if (!currentCheck && !currentSubStep) continue;
+
     if (line.startsWith('```bash') || line.startsWith('```shell')) {
       inCodeBlock = true;
       codeLines = [];
@@ -419,26 +481,51 @@ export function parseSOPTemplateFromMarkdown(
       continue;
     }
 
-    // 描述行（> 开头）
-    if (line.startsWith('> ') && !currentCheck.description) {
-      currentCheck.description = line.replace(/^>\s+/, '').trim();
+    if (line.startsWith('> ')) {
+      const desc = line.replace(/^>\s+/, '').trim();
+      if (currentSubStep && !currentSubStep.description) currentSubStep.description = desc;
+      else if (currentCheck && !currentCheck.description && !currentSubStep) currentCheck.description = desc;
       continue;
     }
 
-    // 正常/异常特征
-    const normalMatch = line.match(/[-*]\s+✅\s+\*\*正常\*\*:\s+(.+)/);
-    if (normalMatch) { currentCheck.expectedNormal = normalMatch[1].trim(); continue; }
-    const abnormalMatch = line.match(/[-*]\s+❌\s+\*\*异常\*\*:\s+(.+)/);
-    if (abnormalMatch) { currentCheck.abnormalSigns = abnormalMatch[1].trim(); continue; }
+    if (currentSubStep) {
+      const capMatch = line.match(/[-*]\s+📥\s+\*\*捕获变量\*\*:\s+([^\s]+)(?:\s+\(提取:\s+`([^`]+)`\))?/);
+      if (capMatch) { currentSubStep.captureVar = capMatch[1]; currentSubStep.capturePattern = capMatch[2]; continue; }
+      const normMatch = line.match(/[-*]\s+✅\s+\*\*正常正则\*\*:\s+`([^`]+)`/);
+      if (normMatch) { currentSubStep.normalRegex = normMatch[1]; continue; }
+      const abnomMatch = line.match(/[-*]\s+❌\s+\*\*异常正则\*\*:\s+`([^`]+)`/);
+      if (abnomMatch) { currentSubStep.abnormalRegex = abnomMatch[1]; continue; }
+      const scriptMatch = line.match(/[-*]\s+🐍\s+\*\*处理脚本\*\*:\s+`([^`]+)`/);
+      if (scriptMatch) { currentSubStep.scriptPath = scriptMatch[1]; continue; }
+      const timeMatch = line.match(/[-*]\s+🕒\s+\*\*超时\*\*:\s+(\d+)ms/);
+      if (timeMatch) { currentSubStep.timeoutMs = parseInt(timeMatch[1]); continue; }
+    } else if (currentCheck) {
+      const normalMatch = line.match(/[-*]\s+✅\s+\*\*正常\*\*:\s+(.+)/);
+      if (normalMatch) { currentCheck.expectedNormal = normalMatch[1].trim(); continue; }
+      const abnormalMatch = line.match(/[-*]\s+❌\s+\*\*异常\*\*:\s+(.+)/);
+      if (abnormalMatch) { currentCheck.abnormalSigns = abnormalMatch[1].trim(); continue; }
+    }
   }
 
-  // 处理最后一个 check
-  if (currentCheck) {
-    if (codeLines.length > 0) currentCheck.command = codeLines.join('\n').trim();
-    checks.push(finalizeCheck(currentCheck, checks.length));
-  }
+  pushCurrentCheck();
 
-  return { name, category, description, diagnosisHints, checks };
+  return { name, category, description, diagnosisHints, variables, checks };
+}
+
+function finalizeSubStep(partial: Partial<import('../types').SOPSubStep>, index: number): import('../types').SOPSubStep {
+  return {
+    id: generateId(),
+    order: index + 1,
+    name: partial.name || `子步骤 ${index + 1}`,
+    description: partial.description,
+    command: partial.command || '',
+    captureVar: partial.captureVar,
+    capturePattern: partial.capturePattern,
+    normalRegex: partial.normalRegex,
+    abnormalRegex: partial.abnormalRegex,
+    scriptPath: partial.scriptPath,
+    timeoutMs: partial.timeoutMs,
+  };
 }
 
 function finalizeCheck(
@@ -453,6 +540,7 @@ function finalizeCheck(
     command: partial.command || '',
     expectedNormal: partial.expectedNormal || '',
     abnormalSigns: partial.abnormalSigns || '',
+    subSteps: partial.subSteps,
   };
 }
 

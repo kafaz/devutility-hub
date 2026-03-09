@@ -177,6 +177,7 @@ export interface SOPTemplate {
   description: string;
   checks: SOPCheck[];
   diagnosisHints?: string;
+  variables?: VariableConfig[]; // 预定义的变量配置，可在执行前由用户填写
   createdAt: number;
   updatedAt: number;
 }
@@ -203,6 +204,7 @@ export interface SOPInstance {
   status: 'investigating' | 'resolved' | 'escalated';
   checkResults: SOPCheckResult[];
   extraChecks: SOPCheckResult[]; // 临时追加的非模板步骤
+  variables?: VariableConfig[];  // 从模板快照继承的变量配置
   diagnosis: {
     phenomenon: string;  // 故障现象
     rootCause: string;   // 根因分析

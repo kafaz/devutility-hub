@@ -1,13 +1,25 @@
-import React, { useEffect, useState } from 'react';
 import {
-  Modal, Form, Input, Select, Button, Space, Typography,
-  Table, Popconfirm, Tag, Tooltip, Collapse, Alert, Divider,
-} from 'antd';
-import {
-  PlusOutlined, DeleteOutlined, HolderOutlined,
-  ImportOutlined, SettingOutlined,
+    DeleteOutlined, HolderOutlined,
+    ImportOutlined,
+    PlusOutlined,
+    SettingOutlined,
 } from '@ant-design/icons';
-import type { SOPTemplate, SOPCheck, SOPSubStep } from '../../../types';
+import {
+    Alert,
+    Button,
+    Collapse,
+    Divider,
+    Form, Input,
+    Modal,
+    Popconfirm,
+    Select,
+    Space,
+    Table,
+    Tag, Tooltip,
+    Typography,
+} from 'antd';
+import React, { useEffect, useState } from 'react';
+import type { SOPCheck, SOPSubStep, SOPTemplate, VariableConfig } from '../../../types';
 import { generateId } from '../../../utils';
 import SubStepPicker from './SubStepPicker';
 
@@ -316,6 +328,7 @@ const TemplateEditor: React.FC<Props> = ({
 }) => {
   const [form] = Form.useForm();
   const [checks, setChecks] = useState<SOPCheck[]>([]);
+  const [variables, setVariables] = useState<VariableConfig[]>([]);
   const [activeKeys, setActiveKeys] = useState<string[]>([]);
 
   useEffect(() => {
@@ -326,9 +339,11 @@ const TemplateEditor: React.FC<Props> = ({
           description: initial.description, diagnosisHints: initial.diagnosisHints,
         });
         setChecks(initial.checks.map((c) => ({ ...c, subSteps: c.subSteps ?? [] })));
+        setVariables(initial.variables ?? []);
       } else {
         form.resetFields();
         setChecks([]);
+        setVariables([]);
       }
       setActiveKeys([]);
     }
@@ -372,6 +387,7 @@ const TemplateEditor: React.FC<Props> = ({
       category: values.category || '其他',
       description: values.description || '',
       diagnosisHints: values.diagnosisHints || '',
+      variables: variables,
       checks: checks.map((c, i) => ({ ...c, order: i + 1 })),
     });
   };
@@ -409,6 +425,71 @@ const TemplateEditor: React.FC<Props> = ({
           </Text>
         }
       />
+
+      {/* 变量设置 */}
+      <div style={{ marginBottom: 8, display: 'flex', justifyContent: 'space-between', marginTop: 16 }}>
+        <Text strong>预设变量（{variables.length} 个）</Text>
+        <Button size="small" icon={<PlusOutlined />} type="dashed" onClick={() => setVariables([...variables, { name: '', label: '', type: 'text', required: true }])}>
+          添加变量
+        </Button>
+      </div>
+
+      {variables.length > 0 && (
+        <Table
+          dataSource={variables}
+          rowKey={(r, i) => r.name + '_' + i}
+          pagination={false}
+          size="small"
+          style={{ marginBottom: 16 }}
+          columns={[
+            {
+              title: '变量名 (英文)',
+              dataIndex: 'name',
+              render: (v, _, i) => <Input size="small" value={v} onChange={(e) => {
+                const nav = [...variables];
+                nav[i].name = e.target.value;
+                setVariables(nav);
+              }} placeholder="如: PORT" />
+            },
+            {
+              title: '显示标签',
+              dataIndex: 'label',
+              render: (v, _, i) => <Input size="small" value={v} onChange={(e) => {
+                const nav = [...variables];
+                nav[i].label = e.target.value;
+                setVariables(nav);
+              }} placeholder="如: 服务端口" />
+            },
+            {
+              title: '类型',
+              dataIndex: 'type',
+              render: (v, _, i) => <Select size="small" value={v} onChange={(val) => {
+                const nav = [...variables];
+                nav[i].type = val as any;
+                setVariables(nav);
+              }} style={{ width: 80 }} options={[{label:'文本', value:'text'}, {label:'数字', value:'number'}, {label:'路径', value:'path'}, {label:'下拉', value:'select'}]} />
+            },
+            {
+              title: '默认值',
+              dataIndex: 'defaultValue',
+              render: (v, _, i) => <Input size="small" value={v} onChange={(e) => {
+                const nav = [...variables];
+                nav[i].defaultValue = e.target.value;
+                setVariables(nav);
+              }} placeholder="选填" />
+            },
+            {
+              title: '',
+              width: 32,
+              render: (_, __, i) => <DeleteOutlined style={{color: '#ef4444', cursor: 'pointer'}} onClick={() => {
+                const nav = [...variables];
+                nav.splice(i, 1);
+                setVariables(nav);
+              }} />
+            }
+          ]}
+        />
+      )}
 
       {/* 检查步骤列表（Collapse 折叠面板） */}
       <div style={{ marginBottom: 8, display: 'flex', justifyContent: 'space-between' }}>

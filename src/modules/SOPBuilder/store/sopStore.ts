@@ -1,10 +1,12 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type {
-  SOPTemplate, SOPInstance, SOPCheck, SOPCheckResult,
-  SOPSubStepResult,
+    SOPCheck, SOPCheckResult,
+    SOPInstance,
+    SOPSubStepResult,
+    SOPTemplate,
 } from '../../../types';
-import { generateId, renderTemplate, parseSOPTemplatesFromMarkdown } from '../../../utils';
+import { generateId, parseSOPTemplatesFromMarkdown, renderTemplate } from '../../../utils';
 
 interface SOPStore {
   templates: SOPTemplate[];
@@ -294,6 +296,7 @@ export const useSOPStore = create<SOPStore>()(
           status: 'investigating',
           checkResults: initCheckResults(template.checks),
           extraChecks: [],
+          variables: template.variables ? JSON.parse(JSON.stringify(template.variables)) : [],
           diagnosis: {
             phenomenon: '',
             rootCause: '',

@@ -3,13 +3,17 @@
  *
  * 布局：左侧模板列表 → 右侧展开每个 Check 的子步骤 → 勾选复制
  */
-import React, { useState, useMemo } from 'react';
-import {
-  Modal, Table, Checkbox, Typography,
-  Tag, Empty, Input, Alert,
-} from 'antd';
 import { SearchOutlined } from '@ant-design/icons';
-import type { SOPTemplate, SOPSubStep } from '../../../types';
+import {
+    Alert,
+    Checkbox,
+    Empty, Input,
+    Modal, Table,
+    Tag,
+    Typography,
+} from 'antd';
+import React, { useMemo, useState } from 'react';
+import type { SOPSubStep, SOPTemplate } from '../../../types';
 import { generateId } from '../../../utils';
 
 const { Text } = Typography;
@@ -92,6 +96,9 @@ const SubStepPicker: React.FC<Props> = ({ open, allTemplates, onOk, onCancel }) 
       capturePattern: s.capturePattern,
       expectedNormal: s.expectedNormal,
       abnormalSigns:  s.abnormalSigns,
+      normalRegex:    s.normalRegex,
+      abnormalRegex:  s.abnormalRegex,
+      scriptPath:     s.scriptPath,
       timeoutMs:      s.timeoutMs,
     }));
     onOk(subSteps);
