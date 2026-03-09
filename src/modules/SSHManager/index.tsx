@@ -496,26 +496,34 @@ const SSHManager: React.FC = () => {
         setInstanceStatus(inst.id, 'resolved');
       });
 
-      // 自动将执行结果写入每个会话的日志
+      // 自动将执行结果写入每个会话的日志（含节点管理 IP 信息）
       if (run) {
         addSOPNodeResults(
-          run.nodeExecutions.map((ne) => ({
-            sessionId:   ne.sessionId,
-            sessionName: ne.sessionName,
-            instanceId:  ne.instanceId,
-            steps: ne.steps.map((step) => {
-              const r = ne.results[step.id];
-              return {
-                name:        step.name,
-                command:     r?.resolvedCmd ?? step.cmd,
-                output:      r?.processedOutput ?? r?.stdout ?? '',
-                exitCode:    r?.exitCode ?? -1,
-                durationMs:  r?.durationMs ?? 0,
-                statusReason: r?.statusReason,
-                capturedVar:  r?.capturedVar,
-              };
-            }),
-          }))
+          run.nodeExecutions.map((ne) => {
+            // 从会话 → 档案中找到管理 IP
+            const sess    = sessions.find((s) => s.id === ne.sessionId);
+            const profile = profiles.find((p) => p.id === sess?.profileId);
+            return {
+              sessionId:   ne.sessionId,
+              sessionName: ne.sessionName,
+              nodeHost:    profile?.host,
+              nodePort:    profile?.port,
+              nodeUser:    profile?.username,
+              instanceId:  ne.instanceId,
+              steps: ne.steps.map((step) => {
+                const r = ne.results[step.id];
+                return {
+                  name:         step.name,
+                  command:      r?.resolvedCmd ?? step.cmd,
+                  output:       r?.processedOutput ?? r?.stdout ?? '',
+                  exitCode:     r?.exitCode ?? -1,
+                  durationMs:   r?.durationMs ?? 0,
+                  statusReason: r?.statusReason,
+                  capturedVar:  r?.capturedVar,
+                };
+              }),
+            };
+          })
         );
       }
 
@@ -837,12 +845,17 @@ const SSHManager: React.FC = () => {
                         if (data === '\r') {
                           const cmd = buf.trim();
                           if (cmd) {
+                            // 从档案获取管理 IP
+                            const prof = profiles.find((p) => p.id === sess.profileId);
                             addEntry({
                               sessionId:   sess.id,
                               sessionName: sess.name,
                               type:        'manual_cmd',
                               timestamp:   Date.now(),
                               command:     cmd,
+                              nodeHost:    prof?.host,
+                              nodePort:    prof?.port,
+                              nodeUser:    prof?.username,
                             });
                           }
                           cmdBuffers.current.set(sess.id, '');

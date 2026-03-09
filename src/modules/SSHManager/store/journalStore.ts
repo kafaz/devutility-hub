@@ -44,7 +44,12 @@ export interface JournalEntry {
   // SOP 关联
   sopStepName?:   string;
   sopInstanceId?: string;
-  sopNodeName?:   string;        // 多节点执行时的节点标识
+  sopNodeName?:   string;        // 多节点执行时的节点标识（会话名称）
+
+  // 节点信息（执行命令时的目标主机，管理 IP）
+  nodeHost?:      string;        // 如 192.168.1.100
+  nodePort?:      number;        // 如 22
+  nodeUser?:      string;        // 如 root
 
   // 备注 / 快照内容
   content?: string;
@@ -71,6 +76,9 @@ interface JournalStore {
     results: Array<{
       sessionId:   string;
       sessionName: string;
+      nodeHost?:   string;   // 管理 IP
+      nodePort?:   number;
+      nodeUser?:   string;
       steps: Array<{
         name:       string;
         command:    string;
@@ -127,26 +135,30 @@ export const useJournalStore = create<JournalStore>()(
 
       clearAll: () => set({ journals: {} }),
 
-      // 多节点 SOP 执行结束后批量写入
+      // 多节点 SOP 执行结束后批量写入（含节点 IP 信息）
       addSOPNodeResults: (results) => {
         const { addEntry } = get();
         const now = Date.now();
         results.forEach((node) => {
           node.steps.forEach((step, i) => {
             addEntry({
-              sessionId:   node.sessionId,
-              sessionName: node.sessionName,
-              type:        'sop_step',
-              timestamp:   now + i,      // 同一批次时间递增 1ms 保证排序
-              command:     step.command,
-              output:      step.output,
-              exitCode:    step.exitCode,
-              durationMs:  step.durationMs,
+              sessionId:    node.sessionId,
+              sessionName:  node.sessionName,
+              type:         'sop_step',
+              timestamp:    now + i,
+              command:      step.command,
+              output:       step.output,
+              exitCode:     step.exitCode,
+              durationMs:   step.durationMs,
               statusReason: step.statusReason,
               capturedVar:  step.capturedVar,
               sopStepName:  step.name,
               sopInstanceId: node.instanceId,
               sopNodeName:  node.sessionName,
+              // 节点信息（管理 IP）
+              nodeHost:     node.nodeHost,
+              nodePort:     node.nodePort,
+              nodeUser:     node.nodeUser,
             });
           });
         });

@@ -17,8 +17,7 @@
 import React, { useState } from 'react';
 import {
   Typography, Tag, Space, Button, Input, Tooltip,
-  Select, Popconfirm, Empty, message,
-  Modal, Badge,
+  Select, Popconfirm, Empty, message, Badge, Modal,
 } from 'antd';
 import {
   FileTextOutlined, CodeOutlined, CameraOutlined,
@@ -77,41 +76,79 @@ const EntryCard: React.FC<{
       }}
     >
       {/* 头部 */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
-        <Space size={6} wrap>
-          <Tag color={tc.color} style={{ fontSize: 10, lineHeight: '16px', padding: '0 5px' }}>
-            {tc.label}
-          </Tag>
-          <Text type="secondary" style={{ fontSize: 11 }}>{ts}</Text>
-          {entry.sopStepName && (
-            <Text type="secondary" style={{ fontSize: 11 }}>· {entry.sopStepName}</Text>
-          )}
-          {entry.durationMs != null && (
-            <Text type="secondary" style={{ fontSize: 11 }}>{entry.durationMs}ms</Text>
-          )}
-          {entry.exitCode != null && (
-            <Tag
-              color={entry.exitCode === 0 ? 'success' : 'error'}
-              icon={entry.exitCode === 0
-                ? <CheckCircleOutlined />
-                : <CloseCircleOutlined />}
-              style={{ fontSize: 10 }}
-            >
-              exit {entry.exitCode}
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 4 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3, flex: 1, minWidth: 0 }}>
+
+          {/* 第一行：类型 + 节点 IP + 时间 */}
+          <Space size={6} wrap>
+            <Tag color={tc.color} style={{ fontSize: 10, lineHeight: '16px', padding: '0 5px' }}>
+              {tc.label}
             </Tag>
-          )}
-          {entry.statusReason && (
-            <Tooltip title={entry.statusReason}>
-              <Tag
-                color={entry.exitCode === 0 ? 'green' : 'red'}
-                style={{ fontSize: 10, cursor: 'help' }}
+
+            {/* 节点信息：管理 IP（始终显示，优先级最高） */}
+            {(entry.nodeHost || entry.sessionName) && (
+              <Tooltip
+                title={
+                  entry.nodeHost
+                    ? `${entry.nodeUser ?? ''}${entry.nodeUser ? '@' : ''}${entry.nodeHost}:${entry.nodePort ?? 22}`
+                    : entry.sessionName
+                }
               >
-                {entry.statusReason.startsWith('正常正则') ? '✅正则' :
-                 entry.statusReason.startsWith('异常正则') ? '❌正则' : ''}
+                <Tag
+                  color="default"
+                  style={{
+                    fontSize: 11,
+                    fontFamily: 'JetBrains Mono, Consolas, monospace',
+                    background: isDark ? '#1e3a5f' : '#eff6ff',
+                    border:     `1px solid ${isDark ? '#3b82f644' : '#bfdbfe'}`,
+                    color:      isDark ? '#93c5fd' : '#1d4ed8',
+                    padding:    '0 6px',
+                    lineHeight: '18px',
+                  }}
+                >
+                  {/* 优先显示 IP，没有则显示会话名 */}
+                  {entry.nodeHost
+                    ? `📡 ${entry.nodeHost}`
+                    : `📡 ${entry.sessionName}`}
+                </Tag>
+              </Tooltip>
+            )}
+
+            <Text type="secondary" style={{ fontSize: 11 }}>{ts}</Text>
+            {entry.durationMs != null && (
+              <Text type="secondary" style={{ fontSize: 11 }}>{entry.durationMs}ms</Text>
+            )}
+            {entry.exitCode != null && (
+              <Tag
+                color={entry.exitCode === 0 ? 'success' : 'error'}
+                icon={entry.exitCode === 0
+                  ? <CheckCircleOutlined />
+                  : <CloseCircleOutlined />}
+                style={{ fontSize: 10 }}
+              >
+                exit {entry.exitCode}
               </Tag>
-            </Tooltip>
+            )}
+            {entry.statusReason && (
+              <Tooltip title={entry.statusReason}>
+                <Tag
+                  color={entry.exitCode === 0 ? 'green' : 'red'}
+                  style={{ fontSize: 10, cursor: 'help' }}
+                >
+                  {entry.statusReason.startsWith('正常正则') ? '✅正则' :
+                   entry.statusReason.startsWith('异常正则') ? '❌正则' : ''}
+                </Tag>
+              </Tooltip>
+            )}
+          </Space>
+
+          {/* 第二行：SOP 步骤名（仅 sop_step 类型显示） */}
+          {entry.sopStepName && (
+            <Text type="secondary" style={{ fontSize: 11, paddingLeft: 2 }}>
+              └ {entry.sopStepName}
+            </Text>
           )}
-        </Space>
+        </div>
         <Space size={4}>
           {hasOutput && (
             <Button
@@ -243,9 +280,15 @@ const SessionJournal: React.FC<Props> = ({ sessionId, sessionName, onSnapshotReq
     ];
 
     entries.forEach((e) => {
-      const tc  = TYPE_CONFIG[e.type];
-      const ts  = new Date(e.timestamp).toLocaleString('zh-CN');
+      const tc   = TYPE_CONFIG[e.type];
+      const ts   = new Date(e.timestamp).toLocaleString('zh-CN');
+      // 节点信息字符串
+      const nodeInfo = e.nodeHost
+        ? `${e.nodeUser ? e.nodeUser + '@' : ''}${e.nodeHost}:${e.nodePort ?? 22}`
+        : e.sessionName;
       lines.push(`## [${ts}] ${tc.label}${e.sopStepName ? ` · ${e.sopStepName}` : ''}`);
+      lines.push('');
+      lines.push(`> **节点**: \`${nodeInfo}\``);
       lines.push('');
 
       if (e.command) {
