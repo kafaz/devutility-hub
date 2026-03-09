@@ -87,6 +87,7 @@ const SOPBuilder: React.FC = () => {
     updateDiagnosis,
     setInstanceStatus,
     deleteInstance,
+    updatePlaceholderValues,
   } = useSOPStore();
 
   const { sources: gitSources } = useSOPGitStore();
@@ -508,6 +509,9 @@ const SOPBuilder: React.FC = () => {
               }
               onSetStatus={(status) =>
                 setInstanceStatus(activeInstance.id, status)
+              }
+              onUpdatePlaceholderValues={(values) =>
+                updatePlaceholderValues(activeInstance.id, values)
               }
               onDelete={() => {
                 deleteInstance(activeInstance.id);

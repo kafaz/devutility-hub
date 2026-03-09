@@ -205,6 +205,7 @@ export interface SOPInstance {
   checkResults: SOPCheckResult[];
   extraChecks: SOPCheckResult[]; // 临时追加的非模板步骤
   variables?: VariableConfig[];  // 从模板快照继承的变量配置
+  placeholderValues?: Record<string, string>; // 实例级占位符值，用于命令渲染/复制
   diagnosis: {
     phenomenon: string;  // 故障现象
     rootCause: string;   // 根因分析

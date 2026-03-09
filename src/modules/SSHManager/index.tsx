@@ -729,6 +729,19 @@ const SSHManager: React.FC = () => {
     continueOnError: true,
   });
 
+  // 从选中实例预填占位符（若实例在 InstanceRunner 中已填写）
+  useEffect(() => {
+    const instIds = execMode === 'broadcast'
+      ? (broadcastInstanceId ? [broadcastInstanceId] : [])
+      : selectedNodes.map((sid) => targetedMap[sid]).filter(Boolean);
+    const merged: Record<string, string> = {};
+    instIds.forEach((instId) => {
+      const inst = instances.find((i) => i.id === instId);
+      if (inst?.placeholderValues) Object.assign(merged, inst.placeholderValues);
+    });
+    if (Object.keys(merged).length > 0) setVarValues((prev) => ({ ...prev, ...merged }));
+  }, [execMode, broadcastInstanceId, selectedNodes, targetedMap, instances]);
+
   // ── 终端写入函数 Map（每会话一个） ────────────────────────────────────────
   const writeCallbacks    = useRef<Map<string, (b64: string) => void>>(new Map());
   const snapshotCallbacks = useRef<Map<string, () => string>>(new Map());

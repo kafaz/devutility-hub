@@ -53,15 +53,17 @@ const SubStepPicker: React.FC<Props> = ({ open, allTemplates, onOk, onCancel }) 
           });
         });
       } else if (check.command) {
-        // 单命令 check 也可作为子步骤导入
+        // 单命令 check 也可作为子步骤导入（含高级设置）
         result.push({
-          id:            check.id,
-          order:         1,
-          name:          check.name,
-          description:   check.description,
-          command:       check.command,
-          captureVar:    undefined,
+          id:             check.id,
+          order:          1,
+          name:           check.name,
+          description:    check.description,
+          command:        check.command,
+          captureVar:     undefined,
           capturePattern: undefined,
+          normalRegex:    check.normalRegex,
+          abnormalRegex:  check.abnormalRegex,
           expectedNormal: check.expectedNormal,
           abnormalSigns:  check.abnormalSigns,
           _templateName:  selectedTemplate.name,
@@ -94,11 +96,11 @@ const SubStepPicker: React.FC<Props> = ({ open, allTemplates, onOk, onCancel }) 
       command:        s.command,
       captureVar:     s.captureVar,
       capturePattern: s.capturePattern,
-      expectedNormal: s.expectedNormal,
-      abnormalSigns:  s.abnormalSigns,
       normalRegex:    s.normalRegex,
       abnormalRegex:  s.abnormalRegex,
       scriptPath:     s.scriptPath,
+      expectedNormal: s.expectedNormal,
+      abnormalSigns:  s.abnormalSigns,
       timeoutMs:      s.timeoutMs,
     }));
     onOk(subSteps);

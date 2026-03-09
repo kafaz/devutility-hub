@@ -38,6 +38,7 @@ interface SOPStore {
   setInstanceStatus: (instanceId: string, status: SOPInstance['status']) => void;
   deleteInstance: (id: string) => void;
   renderCheckCommand: (instanceId: string, checkId: string, varValues: Record<string, string>) => void;
+  updatePlaceholderValues: (instanceId: string, values: Record<string, string>) => void;
 }
 
 // ======================== 内置 SOP 模板 ========================
@@ -444,6 +445,16 @@ export const useSOPStore = create<SOPStore>()(
               }),
             };
           }),
+        }));
+      },
+
+      updatePlaceholderValues: (instanceId, values) => {
+        set((s) => ({
+          instances: s.instances.map((inst) =>
+            inst.id === instanceId
+              ? { ...inst, placeholderValues: { ...inst.placeholderValues, ...values } }
+              : inst
+          ),
         }));
       },
     }),

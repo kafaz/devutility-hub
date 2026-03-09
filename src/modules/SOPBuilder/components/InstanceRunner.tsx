@@ -32,8 +32,8 @@ import React, { useState } from 'react';
 import ResizableOutput from '../../../components/shared/ResizableOutput';
 import { useClipboard } from '../../../hooks/useClipboard';
 import { useGlobalStore } from '../../../store/globalStore';
-import type { SOPCheckResult, SOPInstance, SOPTemplate } from '../../../types';
-import { generateInstanceReport } from '../../../utils';
+import type { SOPCheckResult, SOPInstance, SOPTemplate, VariableConfig } from '../../../types';
+import { extractInstancePlaceholders, generateInstanceReport, renderTemplate } from '../../../utils';
 import WhiteboardTab from './WhiteboardTab';
 
 // HTML report generator (inline for 14-H)
@@ -97,6 +97,7 @@ interface Props {
   onAddExtraCheck: (check: Omit<SOPCheckResult, 'checkId'>) => void;
   onUpdateDiagnosis: (field: keyof SOPInstance['diagnosis'], value: string) => void;
   onSetStatus: (status: SOPInstance['status']) => void;
+  onUpdatePlaceholderValues: (values: Record<string, string>) => void;
   onDelete: () => void;
 }
 
@@ -105,20 +106,11 @@ const CheckCard: React.FC<{
   stepNum: number;
   templateCheck?: SOPTemplate['checks'][0];
   isDark: boolean;
-  instanceVariables?: import('../../../types').VariableConfig[];
+  varValues: Record<string, string>;
   onUpdate: (data: Partial<SOPCheckResult>) => void;
-}> = ({ result, stepNum, templateCheck, isDark, instanceVariables, onUpdate }) => {
+}> = ({ result, stepNum, templateCheck, isDark, varValues, onUpdate }) => {
   const { copy } = useClipboard();
   const [messageApi, contextHolder] = message.useMessage();
-  const [varValues, setVarValues] = useState<Record<string, string>>(() => {
-    const init: Record<string, string> = {};
-    if (instanceVariables) {
-      instanceVariables.forEach(v => {
-        if (v.defaultValue) init[v.name] = v.defaultValue;
-      });
-    }
-    return init;
-  });
 
   const cardBg = isDark ? '#2d2d30' : '#ffffff';
   const borderColor = isDark ? '#3e3e42' : '#e4e4e7';
@@ -126,17 +118,19 @@ const CheckCard: React.FC<{
 
   const statusCfg = STATUS_CONFIG[result.status];
 
-  // 从命令模板中提取变量名
+  // 从命令及子步骤中提取变量名
   const vars = Array.from(
-    new Set([...(result.command.matchAll(/\$\{([^}]+)\}/g))].map((m) => m[1]))
+    new Set([
+      ...Array.from(result.command?.matchAll(/\$\{([^}]+)\}/g) ?? []).map((match) => match[1]),
+      ...(result.subSteps ?? []).flatMap((subStep) =>
+        Array.from(subStep.command?.matchAll(/\$\{([^}]+)\}/g) ?? []).map((match) => match[1])
+      ),
+    ])
   );
   const hasUnresolvedVars = vars.length > 0 && vars.some((v) => !varValues[v]);
 
-  // 渲染命令（替换变量）
-  const renderedCommand = result.command.replace(
-    /\$\{([^}]+)\}/g,
-    (_, name) => varValues[name] || `\${${name}}`
-  );
+  // 渲染命令（替换占位符）
+  const renderedCommand = renderTemplate(result.command || '', varValues);
 
   const handleCopy = async () => {
     const ok = await copy(renderedCommand);
@@ -230,89 +224,97 @@ const CheckCard: React.FC<{
             </Text>
           )}
 
-          {/* 变量填写区（如果命令含有占位符） */}
-          {vars.length > 0 && (
+          {/* 命令展示区：有子步骤时展示各子步骤命令，否则展示兜底命令 */}
+          {(result.subSteps?.length ?? 0) > 0 ? (
+            (result.subSteps ?? []).map((subStep, index) => {
+              const renderedSubCommand = renderTemplate(subStep.command || '', varValues);
+              const subHasUnresolved = Array.from(
+                subStep.command?.matchAll(/\$\{([^}]+)\}/g) ?? []
+              )
+                .map((match) => match[1])
+                .some((name) => !varValues[name]);
+
+              return (
+                <div
+                  key={subStep.id}
+                  style={{
+                    background: codeBg,
+                    borderRadius: 4,
+                    padding: '6px 10px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 8,
+                    marginBottom: 6,
+                  }}
+                >
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 2 }}>
+                      {index + 1}. {subStep.name}
+                    </Text>
+                    <Text
+                      style={{
+                        fontFamily: 'JetBrains Mono, Consolas, monospace',
+                        fontSize: 12,
+                        wordBreak: 'break-all',
+                        color: subHasUnresolved
+                          ? isDark ? '#fbbf24' : '#d97706'
+                          : isDark ? '#e4e4e7' : '#18181b',
+                      }}
+                    >
+                      {renderedSubCommand}
+                    </Text>
+                  </div>
+                  <Tooltip title="复制命令">
+                    <Button
+                      size="small"
+                      icon={<CopyOutlined />}
+                      onClick={async () => {
+                        const ok = await copy(renderedSubCommand);
+                        if (ok) messageApi.success('命令已复制');
+                      }}
+                      disabled={subHasUnresolved}
+                    />
+                  </Tooltip>
+                </div>
+              );
+            })
+          ) : (
             <div
               style={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))',
-                gap: '4px 8px',
+                background: codeBg,
+                borderRadius: 4,
+                padding: '6px 10px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: 8,
                 marginBottom: 6,
               }}
             >
-              {vars.map((v) => {
-                const def = instanceVariables?.find(cfg => cfg.name === v);
-                const labelStr = def?.label ? `${def.label} (${v})` : v;
-                return def?.type === 'select' ? (
-                  <Select
-                    key={v}
-                    size="small"
-                    value={varValues[v] || ''}
-                    onChange={(val) => setVarValues((prev) => ({ ...prev, [v]: val }))}
-                    style={{ width: '100%', fontSize: 12, marginBottom: 4 }}
-                    options={(def.options ?? []).map((o) => ({ label: o, value: o }))}
-                  />
-                ) : (
-                  <Input
-                    key={v}
-                    size="small"
-                    prefix={
-                      <Text type="secondary" style={{ fontSize: 11 }}>
-                        {labelStr}:
-                      </Text>
-                    }
-                    type={def?.type === 'number' ? 'number' : 'text'}
-                    value={varValues[v] || ''}
-                    onChange={(e) =>
-                      setVarValues((prev) => ({ ...prev, [v]: e.target.value }))
-                    }
-                    placeholder={def?.placeholder ?? `填写 ${v}`}
-                    style={{ fontSize: 12, marginBottom: 4 }}
-                  />
-                );
-              })}
+              <Text
+                style={{
+                  fontFamily: 'JetBrains Mono, Fira Code, Consolas, monospace',
+                  fontSize: 12,
+                  flex: 1,
+                  wordBreak: 'break-all',
+                  color: hasUnresolvedVars
+                    ? isDark ? '#fbbf24' : '#d97706'
+                    : isDark ? '#e4e4e7' : '#18181b',
+                }}
+              >
+                {renderedCommand}
+              </Text>
+              <Tooltip title="复制命令">
+                <Button
+                  size="small"
+                  icon={<CopyOutlined />}
+                  onClick={handleCopy}
+                  disabled={hasUnresolvedVars}
+                />
+              </Tooltip>
             </div>
           )}
-
-          {/* 命令展示区 */}
-          <div
-            style={{
-              background: codeBg,
-              borderRadius: 4,
-              padding: '6px 10px',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              gap: 8,
-              marginBottom: 6,
-            }}
-          >
-            <Text
-              style={{
-                fontFamily: 'JetBrains Mono, Fira Code, Consolas, monospace',
-                fontSize: 12,
-                flex: 1,
-                wordBreak: 'break-all',
-                color: hasUnresolvedVars
-                  ? isDark
-                    ? '#fbbf24'
-                    : '#d97706'
-                  : isDark
-                  ? '#e4e4e7'
-                  : '#18181b',
-              }}
-            >
-              {renderedCommand}
-            </Text>
-            <Tooltip title="复制命令">
-              <Button
-                size="small"
-                icon={<CopyOutlined />}
-                onClick={handleCopy}
-                disabled={hasUnresolvedVars}
-              />
-            </Tooltip>
-          </div>
 
           {/* 预期正常/异常提示 */}
           {(templateCheck?.expectedNormal || templateCheck?.abnormalSigns) && (
@@ -398,6 +400,7 @@ const InstanceRunner: React.FC<Props> = ({
   onAddExtraCheck,
   onUpdateDiagnosis,
   onSetStatus,
+  onUpdatePlaceholderValues,
   onDelete,
 }) => {
   const { theme } = useGlobalStore();
@@ -410,6 +413,11 @@ const InstanceRunner: React.FC<Props> = ({
 
   const cardBg = isDark ? '#252526' : '#ffffff';
   const borderColor = isDark ? '#3e3e42' : '#e4e4e7';
+  const placeholderDefs = new Map<string, VariableConfig>(
+    (instance.variables ?? []).map((variable) => [variable.name, variable])
+  );
+  const allPlaceholders = extractInstancePlaceholders(instance);
+  const varValues = instance.placeholderValues ?? {};
 
   // 步骤完成进度
   const totalChecks = instance.checkResults.length + instance.extraChecks.length;
@@ -573,6 +581,65 @@ const InstanceRunner: React.FC<Props> = ({
           </Space>
         </div>
 
+        {allPlaceholders.length > 0 && (
+          <Collapse
+            size="small"
+            ghost
+            style={{ marginTop: 8 }}
+            items={[
+              {
+                key: 'placeholders',
+                label: (
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    动态占位符（{allPlaceholders.length} 个，填写后命令中的 {'${var}'} 将被替换）
+                  </Text>
+                ),
+                children: (
+                  <div
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
+                      gap: '8px 12px',
+                    }}
+                  >
+                    {allPlaceholders.map((name) => {
+                      const def = placeholderDefs.get(name);
+                      const label = def?.label ? `${def.label} (${name})` : `\${${name}}`;
+                      const value = varValues[name] ?? def?.defaultValue ?? '';
+
+                      if (def?.type === 'select' && def.options?.length) {
+                        return (
+                          <Select
+                            key={name}
+                            size="small"
+                            value={value || undefined}
+                            placeholder={`选择 ${label}`}
+                            options={def.options.map((option) => ({ label: option, value: option }))}
+                            onChange={(nextValue) => onUpdatePlaceholderValues({ [name]: nextValue })}
+                          />
+                        );
+                      }
+
+                      return (
+                        <Input
+                          key={name}
+                          size="small"
+                          addonBefore={label}
+                          type={def?.type === 'number' ? 'number' : 'text'}
+                          value={value}
+                          onChange={(event) => onUpdatePlaceholderValues({ [name]: event.target.value })}
+                          placeholder={def?.placeholder ?? `填写 ${name}`}
+                          style={{ fontFamily: 'JetBrains Mono, Consolas, monospace', fontSize: 11 }}
+                        />
+                      );
+                    })}
+                  </div>
+                ),
+              },
+            ]}
+          />
+        )}
+
       {/* 根因提示折叠区 */}
       {template?.diagnosisHints && (
         <Collapse
@@ -625,7 +692,7 @@ const InstanceRunner: React.FC<Props> = ({
                         stepNum={i + 1}
                         templateCheck={templateCheck}
                         isDark={isDark}
-                        instanceVariables={instance.variables}
+                        varValues={varValues}
                         onUpdate={(data) => onUpdateCheck(result.checkId, data)}
                       />
                     );
@@ -638,7 +705,7 @@ const InstanceRunner: React.FC<Props> = ({
                       result={result}
                       stepNum={instance.checkResults.length + i + 1}
                       isDark={isDark}
-                      instanceVariables={instance.variables}
+                      varValues={varValues}
                       onUpdate={(data) => onUpdateCheck(result.checkId, data)}
                     />
                   ))}
