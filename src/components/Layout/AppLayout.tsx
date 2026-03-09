@@ -3,6 +3,7 @@ import { Layout, ConfigProvider, theme as antTheme } from 'antd';
 import { Outlet } from 'react-router-dom';
 import Sidebar from './Sidebar';
 import { useGlobalStore } from '../../store/globalStore';
+import { useScheduler } from '../../modules/SOPScheduler/hooks/useScheduler';
 import zhCN from 'antd/locale/zh_CN';
 
 const { Content } = Layout;
@@ -41,6 +42,7 @@ const lightToken = {
 
 const AppLayout: React.FC = () => {
   const { theme, sidebarCollapsed } = useGlobalStore();
+  useScheduler(); // 全局调度器，挂载后持续运行
   const isDark = theme === 'dark';
   const sidebarWidth = sidebarCollapsed ? 64 : 220;
 

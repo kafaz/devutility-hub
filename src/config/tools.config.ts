@@ -57,6 +57,14 @@ const toolsConfig: ToolConfig[] = [
     category: 'utility',
     version: '1.0.0',
   },
+  {
+    id: 'sop-scheduler',
+    name: 'SOP 调度',
+    icon: 'ScheduleOutlined',
+    description: '基于 Cron 表达式对多节点定时执行 SOP，支持广播和独立两种模式',
+    category: 'utility',
+    version: '1.0.0',
+  },
 ];
 
 export default toolsConfig;

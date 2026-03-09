@@ -1126,6 +1126,193 @@ export function applyCLogRule(
   return { matched: true, fields, rawGroups };
 }
 
+// ======================== Cron 表达式工具 ========================
+
+/**
+ * 匹配单个 cron 字段
+ * 支持: * | n | n-m | *\/n | n,m,... 及其组合
+ */
+function cronFieldMatch(field: string, value: number): boolean {
+  for (const part of field.split(',')) {
+    const p = part.trim();
+    if (p === '*') return true;
+    if (p.includes('/')) {
+      const [rangeStr, stepStr] = p.split('/');
+      const step = parseInt(stepStr, 10);
+      if (isNaN(step) || step <= 0) continue;
+      let lo = 0, hi = 59;
+      if (rangeStr !== '*') {
+        const bounds = rangeStr.split('-').map(Number);
+        lo = bounds[0]; hi = bounds[1] ?? bounds[0];
+      }
+      for (let i = lo; i <= hi; i += step) { if (i === value) return true; }
+    } else if (p.includes('-')) {
+      const [lo, hi] = p.split('-').map(Number);
+      if (value >= lo && value <= hi) return true;
+    } else {
+      if (parseInt(p, 10) === value) return true;
+    }
+  }
+  return false;
+}
+
+/** 检查某个时刻是否匹配 5 段 cron 表达式 */
+export function cronMatches(expr: string, d: Date): boolean {
+  const fields = expr.trim().split(/\s+/);
+  if (fields.length !== 5) return false;
+  const [min, hr, dom, mon, dow] = fields;
+  return (
+    cronFieldMatch(min, d.getMinutes())    &&
+    cronFieldMatch(hr,  d.getHours())      &&
+    cronFieldMatch(dom, d.getDate())       &&
+    cronFieldMatch(mon, d.getMonth() + 1)  &&
+    cronFieldMatch(dow, d.getDay())
+  );
+}
+
+/** 计算 cron 的下次触发时间（从 from 的下一分钟开始，最多查找 1 年） */
+export function getNextCronRun(expr: string, from: Date = new Date()): Date | null {
+  const next = new Date(from);
+  next.setSeconds(0, 0);
+  next.setMinutes(next.getMinutes() + 1);
+  for (let i = 0; i < 365 * 24 * 60; i++) {
+    if (cronMatches(expr, next)) return new Date(next);
+    next.setMinutes(next.getMinutes() + 1);
+  }
+  return null;
+}
+
+/** 将 cron 表达式转换为人类可读描述 */
+export function getCronDescription(expr: string): string {
+  const fields = expr.trim().split(/\s+/);
+  if (fields.length !== 5) return '无效的 Cron 表达式（需要 5 段）';
+  const [min, hr] = fields;
+  if (expr === '* * * * *') return '每分钟执行';
+  const everyMin = expr.match(/^\*\/(\d+) \* \* \* \*$/);
+  if (everyMin) return `每 ${everyMin[1]} 分钟执行`;
+  const everyHr = expr.match(/^0 \*\/(\d+) \* \* \*$/);
+  if (everyHr)  return `每 ${everyHr[1]} 小时执行`;
+  const dailyHM = expr.match(/^(\d+) (\d+) \* \* \*$/);
+  if (dailyHM)  return `每天 ${hr.padStart(2,'0')}:${min.padStart(2,'0')} 执行`;
+  const weeklyDays = ['周日','周一','周二','周三','周四','周五','周六'];
+  const weekly = expr.match(/^0 0 \* \* (\d)$/);
+  if (weekly)   return `每${weeklyDays[parseInt(weekly[1])] ?? '?'} 00:00 执行`;
+  if (expr === '0 0 1 * *') return '每月 1 日 00:00 执行';
+  return `Cron: ${expr}`;
+}
+
+/** 验证 cron 表达式格式是否合法（返回错误信息，null 表示合法） */
+export function validateCronExpr(expr: string): string | null {
+  const fields = expr.trim().split(/\s+/);
+  if (fields.length !== 5) return '需要恰好 5 段，以空格分隔（分 时 日 月 周）';
+  const limits = [[0,59],[0,23],[1,31],[1,12],[0,6]];
+  const names  = ['分钟','小时','日期','月份','星期'];
+  for (let i = 0; i < 5; i++) {
+    const f = fields[i];
+    if (f === '*') continue;
+    const parts = f.split(',');
+    for (const part of parts) {
+      if (part.includes('/')) {
+        const [range, step] = part.split('/');
+        const s = parseInt(step, 10);
+        if (isNaN(s) || s <= 0) return `${names[i]} 字段步进值无效`;
+        if (range !== '*' && range.includes('-')) {
+          const [lo, hi] = range.split('-').map(Number);
+          if (isNaN(lo) || isNaN(hi) || lo > hi) return `${names[i]} 字段范围无效`;
+        }
+      } else if (part.includes('-')) {
+        const [lo, hi] = part.split('-').map(Number);
+        if (isNaN(lo) || isNaN(hi) || lo > hi ||
+            lo < limits[i][0] || hi > limits[i][1])
+          return `${names[i]} 字段范围 ${lo}-${hi} 超出 [${limits[i][0]},${limits[i][1]}]`;
+      } else {
+        const n = parseInt(part, 10);
+        if (isNaN(n) || n < limits[i][0] || n > limits[i][1])
+          return `${names[i]} 字段值 ${part} 超出 [${limits[i][0]},${limits[i][1]}]`;
+      }
+    }
+  }
+  return null;
+}
+
+// ======================== SOP Plan Steps 构建（调度器共享） ========================
+
+/**
+ * 从 SOP 模板直接构建执行步骤数组，供调度器批量执行使用。
+ * 不创建 SOPInstance，避免污染 SOP 历史记录。
+ *
+ * 执行逻辑：
+ *   - 若 check 有 subSteps → 展开为独立步骤（粒度细，支持变量捕获）
+ *   - 若 check 无 subSteps → 使用 check.command 作为单步
+ *   - varValues 中的占位符会被 renderTemplate 渲染
+ *
+ * 返回类型与 PlanStep（sshStore）兼容，避免循环引用使用 inline type。
+ */
+export function buildPlanStepsFromTemplate(
+  template:  SOPTemplate,
+  varValues: Record<string, string> = {}
+): Array<{
+  id: string; cmd: string; name: string;
+  captureVar?: string; capturePattern?: string;
+  normalRegex?: string; abnormalRegex?: string;
+  scriptPath?: string; timeout?: number;
+  checkId?: string; isSubStep?: boolean;
+}> {
+  const steps: ReturnType<typeof buildPlanStepsFromTemplate> = [];
+  for (const check of (template.checks ?? [])) {
+    if (check.subSteps && check.subSteps.length > 0) {
+      for (const sub of check.subSteps) {
+        steps.push({
+          id:             sub.id || generateId(),
+          cmd:            renderTemplate(sub.command, varValues),
+          name:           sub.name,
+          captureVar:     sub.captureVar,
+          capturePattern: sub.capturePattern,
+          normalRegex:    sub.normalRegex,
+          abnormalRegex:  sub.abnormalRegex,
+          scriptPath:     sub.scriptPath,
+          timeout:        sub.timeoutMs,
+          checkId:        check.id,
+          isSubStep:      true,
+        });
+      }
+    } else {
+      steps.push({
+        id:           check.id || generateId(),
+        cmd:          renderTemplate(check.command, varValues),
+        name:         check.name,
+        normalRegex:  check.normalRegex,
+        abnormalRegex: check.abnormalRegex,
+        checkId:      check.id,
+        isSubStep:    false,
+      });
+    }
+  }
+  return steps;
+}
+
+/**
+ * 从模板的所有命令中提取变量占位符名称（${VAR_NAME}）
+ * 用于在 TaskEditor 中自动展示需要填写的变量
+ */
+export function extractTemplateVars(template: SOPTemplate): string[] {
+  const varSet = new Set<string>();
+  const re = /\$\{([^}]+)\}/g;
+  for (const check of (template.checks ?? [])) {
+    let m: RegExpExecArray | null;
+    if (check.subSteps?.length) {
+      for (const sub of check.subSteps) {
+        while ((m = re.exec(sub.command)) !== null) varSet.add(m[1]);
+        re.lastIndex = 0;
+      }
+    } else {
+      while ((m = re.exec(check.command ?? '')) !== null) varSet.add(m[1]);
+      re.lastIndex = 0;
+    }
+  }
+  return [...varSet];
+}
+
 // 导出 JSON 数据为文件下载
 export function downloadJSON(data: unknown, filename: string): void {
   const blob = new Blob([JSON.stringify(data, null, 2)], {

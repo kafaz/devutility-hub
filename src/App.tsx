@@ -12,6 +12,7 @@ const IOAnalyzer        = lazy(() => import('./modules/IOAnalyzer'));
 const DiagnosticWorkbench = lazy(() => import('./modules/DiagnosticWorkbench'));
 const CodeContextExplorer = lazy(() => import('./modules/CodeContextExplorer'));
 const BlockBenchmark    = lazy(() => import('./modules/BlockBenchmark'));
+const SOPScheduler      = lazy(() => import('./modules/SOPScheduler'));
 
 interface ToolRouteDefinition {
   path: string;
@@ -28,6 +29,7 @@ const TOOL_ROUTES: ToolRouteDefinition[] = [
   { path: '/diagnostic-workbench', Component: DiagnosticWorkbench },
   { path: '/code-context-explorer', Component: CodeContextExplorer },
   { path: '/block-benchmark', Component: BlockBenchmark },
+  { path: '/sop-scheduler', Component: SOPScheduler },
 ];
 
 const TOOL_ROUTE_MAP = new Map(TOOL_ROUTES.map((route) => [route.path, route]));

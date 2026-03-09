@@ -261,6 +261,76 @@ export interface CronRun {
   }>;
 }
 
+// ======================== SOP 定时调度类型 ========================
+
+/**
+ * 定时任务 — 节点级分配（targeted 模式下每个节点独立配置）
+ */
+export interface SOPScheduleNodeAssignment {
+  sessionId:  string;  // SSH 会话 ID
+  templateId: string;  // 要执行的 SOP 模板 ID
+  varValues?: Record<string, string>; // 模板变量值（覆盖任务级）
+}
+
+/**
+ * 定时 SOP 执行任务配置
+ *
+ * 两种执行模式：
+ *   broadcast — 所有选定节点执行同一个 SOP 模板
+ *   targeted  — 每个节点绑定自己的 SOP 模板，独立执行
+ */
+export interface SOPScheduledTask {
+  id:          string;
+  name:        string;
+  description?: string;
+  enabled:     boolean;
+  cronExpr:    string;              // 标准 5 段 cron，如 "*/5 * * * *"
+
+  mode: 'broadcast' | 'targeted';
+
+  // broadcast 模式
+  broadcastTemplateId?: string;     // 所有节点执行的模板 ID
+  broadcastSessionIds?: string[];   // 目标会话 ID 列表
+  broadcastVarValues?:  Record<string, string>; // 模板变量
+
+  // targeted 模式
+  nodeAssignments?: SOPScheduleNodeAssignment[];
+
+  // 运行状态（任务级快照，由调度器写入）
+  lastRunAt?:     number;
+  lastRunStatus?: 'running' | 'success' | 'partial' | 'failed';
+  nextRunAt?:     number;  // 预计下次执行时间（由调度器计算并写入）
+
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * 单次调度执行日志
+ *
+ * 每次 cron 触发产生一条 RunLog，记录各节点执行结果。
+ * 调度器只保留最近 200 条日志（超出时丢弃最早的）。
+ */
+export interface SOPScheduleRunLog {
+  id:         string;
+  taskId:     string;
+  taskName:   string;
+  startedAt:  number;
+  finishedAt?: number;
+  mode:       'broadcast' | 'targeted';
+  nodeResults: Array<{
+    sessionId:    string;
+    sessionName:  string;
+    templateId:   string;
+    templateName: string;
+    status:       'running' | 'success' | 'partial' | 'failed' | 'skipped';
+    stepsTotal:   number;
+    stepsFailed:  number;
+    error?:       string;
+  }>;
+  status: 'running' | 'success' | 'partial' | 'failed';
+}
+
 // ======================== SOP Git 仓库源类型 ========================
 
 /**

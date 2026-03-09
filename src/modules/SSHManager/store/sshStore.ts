@@ -185,6 +185,21 @@ interface SessionRuntime {
 
 const runtimes = new Map<string, SessionRuntime>();
 
+// ─── 调度器专用执行回调（planId 路由，不影响 multiNodeRun 状态） ──────────
+
+interface SchedulerPlanCallback {
+  stepResults: Record<string, PlanStepResult>;
+  onStep?:     (stepId: string, result: PlanStepResult) => void;
+  resolve:     (r: {
+    success:          boolean;
+    results:          Record<string, PlanStepResult>;
+    finalVarContext?: Record<string, string>;
+    error?:           string;
+  }) => void;
+}
+
+const schedulerPlanCallbacks = new Map<string, SchedulerPlanCallback>();
+
 function getRT(sessionId: string): SessionRuntime {
   if (!runtimes.has(sessionId)) {
     runtimes.set(sessionId, {
@@ -487,6 +502,18 @@ interface SSHStore {
   termLineListeners: Record<string, ((line: string) => void)[]>;
   subscribeToSessionLines: (sessionId: string, cb: (line: string) => void) => () => void;
 
+  // 调度器专用执行通道（planId 路由，不写入 multiNodeRun 全局状态）
+  executeSOPPlanForScheduler: (
+    sessionId: string,
+    steps:     PlanStep[],
+    onStep?:   (stepId: string, result: PlanStepResult) => void,
+  ) => Promise<{
+    success:          boolean;
+    results:          Record<string, PlanStepResult>;
+    finalVarContext?: Record<string, string>;
+    error?:           string;
+  }>;
+
   // 私钥路径验证
   checkKeyFile: (path: string) => Promise<{ ok: boolean; resolved?: string; msg?: string }>;
 }
@@ -631,7 +658,32 @@ function makeWSHandler(
       }
 
       case 'plan_step': {
-        const m = msg as Record<string, unknown>;
+        const m     = msg as Record<string, unknown>;
+        const planId = m.planId as string | undefined;
+
+        // 优先路由到调度器专用回调（planId 精确匹配）
+        const schedCb = planId ? schedulerPlanCallbacks.get(planId) : undefined;
+        if (schedCb) {
+          const result: PlanStepResult = {
+            stepId:          m.stepId         as string,
+            status:          m.status         as PlanStepStatus,
+            stdout:          (m.stdout         as string) ?? '',
+            stderr:          (m.stderr         as string) ?? '',
+            exitCode:        (m.exitCode       as number) ?? 0,
+            durationMs:      (m.durationMs     as number) ?? 0,
+            resolvedCmd:     m.resolvedCmd     as string | undefined,
+            capturedVar:     m.capturedVar     as { name: string; value: string } | undefined,
+            varSnapshot:     m.varSnapshot     as Record<string, string> | undefined,
+            statusReason:    m.statusReason    as string | undefined,
+            processedOutput: m.processedOutput as string | undefined,
+            scriptError:     m.scriptError     as string | undefined,
+          };
+          schedCb.stepResults[m.stepId as string] = result;
+          schedCb.onStep?.(m.stepId as string, result);
+          break;
+        }
+
+        // 原有 multiNodeRun 路径
         set((s) => {
           if (!s.multiNodeRun) return {};
           const nodeExecutions = s.multiNodeRun.nodeExecutions.map((ne) => {
@@ -664,6 +716,21 @@ function makeWSHandler(
       }
 
       case 'plan_done': {
+        const planId = msg.planId as string | undefined;
+
+        // 路由到调度器回调
+        const schedCb = planId ? schedulerPlanCallbacks.get(planId) : undefined;
+        if (schedCb) {
+          schedulerPlanCallbacks.delete(planId!);
+          schedCb.resolve({
+            success:          !(msg.aborted as boolean),
+            results:          schedCb.stepResults,
+            finalVarContext:  msg.finalVarContext as Record<string, string> | undefined,
+          });
+          break;
+        }
+
+        // 原有 multiNodeRun 路径
         set((s) => {
           if (!s.multiNodeRun) return {};
           const aborted = msg.aborted as boolean;
@@ -676,7 +743,6 @@ function makeWSHandler(
               finalVarContext:  msg.finalVarContext as Record<string, string> | undefined,
             };
           });
-          // 检查是否所有节点都已完成
           const allDone = nodeExecutions.every((ne) => ne.status !== 'running' && ne.status !== 'pending');
           return {
             multiNodeRun: {
@@ -686,7 +752,6 @@ function makeWSHandler(
             },
           };
         });
-        // 通知等待中的 Promise
         rt.planNodeResolve?.();
         rt.planNodeResolve = null;
         break;
@@ -1293,6 +1358,45 @@ export const useSSHStore = create<SSHStore>()(
       },
 
       clearMultiNodeRun: () => set({ multiNodeRun: null }),
+
+      // ── 调度器专用：独立 planId 路由，不干扰 multiNodeRun ─────────────────
+
+      executeSOPPlanForScheduler: (sessionId, steps, onStep) =>
+        new Promise((resolve) => {
+          const rt = getRT(sessionId);
+          if (!rt.ws || rt.ws.readyState !== WebSocket.OPEN) {
+            resolve({ success: false, results: {}, error: '会话未连接' });
+            return;
+          }
+
+          const planId = generateId();
+          const PLAN_TIMEOUT_MS = 30 * 60 * 1000; // 30 分钟超时
+
+          const cb: SchedulerPlanCallback = {
+            stepResults: {},
+            onStep,
+            resolve,
+          };
+          schedulerPlanCallbacks.set(planId, cb);
+
+          // 超时保护：避免 planDone 永远不到达时内存泄漏
+          setTimeout(() => {
+            if (!schedulerPlanCallbacks.has(planId)) return;
+            schedulerPlanCallbacks.delete(planId);
+            resolve({ success: false, results: cb.stepResults, error: '执行超时 (30 min)' });
+          }, PLAN_TIMEOUT_MS);
+
+          rt.ws.send(JSON.stringify({
+            type:  'exec_plan',
+            id:    planId,
+            steps: steps.map((s) => ({
+              id: s.id, cmd: s.cmd, name: s.name,
+              captureVar: s.captureVar, capturePattern: s.capturePattern,
+              normalRegex: s.normalRegex, abnormalRegex: s.abnormalRegex,
+              scriptPath: s.scriptPath, timeout: s.timeout,
+            })),
+          }));
+        }),
 
       // ── 私钥文件验证 ──────────────────────────────────────────────────────
 
