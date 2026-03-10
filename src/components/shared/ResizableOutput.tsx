@@ -8,10 +8,11 @@
  * 底部拖拽柄（ns-resize）向下拖动展开更多行，向上收缩。
  * 使用 PointerEvent（含 setPointerCapture）确保快速移动不丢失焦点。
  */
-import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Tooltip } from 'antd';
 import { CopyOutlined } from '@ant-design/icons';
+import { Tooltip } from 'antd';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useClipboard } from '../../hooks/useClipboard';
+import { highlightDBSText } from '../../utils/dbsHighlighter';
 
 interface ResizableOutputProps {
   content:      string;
@@ -95,7 +96,7 @@ const ResizableOutput: React.FC<ResizableOutputProps> = ({
             paddingLeft: 4,
           }}
         >
-          {line || '\u200b'}
+          {line ? highlightDBSText(line) : '\u200b'}
         </span>
       );
     });

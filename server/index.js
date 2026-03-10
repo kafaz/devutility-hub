@@ -41,6 +41,9 @@ const app    = express();
 const server = http.createServer(app);
 const wss    = new WebSocketServer({ server, path: '/terminal' });
 
+// 全局 Session 会话池 - 供 Agent / MCP Remote API 访问
+global.activeSessions = new Map();
+
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
@@ -224,6 +227,95 @@ app.post('/api/check-key', (req, res) => {
   }
 });
 
+// ─── AI Agent / MCP 远程控制 API ──────────────────────────────────────────
+
+const AGENT_COMMAND_BLACKLIST = [
+  /rm\s+-rf/,
+  /mkfs/,
+  /dd\s+if=/,
+  /reboot/,
+  /shutdown/,
+  /init\s+[06]/,
+  /:(\s*)\{\s*\|\|\s*:\s*\&\s*\}\s*;\s*:/ // bash fork bomb
+];
+
+/**
+ * GET /api/agent/sessions
+ * 暴露当前活跃的会话列表给 Agent
+ */
+app.get('/api/agent/sessions', (req, res) => {
+  const sessions = [];
+  for (const [id, session] of global.activeSessions.entries()) {
+    sessions.push({
+      sessionId: id,
+      host: session.host,
+      username: session.username
+    });
+  }
+  res.json({ ok: true, sessions });
+});
+
+/**
+ * POST /api/agent/execute
+ * 供 Agent 远程执行命令，并且阻塞等待命令执行结束返回 std/out。
+ * 
+ * Body: { sessionId: "string", cmd: "string", timeout?: number }
+ */
+app.post('/api/agent/execute', async (req, res) => {
+  const { sessionId, cmd, timeout = 30000 } = req.body;
+  if (!sessionId || !cmd) {
+    return res.status(400).json({ ok: false, error: '缺少 sessionId 或 cmd 参数' });
+  }
+
+  // 安全检查：黑名单验证
+  for (const regex of AGENT_COMMAND_BLACKLIST) {
+    if (regex.test(cmd)) {
+      const errMsg = `[Agent Security Block] 拒绝执行具有受限或破坏性特征的命令: ${cmd}`;
+      console.warn(errMsg);
+      return res.status(403).json({ ok: false, error: errMsg });
+    }
+  }
+
+  const session = global.activeSessions.get(sessionId);
+  if (!session) {
+    return res.status(404).json({ ok: false, error: 'Session 不存在或已断开连接' });
+  }
+
+  const startTime = new Date().toISOString();
+  let result;
+  try {
+    result = await session.enqueueShellCmd(cmd, timeout);
+    
+    // 审计日志: 保存执行记录到临时文件
+    const logEntry = `[${startTime}] Agent Execution on ${session.username}@${session.host} (Session: ${sessionId})
+Command : ${cmd}
+ExitCode: ${result.exitCode}
+Duration: ${result.durationMs}ms
+Stdout  :\n${result.stdout}
+Stderr  :\n${result.stderr}
+---------------------------------------------------\n`;
+    
+    const logFilePath = path.join(os.tmpdir(), 'agent-execution-audit.log');
+    fs.appendFileSync(logFilePath, logEntry, 'utf8');
+
+    res.json({
+      ok: true,
+      result: {
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exitCode: result.exitCode,
+        durationMs: result.durationMs
+      }
+    });
+  } catch (e) {
+    const errorEntry = `[${startTime}] Agent Execution ERR on ${session.username}@${session.host} (Session: ${sessionId})\nCommand: ${cmd}\nError: ${e.message}\n---------------------------------------------------\n`;
+    const logFilePath = path.join(os.tmpdir(), 'agent-execution-audit.log');
+    fs.appendFileSync(logFilePath, errorEntry, 'utf8');
+
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // ─── SOP Git 仓库同步 ──────────────────────────────────────────────────────
 
 /**
@@ -337,6 +429,7 @@ app.post('/api/sop/git-sync', async (req, res) => {
 wss.on('connection', (ws) => {
   let ssh   = null;
   let shell = null;   // 交互式 Shell PTY（唯一通道，保持用户预处理状态）
+  let attachedSessionId = null; // Agent API Tracking
 
   // ─── Shell 命令队列（序列化执行，保证不并发） ────────────────────────────
 
@@ -522,8 +615,21 @@ wss.on('connection', (ws) => {
               stream.on('data', onShellData);
               stream.stderr?.on('data', onShellData);
 
+              // 暴露给外部 Agent
+              if (msg.sessionId) {
+                attachedSessionId = msg.sessionId;
+                global.activeSessions.set(attachedSessionId, {
+                  sshClient: ssh,
+                  shellStream: stream,
+                  enqueueShellCmd: enqueueShellCmd,
+                  host: cfg.host,
+                  username: cfg.username
+                });
+              }
+
               stream.on('close', () => {
                 send({ type: 'status', status: 'disconnected' });
+                if (attachedSessionId) global.activeSessions.delete(attachedSessionId);
                 shell = null;
                 // 清理队列中所有待执行命令
                 shellBusy = false;
@@ -718,6 +824,9 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     ssh?.end();
+    if (attachedSessionId) {
+      global.activeSessions.delete(attachedSessionId);
+    }
     planAborted = true;
     shellQueue.splice(0).forEach((item) =>
       item.resolve({ stdout: '', stderr: 'WebSocket 已关闭', exitCode: -1, durationMs: 0 })

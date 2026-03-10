@@ -15,6 +15,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { generateId } from '../../../utils';
+import { useJournalStore } from './journalStore';
 
 // ─── 类型定义 ──────────────────────────────────────────────────────────────
 
@@ -101,10 +102,17 @@ export interface MultiNodeRun {
 
 interface SessionRuntime {
   ws:              WebSocket | null;
+  terminalBuffer:  string;
   onTermData:      ((b64: string) => void) | null;
   execResolvers:   Map<string, (r: { stdout: string; stderr: string; exitCode: number; durationMs: number }) => void>;
   planNodeResolve: (() => void) | null;  // resolve 单个节点的 plan 完成
   planAborted:     boolean;
+  pendingManualCmd: {
+    cmd: string;
+    startTime: number;
+    startIndex: number;
+    debounceTimer: ReturnType<typeof setTimeout> | null;
+  } | null;
 }
 
 const runtimes = new Map<string, SessionRuntime>();
@@ -112,12 +120,30 @@ const runtimes = new Map<string, SessionRuntime>();
 function getRT(sessionId: string): SessionRuntime {
   if (!runtimes.has(sessionId)) {
     runtimes.set(sessionId, {
-      ws: null, onTermData: null,
+      ws: null, terminalBuffer: '', onTermData: null,
       execResolvers: new Map(),
       planNodeResolve: null, planAborted: false,
+      pendingManualCmd: null,
     });
   }
   return runtimes.get(sessionId)!;
+}
+
+export function getTerminalBuffer(sessionId: string): string {
+  return getRT(sessionId).terminalBuffer;
+}
+
+export function recordManualCommandStart(sessionId: string, cmd: string) {
+  const rt = getRT(sessionId);
+  if (rt.pendingManualCmd?.debounceTimer) {
+    clearTimeout(rt.pendingManualCmd.debounceTimer);
+  }
+  rt.pendingManualCmd = {
+    cmd,
+    startTime: Date.now(),
+    startIndex: rt.terminalBuffer.length,
+    debounceTimer: null,
+  };
 }
 
 // ─── 常量 ──────────────────────────────────────────────────────────────────
@@ -168,7 +194,11 @@ interface SSHStore {
 
 // ─── WebSocket 消息处理器（每会话一个） ──────────────────────────────────────
 
-function makeWSHandler(sessionId: string, set: (fn: (s: SSHStore) => Partial<SSHStore>) => void) {
+function makeWSHandler(
+  sessionId: string,
+  set: (fn: (s: SSHStore) => Partial<SSHStore>) => void,
+  get: () => SSHStore
+) {
   return (event: MessageEvent) => {
     let msg: Record<string, unknown>;
     try { msg = JSON.parse(event.data as string); } catch { return; }
@@ -191,9 +221,61 @@ function makeWSHandler(sessionId: string, set: (fn: (s: SSHStore) => Partial<SSH
         }));
         break;
 
-      case 'data':
-        rt.onTermData?.(msg.data as string);
+      case 'data': {
+        const payload = msg.data as string;
+        try {
+          const bin = atob(payload);
+          rt.terminalBuffer += bin;
+          if (rt.terminalBuffer.length > 200000) {
+            const drop = rt.terminalBuffer.length - 200000;
+            rt.terminalBuffer = rt.terminalBuffer.slice(-200000);
+            if (rt.pendingManualCmd) {
+              rt.pendingManualCmd.startIndex = Math.max(0, rt.pendingManualCmd.startIndex - drop);
+            }
+          }
+        } catch (e) { /* ignore base64 parse error */ }
+        rt.onTermData?.(payload);
+
+        // 处理输出记录 debounce
+        if (rt.pendingManualCmd) {
+           if (rt.pendingManualCmd.debounceTimer) clearTimeout(rt.pendingManualCmd.debounceTimer);
+           rt.pendingManualCmd.debounceTimer = setTimeout(() => {
+              const pending = rt.pendingManualCmd;
+              if (!pending) return;
+              const outputBin = rt.terminalBuffer.slice(pending.startIndex);
+              
+              // 转 UTF-8 并去除 ANSI，作为纯文本 output 保存到 Journal
+              const bytes = new Uint8Array(outputBin.length);
+              for (let i = 0; i < outputBin.length; i++) bytes[i] = outputBin.charCodeAt(i);
+              const outputUtf8 = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+              
+              const cleanOutput = outputUtf8
+                .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+                .replace(/\x1b\][^\x07]*\x07/g, '')
+                .replace(/\x1b[()][0-9A-Za-z]/g, '')
+                .replace(/\x1b[=>]/g, '')
+                .trim();
+              
+              const sess = get().sessions.find(s => s.id === sessionId);
+              if (sess) {
+                const profile = get().profiles.find(p => p.id === sess.profileId);
+                useJournalStore.getState().addEntry({
+                   sessionId,
+                   sessionName: sess.name,
+                   type: 'manual_cmd',
+                   timestamp: pending.startTime,
+                   command: pending.cmd,
+                   output: cleanOutput,
+                   nodeHost: profile?.host,
+                   nodePort: profile?.port,
+                   nodeUser: profile?.username,
+                });
+              }
+              rt.pendingManualCmd = null;
+           }, 500);
+        }
         break;
+      }
 
       case 'exec_result': {
         const resolver = rt.execResolvers.get(msg.id as string);
@@ -359,13 +441,14 @@ export const useSSHStore = create<SSHStore>()(
         socket.onopen = () => {
           socket.send(JSON.stringify({
             type: 'connect',
+            sessionId,
             host: profile.host, port: profile.port, username: profile.username,
             authType: profile.authType, keyFilePath: profile.keyFilePath,
             passphrase, password, agent, cols, rows,
           }));
         };
 
-        socket.onmessage = makeWSHandler(sessionId, set as Parameters<typeof makeWSHandler>[1]);
+        socket.onmessage = makeWSHandler(sessionId, set as Parameters<typeof makeWSHandler>[1], get);
         socket.onclose   = () => set((s) => ({
           sessions: s.sessions.map((x) =>
             x.id === sessionId ? { ...x, status: 'disconnected', statusMsg: '' } : x

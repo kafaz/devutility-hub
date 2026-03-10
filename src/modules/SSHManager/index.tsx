@@ -57,7 +57,7 @@ import SessionJournal from './components/SessionJournal';
 import { useCronStore } from './store/cronStore';
 import { useJournalStore } from './store/journalStore';
 import type { NodeExecution, PlanStepResult, SSHProfile, SSHSession } from './store/sshStore';
-import { useSSHStore } from './store/sshStore';
+import { getTerminalBuffer, recordManualCommandStart, useSSHStore } from './store/sshStore';
 
 const { Title, Text } = Typography;
 const { Password } = Input;
@@ -84,7 +84,8 @@ const TerminalInstance: React.FC<{
   registerWrite: (fn: (b64: string) => void) => void;
   /** 注册"读取终端缓冲区文本"的函数，供快照使用 */
   registerSnapshot: (fn: () => string) => void;
-}> = ({ sessionId, isDark, visible, onInput, onResize, registerWrite, registerSnapshot }) => {
+  registerGetCurrentLine?: (fn: () => string) => void;
+}> = ({ sessionId, isDark, visible, onInput, onResize, registerWrite, registerSnapshot, registerGetCurrentLine }) => {
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -99,6 +100,15 @@ const TerminalInstance: React.FC<{
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(ref.current);
+
+    // 恢复历史缓冲区
+    const initBuffer = getTerminalBuffer(sessionId);
+    if (initBuffer) {
+      const buf = new Uint8Array(initBuffer.length);
+      for (let i = 0; i < initBuffer.length; i++) buf[i] = initBuffer.charCodeAt(i);
+      term.write(buf);
+    }
+
     requestAnimationFrame(() => { fit.fit(); onResize(term.cols, term.rows); });
 
     const d1 = term.onData(onInput);
@@ -121,6 +131,14 @@ const TerminalInstance: React.FC<{
       }
       return lines.join('\n').trim();
     });
+
+    if (registerGetCurrentLine) {
+      registerGetCurrentLine(() => {
+        const active = term.buffer.active;
+        const line = active.getLine(active.baseY + active.cursorY);
+        return line ? line.translateToString(true) : '';
+      });
+    }
 
     return () => { d1.dispose(); ro.disconnect(); term.dispose(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -400,10 +418,9 @@ const SSHManager: React.FC = () => {
   // ── 终端写入函数 Map（每会话一个） ────────────────────────────────────────
   const writeCallbacks    = useRef<Map<string, (b64: string) => void>>(new Map());
   const snapshotCallbacks = useRef<Map<string, () => string>>(new Map());
-  // 每会话的键盘输入缓冲（检测手动命令行）
-  const cmdBuffers        = useRef<Map<string, string>>(new Map());
+  const getLineFns        = useRef<Record<string, () => string>>({});
 
-  const { addEntry, addSOPNodeResults } = useJournalStore();
+  const { addSOPNodeResults } = useJournalStore();
   const { evaluateJobs } = useCronStore();
 
   useEffect(() => {
@@ -1052,32 +1069,19 @@ const SSHManager: React.FC = () => {
                       visible={sess.id === activeSessionId && activeView === 'terminal'}
                       onInput={(data) => {
                         sendInputToSession(sess.id, data);
-                        // 键盘截收：缓冲字符，Enter 时保存为 manual_cmd
-                        const buf = cmdBuffers.current.get(sess.id) ?? '';
                         if (data === '\r') {
-                          const cmd = buf.trim();
-                          if (cmd) {
-                            // 从档案获取管理 IP
-                            const prof = profiles.find((p) => p.id === sess.profileId);
-                            addEntry({
-                              sessionId:   sess.id,
-                              sessionName: sess.name,
-                              type:        'manual_cmd',
-                              timestamp:   Date.now(),
-                              command:     cmd,
-                              nodeHost:    prof?.host,
-                              nodePort:    prof?.port,
-                              nodeUser:    prof?.username,
-                            });
+                          const getLine = getLineFns.current[sess.id];
+                          if (getLine) {
+                            const currentLine = getLine();
+                            const cleanCmd = currentLine.replace(/^.*?[#$]\s+/, '').trim();
+                            if (cleanCmd) {
+                              recordManualCommandStart(sess.id, cleanCmd);
+                            }
                           }
-                          cmdBuffers.current.set(sess.id, '');
-                        } else if (data === '\x7f' || data === '\b') {
-                          cmdBuffers.current.set(sess.id, buf.slice(0, -1));
-                        } else if (data.charCodeAt(0) >= 32 && !data.startsWith('\x1b')) {
-                          cmdBuffers.current.set(sess.id, buf + data);
                         }
                       }}
                       onResize={(cols, rows) => resizeSession(sess.id, cols, rows)}
+                      registerGetCurrentLine={(fn) => { getLineFns.current[sess.id] = fn; }}
                       registerWrite={(fn) => { writeCallbacks.current.set(sess.id, fn); }}
                       registerSnapshot={(fn) => { snapshotCallbacks.current.set(sess.id, fn); }}
                     />

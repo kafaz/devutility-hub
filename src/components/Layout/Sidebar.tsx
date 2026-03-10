@@ -1,17 +1,24 @@
-import React from 'react';
-import { useNavigate, useLocation } from 'react-router-dom';
-import { Layout, Menu, Tooltip, Typography } from 'antd';
 import {
-  FileSearchOutlined,
-  CodeOutlined,
-  ApartmentOutlined,
-  ConsoleSqlOutlined,
-  NumberOutlined,
-  SettingOutlined,
-  BulbOutlined,
-  MenuFoldOutlined,
-  MenuUnfoldOutlined,
+    AlignLeftOutlined,
+    ApartmentOutlined,
+    AreaChartOutlined,
+    BlockOutlined,
+    BugOutlined,
+    BulbOutlined,
+    CodeOutlined,
+    ConsoleSqlOutlined,
+    ControlOutlined,
+    FileSearchOutlined,
+    MenuFoldOutlined,
+    MenuUnfoldOutlined,
+    NumberOutlined,
+    SafetyCertificateOutlined,
+    SettingOutlined,
+    ThunderboltOutlined,
 } from '@ant-design/icons';
+import { Layout, Menu, Tooltip, Typography } from 'antd';
+import React from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useGlobalStore } from '../../store/globalStore';
 
 const { Sider } = Layout;
@@ -23,6 +30,13 @@ const ICON_MAP: Record<string, React.ReactNode> = {
   ApartmentOutlined:  <ApartmentOutlined />,
   ConsoleSqlOutlined: <ConsoleSqlOutlined />,
   NumberOutlined:     <NumberOutlined />,
+  SafetyCertificateOutlined: <SafetyCertificateOutlined />,
+  AlignLeftOutlined:  <AlignLeftOutlined />,
+  AreaChartOutlined:  <AreaChartOutlined />,
+  BlockOutlined:      <BlockOutlined />,
+  BugOutlined:        <BugOutlined />,
+  ControlOutlined:    <ControlOutlined />,
+  ThunderboltOutlined:<ThunderboltOutlined />,
 };
 
 const tools = [
@@ -55,6 +69,48 @@ const tools = [
     name: '进制转换',
     icon: 'NumberOutlined',
     path: '/number-converter',
+  },
+  {
+    id:   'file-hasher',
+    name: '文件校验 (MD5/CRC)',
+    icon: 'SafetyCertificateOutlined',
+    path: '/file-hasher',
+  },
+  {
+    id:   'fio-visualizer',
+    name: 'FIO 解析器',
+    icon: 'AreaChartOutlined',
+    path: '/fio-visualizer',
+  },
+  {
+    id:   'hex-lba-explorer',
+    name: '十六进制沙盒',
+    icon: 'BlockOutlined',
+    path: '/hex-lba-explorer',
+  },
+  {
+    id:   'crash-analyzer',
+    name: 'GDB 重栈分析器',
+    icon: 'BugOutlined',
+    path: '/crash-analyzer',
+  },
+  {
+    id:   'protocol-decoder',
+    name: '协议裸码解码器',
+    icon: 'ControlOutlined',
+    path: '/protocol-decoder',
+  },
+  {
+    id:   'timeline-correlator',
+    name: '日志时序对齐器',
+    icon: 'AlignLeftOutlined',
+    path: '/timeline-correlator',
+  },
+  {
+    id:   'fault-builder',
+    name: '故障注入生成器',
+    icon: 'ThunderboltOutlined',
+    path: '/fault-builder',
   },
 ];
 
