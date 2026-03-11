@@ -23,6 +23,7 @@ import {
     ReloadOutlined,
     StopOutlined,
 } from '@ant-design/icons';
+import { SearchAddon } from '@xterm/addon-search';
 import {
     Alert,
     Badge,
@@ -87,6 +88,10 @@ const TerminalInstance: React.FC<{
   registerGetCurrentLine?: (fn: () => string) => void;
 }> = ({ sessionId, isDark, visible, onInput, onResize, registerWrite, registerSnapshot, registerGetCurrentLine }) => {
   const ref = useRef<HTMLDivElement>(null);
+  // 14-B: search state
+  const [searchOpen, setSearchOpen]   = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const searchAddonRef = useRef<SearchAddon | null>(null);
 
   useEffect(() => {
     if (!ref.current) return;
@@ -98,7 +103,10 @@ const TerminalInstance: React.FC<{
       fontSize: 13, lineHeight: 1.4, cursorBlink: true, scrollback: 5000,
     });
     const fit = new FitAddon();
+    const search = new SearchAddon();
+    searchAddonRef.current = search;
     term.loadAddon(fit);
+    term.loadAddon(search);
     term.open(ref.current);
 
     // 恢复历史缓冲区
@@ -114,6 +122,17 @@ const TerminalInstance: React.FC<{
     const d1 = term.onData(onInput);
     const ro = new ResizeObserver(() => { if (visible) { fit.fit(); onResize(term.cols, term.rows); } });
     ro.observe(ref.current);
+
+    // 14-B: Ctrl+F 快捷键切换搜索栏
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        e.preventDefault();
+        setSearchOpen(prev => !prev);
+      }
+      if (e.key === 'Escape') setSearchOpen(false);
+    };
+    ref.current?.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('keydown', handleKeyDown);
 
     registerWrite((b64: string) => {
       const bin = atob(b64);
@@ -140,20 +159,55 @@ const TerminalInstance: React.FC<{
       });
     }
 
-    return () => { d1.dispose(); ro.disconnect(); term.dispose(); };
+    return () => {
+      d1.dispose(); ro.disconnect(); term.dispose();
+      document.removeEventListener('keydown', handleKeyDown);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, isDark]);
 
   return (
-    <div
-      ref={ref}
-      style={{
-        width:      '100%', height:     '100%',
-        background: isDark ? '#1e1e1e' : '#fafafa',
-        padding:    4,
-        display:    visible ? 'block' : 'none',
-      }}
-    />
+    <div style={{ position: 'relative', width: '100%', height: '100%', display: visible ? 'flex' : 'none', flexDirection: 'column' }}>
+      {/* 14-B: 搜索浮层 */}
+      {searchOpen && (
+        <div style={{
+          position: 'absolute', top: 4, right: 12, zIndex: 100,
+          display: 'flex', gap: 4, alignItems: 'center',
+          background: isDark ? '#252526' : '#fff',
+          border: '1px solid #3b82f6',
+          borderRadius: 6, padding: '4px 8px', boxShadow: '0 2px 8px rgba(0,0,0,.25)',
+        }}>
+          <Input
+            autoFocus
+            size="small"
+            placeholder="搜索..."
+            value={searchQuery}
+            onChange={e => {
+              setSearchQuery(e.target.value);
+              searchAddonRef.current?.findNext(e.target.value, { incremental: true });
+            }}
+            onKeyDown={e => {
+              if (e.key === 'Enter') {
+                if (e.shiftKey) searchAddonRef.current?.findPrevious(searchQuery);
+                else searchAddonRef.current?.findNext(searchQuery);
+              }
+            }}
+            style={{ width: 180, fontFamily: 'monospace', fontSize: 12 }}
+          />
+          <Button size="small" onClick={() => searchAddonRef.current?.findPrevious(searchQuery)}>↑</Button>
+          <Button size="small" onClick={() => searchAddonRef.current?.findNext(searchQuery)}>↓</Button>
+          <Button size="small" onClick={() => setSearchOpen(false)}>×</Button>
+        </div>
+      )}
+      <div
+        ref={ref}
+        style={{
+          width: '100%', flex: 1,
+          background: isDark ? '#1e1e1e' : '#fafafa',
+          padding: 4,
+        }}
+      />
+    </div>
   );
 };
 

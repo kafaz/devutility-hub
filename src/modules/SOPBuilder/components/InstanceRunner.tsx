@@ -14,11 +14,13 @@ import {
     Button,
     Card,
     Collapse,
+    Dropdown,
     Form,
     Input,
     message,
     Modal,
     Popconfirm,
+    Progress,
     Select,
     Space,
     Tabs,
@@ -33,6 +35,20 @@ import { useGlobalStore } from '../../../store/globalStore';
 import type { SOPCheckResult, SOPInstance, SOPTemplate } from '../../../types';
 import { generateInstanceReport } from '../../../utils';
 import WhiteboardTab from './WhiteboardTab';
+
+// HTML report generator (inline for 14-H)
+function generateHtmlReport(instance: SOPInstance, templateName: string): string {
+  const md = generateInstanceReport({ instance, templateName });
+  const escaped = md
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  return `<!DOCTYPE html>
+<html lang="zh-CN"><head>
+<meta charset="UTF-8"><title>故障报告 - ${instance.incidentTitle}</title>
+<style>body{font-family:system-ui,-apple-system,sans-serif;max-width:900px;margin:40px auto;padding:0 20px;line-height:1.7;color:#1a1a1a}h1,h2,h3{border-bottom:1px solid #e4e4e7;padding-bottom:.3em}code,pre{background:#f4f4f5;border-radius:4px;padding:.2em .4em;font-family:monospace;font-size:.9em}pre{padding:1em;overflow:auto}table{border-collapse:collapse;width:100%}td,th{border:1px solid #e4e4e7;padding:8px 12px;text-align:left}th{background:#f9fafb}img{max-width:100%}</style>
+</head><body><pre style="white-space:pre-wrap">${escaped}</pre></body></html>`;
+}
 
 const { Title, Text } = Typography;
 const { TextArea } = Input;
@@ -388,6 +404,7 @@ const InstanceRunner: React.FC<Props> = ({
   const isDark = theme === 'dark';
   const [extraModalOpen, setExtraModalOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
+  const [activeInstanceTab, setActiveInstanceTab] = useState('steps');
   const [extraForm] = Form.useForm();
   const [messageApi, contextHolder] = message.useMessage();
 
@@ -468,11 +485,20 @@ const InstanceRunner: React.FC<Props> = ({
               模板：{instance.templateName} · 开始时间：
               {new Date(instance.createdAt).toLocaleString('zh-CN')}
             </Text>
+            {/* 14-C: 步骤进度条 */}
+            {totalChecks > 0 && (
+              <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <Progress
+                  percent={Math.round((doneChecks / totalChecks) * 100)}
+                  size="small"
+                  style={{ flex: 1, marginBottom: 0 }}
+                  status={abnormalCount > 0 ? 'exception' : doneChecks === totalChecks ? 'success' : 'active'}
+                  format={() => `${doneChecks}/${totalChecks}`}
+                />
+              </div>
+            )}
           </div>
           <Space>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              进度：{doneChecks}/{totalChecks}
-            </Text>
             {abnormalCount > 0 && (
               <Tag color="error" icon={<CloseCircleOutlined />}>
                 {abnormalCount} 项异常
@@ -488,11 +514,51 @@ const InstanceRunner: React.FC<Props> = ({
                 value: k,
               }))}
             />
-            <Tooltip title="导出 Markdown 报告">
-              <Button size="small" icon={<ExportOutlined />} onClick={() => setExportOpen(true)}>
+            {/* 14-H: 多格式导出下拉 */}
+            <Dropdown
+              menu={{
+                items: [
+                  {
+                    key: 'md',
+                    label: '导出 Markdown',
+                    icon: <ExportOutlined />,
+                    onClick: () => setExportOpen(true),
+                  },
+                  {
+                    key: 'html',
+                    label: '导出 HTML（可邮件发送）',
+                    icon: <ExportOutlined />,
+                    onClick: () => {
+                      const html = generateHtmlReport(instance, template?.name ?? instance.templateName);
+                      const blob = new Blob([html], { type: 'text/html;charset=utf-8;' });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url; a.download = `故障报告-${instance.incidentTitle}.html`;
+                      a.click(); URL.revokeObjectURL(url);
+                      messageApi.success('HTML 报告已导出');
+                    },
+                  },
+                  {
+                    key: 'json',
+                    label: '导出 JSON（程序化消费）',
+                    icon: <ExportOutlined />,
+                    onClick: () => {
+                      const json = JSON.stringify(instance, null, 2);
+                      const blob = new Blob([json], { type: 'application/json;charset=utf-8;' });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url; a.download = `故障报告-${instance.incidentTitle}.json`;
+                      a.click(); URL.revokeObjectURL(url);
+                      messageApi.success('JSON 已导出');
+                    },
+                  },
+                ],
+              }}
+            >
+              <Button size="small" icon={<ExportOutlined />}>
                 导出报告
               </Button>
-            </Tooltip>
+            </Dropdown>
             <Popconfirm
               title="确认删除此排查记录？"
               onConfirm={onDelete}
@@ -539,7 +605,8 @@ const InstanceRunner: React.FC<Props> = ({
 
     <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
       <Tabs
-        defaultActiveKey="steps"
+        activeKey={activeInstanceTab}
+        onChange={setActiveInstanceTab}
         style={{ flex: 1, display: 'flex', flexDirection: 'column' }}
         items={[
           {
@@ -642,7 +709,7 @@ const InstanceRunner: React.FC<Props> = ({
             children: (
               <div style={{ height: '500px', border: `1px solid ${borderColor}`, borderRadius: 8, overflow: 'hidden' }}>
                 <React.Suspense fallback={<div style={{ padding: 20 }}>Loading Whiteboard...</div>}>
-                  <WhiteboardTab instanceId={instance.id} />
+                  <WhiteboardTab instanceId={instance.id} isVisible={activeInstanceTab === 'whiteboard'} />
                 </React.Suspense>
               </div>
             )

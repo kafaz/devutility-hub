@@ -212,7 +212,8 @@ export interface SOPInstance {
     prevention: string;  // 预防措施
   };
   whiteboardSnapshot?: string; // Phase 13: 存储 tldraw JSON 原片
-  whiteboardSvg?: string;      // Phase 13: 存储导出的 Base64 图片 (供报告导出)
+  whiteboardSvg?: string;      // Phase 13: 存储导出的 Base64 SVG (供报告导出)
+  whiteboardPng?: string;      // Phase 14-I: 存储 PNG 快照 (供剪贴板分享)
   createdAt: number;
   resolvedAt?: number;
 }
@@ -242,6 +243,21 @@ export interface CronJob {
   lastRunAt?: number;       // 上次派发时间
   nextRunAt?: number;       // 下次执行预测时间
   createdAt: number;
+}
+
+// 14-F: 定时任务单次执行记录
+export interface CronRun {
+  id: string;
+  cronJobId: string;
+  startedAt: number;
+  doneAt?: number;
+  /** 每个节点的执行结果: sessionId → 输出与状态 */
+  nodeResults: Record<string, {
+    stdout: string;
+    exitCode: number;
+    durationMs: number;
+    status: 'ok' | 'error';
+  }>;
 }
 
 // ======================== SOP Git 仓库源类型 ========================

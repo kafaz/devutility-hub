@@ -114,6 +114,9 @@ interface SessionRuntime {
     startIndex: number;
     debounceTimer: ReturnType<typeof setTimeout> | null;
   } | null;
+  // 14-E: asciinema 录像数据
+  recordingFrames:    { t: number; data: string }[];
+  recordingStartedAt: number | null;
 }
 
 const runtimes = new Map<string, SessionRuntime>();
@@ -125,9 +128,22 @@ function getRT(sessionId: string): SessionRuntime {
       execResolvers: new Map(),
       planNodeResolve: null, planAborted: false,
       pendingManualCmd: null,
+      recordingFrames: [], recordingStartedAt: null,
     });
   }
   return runtimes.get(sessionId)!;
+}
+
+// 14-E: 开始/清空录像
+export function startTermRecording(sessionId: string): void {
+  const rt = getRT(sessionId);
+  rt.recordingFrames = [];
+  rt.recordingStartedAt = Date.now();
+}
+
+export function getTermRecording(sessionId: string): { frames: { t: number; data: string }[]; startedAt: number | null } {
+  const rt = getRT(sessionId);
+  return { frames: rt.recordingFrames, startedAt: rt.recordingStartedAt };
 }
 
 export function getTerminalBuffer(sessionId: string): string {
@@ -236,6 +252,12 @@ function makeWSHandler(
           }
         } catch (e) { /* ignore base64 parse error */ }
         rt.onTermData?.(payload);
+
+        // 14-E: asciinema \u5f55\u50cf — \u8ffd\u52a0\u5e27\u6570\u636e
+        if (rt.recordingStartedAt !== null) {
+          const t = (Date.now() - rt.recordingStartedAt) / 1000;
+          rt.recordingFrames.push({ t, data: atob(payload) });
+        }
 
         // 处理输出记录 debounce
         if (rt.pendingManualCmd) {

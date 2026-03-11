@@ -25,6 +25,7 @@ import {
     FileTextOutlined,
     InfoCircleOutlined,
     PlusOutlined,
+    VideoCameraOutlined,
 } from '@ant-design/icons';
 import {
     Badge,
@@ -45,6 +46,7 @@ import ResizableOutput from '../../../components/shared/ResizableOutput';
 import { useGlobalStore } from '../../../store/globalStore';
 import type { JournalEntry, JournalEntryType } from '../store/journalStore';
 import { useJournalStore } from '../store/journalStore';
+import { getTermRecording, startTermRecording } from '../store/sshStore';
 
 const { Text } = Typography;
 const { TextArea } = Input;
@@ -247,6 +249,7 @@ const SessionJournal: React.FC<Props> = ({ sessionId, sessionName, onSnapshotReq
   const [filterType, setFilterType] = useState<JournalEntryType | 'all'>('all');
   const [noteModalOpen, setNoteModalOpen] = useState(false);
   const [noteText, setNoteText] = useState('');
+  const [isRecording, setIsRecording] = useState(false);
 
   const entries = journals[sessionId] ?? [];
 
@@ -353,6 +356,35 @@ const SessionJournal: React.FC<Props> = ({ sessionId, sessionName, onSnapshotReq
     messageApi.success('日志已导出');
   };
 
+  // 14-E: 开始/停止录像 + 下载 .cast
+  const handleToggleRecording = () => {
+    if (isRecording) {
+      // 停止录像 + 导出
+      const { frames, startedAt } = getTermRecording(sessionId);
+      if (frames.length === 0) { messageApi.info('录像内容为空'); setIsRecording(false); return; }
+      const header = JSON.stringify({
+        version: 2,
+        width: 220,
+        height: 50,
+        timestamp: Math.floor((startedAt ?? Date.now()) / 1000),
+        title: sessionName,
+        env: { TERM: 'xterm-256color', SHELL: '/bin/bash' },
+      });
+      const body = frames.map(f => JSON.stringify([f.t, 'o', f.data])).join('\n');
+      const blob = new Blob([header + '\n' + body], { type: 'application/json;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `session-${sessionName}.cast`;
+      a.click(); URL.revokeObjectURL(url);
+      messageApi.success('asciinema 录像已下载，可用 asciinema play 回放');
+      setIsRecording(false);
+    } else {
+      startTermRecording(sessionId);
+      setIsRecording(true);
+      messageApi.success('录像已开始，再次点击停止并下载');
+    }
+  };
+
   const borderColor = isDark ? '#3e3e42' : '#e4e4e7';
 
   // 统计各类型数量
@@ -403,6 +435,16 @@ const SessionJournal: React.FC<Props> = ({ sessionId, sessionName, onSnapshotReq
           </Tooltip>
           <Tooltip title="导出为 Markdown">
             <Button size="small" icon={<DownloadOutlined />} onClick={handleExport} disabled={entries.length === 0} />
+          </Tooltip>
+          {/* 14-E: 录像按钮 */}
+          <Tooltip title={isRecording ? '停止录像并下载 .cast' : '开始终端录像 (asciinema)'}>
+            <Button
+              size="small"
+              icon={<VideoCameraOutlined />}
+              onClick={handleToggleRecording}
+              type={isRecording ? 'primary' : 'default'}
+              danger={isRecording}
+            />
           </Tooltip>
           <Popconfirm
             title="清空此会话的全部日志？"
