@@ -1,9 +1,8 @@
-import * as parserImport from 'cron-parser';
+import parser from 'cron-parser';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { CronJob } from '../../../types';
 import { generateId } from '../../../utils';
-const parser = parserImport as any; // Bypass bad ts default export definition
 
 interface CronStore {
   jobs: CronJob[];
@@ -25,9 +24,9 @@ export const useCronStore = create<CronStore>()(
         let nextRunAt: number | undefined;
         if (data.enabled) {
           try {
-            const interval = parser.parseExpression(data.cronExpr, { currentDate: new Date(now) });
+            const interval = parser.parse(data.cronExpr, { currentDate: new Date(now) });
             nextRunAt = interval.next().getTime();
-          } catch (e) {
+          } catch {
             console.error('Failed to parse cron expression:', data.cronExpr);
           }
         }
@@ -45,9 +44,9 @@ export const useCronStore = create<CronStore>()(
             const updated = { ...j, ...data };
             if (updated.enabled) {
               try {
-                const interval = parser.parseExpression(updated.cronExpr, { currentDate: new Date() });
+                const interval = parser.parse(updated.cronExpr, { currentDate: new Date() });
                 updated.nextRunAt = interval.next().getTime();
-              } catch (e) {
+              } catch {
                 console.error('Failed to parse cron expression:', updated.cronExpr);
               }
             } else {
@@ -79,9 +78,9 @@ export const useCronStore = create<CronStore>()(
           if (now >= job.nextRunAt) {
             jobsToRun.push(job);
             try {
-              const interval = parser.parseExpression(job.cronExpr, { currentDate: new Date(now) });
+              const interval = parser.parse(job.cronExpr, { currentDate: new Date(now) });
               return { ...job, lastRunAt: now, nextRunAt: interval.next().getTime() };
-            } catch (e) {
+            } catch {
               return { ...job, enabled: false, nextRunAt: undefined };
             }
           }

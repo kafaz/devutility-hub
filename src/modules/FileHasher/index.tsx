@@ -37,7 +37,11 @@ const FileHasher: React.FC = () => {
       setWarningMsg(`提示: 结构化压缩镜像无法直接计算设备级 MD5。您必须先将其转换为 RAW 格式后再计算目标文件。例如: qemu-img convert -f ${ext} -O raw ${file.name} target.raw`);
     }
 
-    const blobSlice = File.prototype.slice || (File.prototype as any).mozSlice || (File.prototype as any).webkitSlice;
+    interface FileWithLegacySlice extends File {
+      mozSlice?: (start?: number, end?: number, contentType?: string) => Blob;
+      webkitSlice?: (start?: number, end?: number, contentType?: string) => Blob;
+    }
+    const blobSlice = File.prototype.slice || (File.prototype as FileWithLegacySlice).mozSlice || (File.prototype as FileWithLegacySlice).webkitSlice;
     const chunkSize = 2097152; // Read in chunks of 2MB
     const chunks = Math.ceil(file.size / chunkSize);
     let currentChunk = 0;

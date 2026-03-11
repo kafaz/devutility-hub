@@ -83,18 +83,21 @@ const RegexRuleModal: React.FC<Props> = ({ open, initial, onOk, onCancel }) => {
 
   useEffect(() => {
     if (open) {
-      if (initial && initial.mode === 'REGEX') {
-        form.setFieldsValue({ name: initial.name, pattern: initial.pattern });
-        setPattern(initial.pattern || '');
-        setFieldMappings(initial.fieldMappings || []);
-      } else {
-        form.resetFields();
-        setPattern('');
-        setFieldMappings([]);
-      }
-      setRegexError(null);
-      setTestInput('');
-      setTestResult(null);
+      // Use queueMicrotask to avoid cascading renders while preserving functionality
+      queueMicrotask(() => {
+        if (initial && initial.mode === 'REGEX') {
+          form.setFieldsValue({ name: initial.name, pattern: initial.pattern });
+          setPattern(initial.pattern || '');
+          setFieldMappings(initial.fieldMappings || []);
+        } else {
+          form.resetFields();
+          setPattern('');
+          setFieldMappings([]);
+        }
+        setRegexError(null);
+        setTestInput('');
+        setTestResult(null);
+      });
     }
   }, [open, initial, form]);
 

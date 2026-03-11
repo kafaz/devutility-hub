@@ -243,7 +243,6 @@ const CFunctionAnalyzer: React.FC = () => {
   const macroInput = activeTab?.macroInput ?? '';
 
   const cardBg     = isDark ? '#252526' : '#ffffff';
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const borderColor = isDark ? '#3e3e42' : '#e4e4e7';
 
   // ── 解析 C 函数调用（已由下方 useEffect 自动触发，此处保留备用） ────────
@@ -261,19 +260,22 @@ const CFunctionAnalyzer: React.FC = () => {
 
   // 当 Tab 或宏内容变化时自动静默解析（以确保预览更新）
   useEffect(() => {
-    if (macroInput) {
-      const result = parseCLogMacroCall(macroInput);
-      if (result) {
-        setCfuncParsed(result);
-        setParseError('');
+    // Use queueMicrotask to avoid cascading renders while preserving functionality
+    queueMicrotask(() => {
+      if (macroInput) {
+        const result = parseCLogMacroCall(macroInput);
+        if (result) {
+          setCfuncParsed(result);
+          setParseError('');
+        } else {
+          setParseError('解析失败：请确认格式符合 C/C++ 宏规范');
+          setCfuncParsed(null);
+        }
       } else {
-        setParseError('解析失败：请确认格式符合 C/C++ 宏规范');
+        setParseError('');
         setCfuncParsed(null);
       }
-    } else {
-      setParseError('');
-      setCfuncParsed(null);
-    }
+    });
   }, [macroInput, setCfuncParsed]);
 
 
@@ -329,13 +331,13 @@ const CFunctionAnalyzer: React.FC = () => {
       const { matched, fields } = applyCLogRule(line, cfuncParsed, cfuncAnchored);
       return { lineIndex: i, rawLine: line, matched, fields };
     });
-    setCfuncResults(matchResults as any[]);
+    setCfuncResults(matchResults);
   }, [cfuncParsed, cfuncLogInput, cfuncAnchored, setCfuncResults, messageApi]);
 
   // ── 导出结果 ──────────────────────────────────────────────────────────────
   const handleExport = () => {
     if (cfuncResults.length === 0) return;
-    const data = cfuncResults.map((r: any) => ({
+    const data = cfuncResults.map((r: MatchResult) => ({
       line:    r.lineIndex + 1,
       matched: r.matched,
       raw:     r.rawLine,
@@ -344,7 +346,7 @@ const CFunctionAnalyzer: React.FC = () => {
     downloadJSON(data, 'c-log-analysis.json');
   };
 
-  const matchCount   = cfuncResults.filter((r: any) => r.matched).length;
+  const matchCount   = cfuncResults.filter((r: MatchResult) => r.matched).length;
   const useCardView  = cfuncResults.length <= 5;
 
   // 生成当前正则预览
@@ -675,7 +677,7 @@ const CFunctionAnalyzer: React.FC = () => {
         >
           {useCardView ? (
             /* 少量行：卡片式展示，字段名对齐 */
-            cfuncResults.map((r: any) => (
+            cfuncResults.map((r: MatchResult) => (
               <FieldCard
                 key={r.lineIndex}
                 result={r}

@@ -400,7 +400,7 @@ export function parseSOPTemplateFromMarkdown(
         variables.push({
           name: m[1],
           label: m[2],
-          type: m[3] as any,
+          type: m[3] as 'text' | 'number' | 'path' | 'select',
           required: m[4] === 'true',
           defaultValue: m[5] || undefined,
         });

@@ -30,7 +30,7 @@ const RULES: HighlightRule[] = [
   { regex: /\b(?:0x)?[0-9a-fA-F]{16}\b/g, style: { color: '#a855f7' } },
 ];
 
-export const highlightDBSText = (text: string): React.ReactNode[] => {
+function highlightDBSText(text: string): React.ReactNode[] {
   if (!text) return [];
 
   let elements: React.ReactNode[] = [text];
@@ -81,12 +81,16 @@ export const highlightDBSText = (text: string): React.ReactNode[] => {
   });
 
   return elements;
-};
+}
 
 interface DBSHighlighterProps {
   text: string;
 }
 
-export const DBSHighlighter: React.FC<DBSHighlighterProps> = ({ text }) => {
+const DBSHighlighter: React.FC<DBSHighlighterProps> = ({ text }) => {
   return <>{highlightDBSText(text)}</>;
 };
+
+export default DBSHighlighter;
+// eslint-disable-next-line react-refresh/only-export-components
+export { highlightDBSText };

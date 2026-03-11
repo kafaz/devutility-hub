@@ -481,7 +481,7 @@ interface VariableFormProps {
 }
 
 const VariableForm: React.FC<VariableFormProps> = ({
-  templateId: _templateId,
+  templateId: _templateId,  // eslint-disable-line @typescript-eslint/no-unused-vars
   variables,
   values,
   onChange,

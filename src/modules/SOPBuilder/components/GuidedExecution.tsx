@@ -485,8 +485,11 @@ const GuidedExecution: React.FC<Props> = ({
   // 重置到第一步（每次打开时）
   useEffect(() => {
     if (open) {
-      setStepIdx(0);
-      setShowSummary(false);
+      // Use queueMicrotask to avoid cascading renders while preserving functionality
+      queueMicrotask(() => {
+        setStepIdx(0);
+        setShowSummary(false);
+      });
     }
   }, [open]);
 

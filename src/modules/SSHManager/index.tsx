@@ -374,9 +374,12 @@ const ProfileModal: React.FC<{
 
   useEffect(() => {
     if (open) {
-      form.setFieldsValue(initial ?? { port: 22, authType: 'privateKey' });
-      setAuthType(initial?.authType ?? 'privateKey');
-      setKeyMsg('');
+      // Use queueMicrotask to avoid cascading renders while preserving functionality
+      queueMicrotask(() => {
+        form.setFieldsValue(initial ?? { port: 22, authType: 'privateKey' });
+        setAuthType(initial?.authType ?? 'privateKey');
+        setKeyMsg('');
+      });
     }
   }, [open, initial, form]);
 
@@ -538,7 +541,14 @@ const SSHManager: React.FC = () => {
           }
 
           // 构造该 Job 对应的临时 Instance 列表
-          const configs: any[] = [];
+          interface CronJobConfig {
+            sessionId: string;
+            instanceId: string;
+            instanceTitle: string;
+            templateName: string;
+            steps: import('./store/sshStore').PlanStep[];
+          }
+          const configs: CronJobConfig[] = [];
           
           for (const sessionId of activeSessionIds) {
             // （暂只处理广播模式）如果是 targeted 模式也可以按需从 job.targetedConfigs 里去取
@@ -574,7 +584,7 @@ const SSHManager: React.FC = () => {
                   normalRegex: ss.normalRegex, abnormalRegex: ss.abnormalRegex,
                   scriptPath: ss.scriptPath, timeout: ss.timeoutMs ?? 30000,
                   checkId: cr.checkId, isSubStep: true,
-                } as any)); // cast since properties expanded recently locally
+                }));
               } else {
                 const cmd = renderTemplate(cr.command, mergedVars);
                 if (cmd.trim()) steps.push({
@@ -813,9 +823,11 @@ const SSHManager: React.FC = () => {
       }
 
       const failCount = run?.nodeExecutions.filter((ne) => ne.status === 'failed').length ?? 0;
-      failCount === 0
-        ? messageApi.success(`✅ ${configs.length} 个节点全部执行完成`)
-        : messageApi.warning(`⚠️ ${configs.length} 个节点执行完成，${failCount} 个异常`);
+      if (failCount === 0) {
+        messageApi.success(`✅ ${configs.length} 个节点全部执行完成`);
+      } else {
+        messageApi.warning(`⚠️ ${configs.length} 个节点执行完成，${failCount} 个异常`);
+      }
     } finally {
       setExecuting(false);
     }
@@ -1255,7 +1267,7 @@ const SSHManager: React.FC = () => {
               { label: '定时任务(Cron)', value: 'cron' },
             ]}
             value={activeTab}
-            onChange={(v) => setActiveTab(v as any)}
+            onChange={(v) => setActiveTab(v as 'connect' | 'multi_node' | 'cron')}
             block
             size="small"
             style={{ marginBottom: 12 }}

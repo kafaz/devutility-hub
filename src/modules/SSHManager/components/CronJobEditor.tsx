@@ -30,22 +30,25 @@ const CronJobEditor: React.FC<Props> = ({ open, initialValue, onCancel, onSave }
 
   useEffect(() => {
     if (open) {
-      if (initialValue) {
-        form.setFieldsValue(initialValue);
-        setExecMode(initialValue.execMode);
-        setSelectedTemplateId(initialValue.broadcastTemplateId);
-      } else {
-        form.resetFields();
-        form.setFieldsValue({
-          enabled: true,
-          cronExpr: '* * * * *',
-          targetGroupIds: [],
-          targetSessions: [],
-          execMode: 'broadcast',
-        });
-        setExecMode('broadcast');
-        setSelectedTemplateId(undefined);
-      }
+      // Use queueMicrotask to avoid cascading renders while preserving functionality
+      queueMicrotask(() => {
+        if (initialValue) {
+          form.setFieldsValue(initialValue);
+          setExecMode(initialValue.execMode);
+          setSelectedTemplateId(initialValue.broadcastTemplateId);
+        } else {
+          form.resetFields();
+          form.setFieldsValue({
+            enabled: true,
+            cronExpr: '* * * * *',
+            targetGroupIds: [],
+            targetSessions: [],
+            execMode: 'broadcast',
+          });
+          setExecMode('broadcast');
+          setSelectedTemplateId(undefined);
+        }
+      });
     }
   }, [open, initialValue, form]);
 
@@ -58,7 +61,7 @@ const CronJobEditor: React.FC<Props> = ({ open, initialValue, onCancel, onSave }
         addJob(values);
       }
       onSave();
-    } catch (err) {
+    } catch {
       // Validating failed
     }
   };

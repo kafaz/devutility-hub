@@ -9,6 +9,8 @@ const { Content } = Layout;
 
 type FaultCategory = 'network' | 'block' | 'os';
 
+type FormValues = Record<string, string | number>;
+
 interface FaultTemplate {
     id: string;
     name: string;
@@ -23,7 +25,7 @@ interface FaultTemplate {
         options?: { label: string; value: string }[];
         addonAfter?: string;
     }[];
-    generateCmd: (values: any) => string;
+    generateCmd: (values: FormValues) => string;
 }
 
 const FAULT_TEMPLATES: FaultTemplate[] = [
@@ -101,7 +103,7 @@ const FAULT_TEMPLATES: FaultTemplate[] = [
             { name: 'timeout', label: '持续时间 (秒)', type: 'number', defaultValue: 60, addonAfter: 's' }
         ],
         generateCmd: (v) => {
-            let cmd = `# 编译并执行 CPU 死循环压榨器\nfor i in $(seq 1 ${v.cores}); do\n  timeout ${v.timeout} bash -c 'while true; do :; done' &\ndone\nwait\necho "CPU Burn Completed."`;
+            const cmd = `# 编译并执行 CPU 死循环压榨器\nfor i in $(seq 1 ${v.cores}); do\n  timeout ${v.timeout} bash -c 'while true; do :; done' &\ndone\nwait\necho "CPU Burn Completed."`;
             return cmd;
         }
     },
@@ -125,7 +127,7 @@ const FaultBuilder: React.FC = () => {
 
     const [category, setCategory] = useState<FaultCategory>('network');
     const [selectedId, setSelectedId] = useState<string>('net-delay');
-    const [formValues, setFormValues] = useState<any>({});
+    const [formValues, setFormValues] = useState<FormValues>({});
 
     const activeTemplates = useMemo(() => FAULT_TEMPLATES.filter(t => t.category === category), [category]);
     const activeTemplate = useMemo(() => FAULT_TEMPLATES.find(t => t.id === selectedId), [selectedId]);
@@ -136,16 +138,16 @@ const FaultBuilder: React.FC = () => {
             // Merge defaults with current form values
             const values = { ...formValues };
             activeTemplate.fields.forEach(f => {
-                if (values[f.name] === undefined) values[f.name] = f.defaultValue;
+                if (values[f.name] === undefined && f.defaultValue !== undefined) values[f.name] = f.defaultValue;
             });
             return activeTemplate.generateCmd(values);
-        } catch (e) {
+        } catch {
             return '# Error generating command';
         }
     }, [activeTemplate, formValues]);
 
-    const handleCategoryChange = (e: any) => {
-        const cat = e.target.value;
+    const handleCategoryChange = (e: { target: { value?: string } }) => {
+        const cat = e.target.value as FaultCategory;
         setCategory(cat);
         const first = FAULT_TEMPLATES.find(t => t.category === cat);
         if (first) {
@@ -208,10 +210,10 @@ const FaultBuilder: React.FC = () => {
                                     layout="vertical"
                                     onValuesChange={(_, allValues) => setFormValues(allValues)}
                                     initialValues={
-                                        activeTemplate.fields.reduce((acc, f) => {
-                                            acc[f.name] = f.defaultValue;
+                                        activeTemplate.fields.reduce<FormValues>((acc, f) => {
+                                            acc[f.name] = f.defaultValue ?? '';
                                             return acc;
-                                        }, {} as Record<string, any>)
+                                        }, {})
                                     }
                                 >
                                     {activeTemplate.fields.map(f => (

@@ -3,6 +3,13 @@ import { persist } from 'zustand/middleware';
 import type { CFormatField, GrepGroup, ParseResult, ParseRule } from '../../../types';
 import { cFormatToRegex, generateId, parseGrepCOutput, type ParsedCLogCall } from '../../../utils';
 
+interface MatchResult {
+  lineIndex: number;
+  rawLine: string;
+  matched: boolean;
+  fields: Record<string, string>;
+}
+
 export interface CMacroTab {
   id: string;
   name: string;
@@ -26,7 +33,7 @@ interface LogStore {
   
   // 内存态（不持久化），用于保持路由切换时的结果
   cfuncParsed: ParsedCLogCall | null;
-  cfuncResults: any[]; // Any to avoid circular dependency or redefine MatchResult here
+  cfuncResults: MatchResult[];
 
   setLogText: (text: string) => void;
   setActiveRule: (id: string | null) => void;
@@ -40,7 +47,7 @@ interface LogStore {
   setCfuncLogInput: (text: string) => void;
   setCfuncAnchored: (anchored: boolean) => void;
   setCfuncParsed: (parsed: ParsedCLogCall | null) => void;
-  setCfuncResults: (results: any[]) => void;
+  setCfuncResults: (results: MatchResult[]) => void;
 
   addRegexRule: (
     data: Omit<ParseRule, 'id' | 'createdAt' | 'updatedAt' | 'mode'>

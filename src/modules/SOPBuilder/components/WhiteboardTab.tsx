@@ -1,8 +1,9 @@
 import { CopyOutlined, SaveOutlined } from '@ant-design/icons';
 import { Button, message, Spin, Tooltip } from 'antd';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import type { Editor } from 'tldraw';
 import { Tldraw } from 'tldraw';
 import 'tldraw/tldraw.css';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useSOPStore } from '../store/sopStore';
 
 interface WhiteboardTabProps {
@@ -16,18 +17,18 @@ const WhiteboardTab: React.FC<WhiteboardTabProps> = ({ instanceId, isVisible = t
   const instance = instances.find(i => i.id === instanceId);
   const [isSaving, setIsSaving] = useState(false);
   const [isCopying, setIsCopying] = useState(false);
-  const editorRef = useRef<any>(null);
+  const editorRef = useRef<Editor | null>(null);
 
   // Initialize with snapshot if it exists
   const initialSnapshot = instance?.whiteboardSnapshot
     ? JSON.parse(instance.whiteboardSnapshot)
     : undefined;
 
-  const handleMount = useCallback((editorInst: any) => {
+  const handleMount = useCallback((editorInst: Editor) => {
     editorRef.current = editorInst;
     if (initialSnapshot) {
       try {
-        editorInst.store.loadSnapshot(initialSnapshot);
+        (editorInst.store as unknown as { loadSnapshot: (s: unknown) => void }).loadSnapshot(initialSnapshot);
       } catch (e) {
         console.error('Failed to load tldraw snapshot:', e);
       }
@@ -39,7 +40,7 @@ const WhiteboardTab: React.FC<WhiteboardTabProps> = ({ instanceId, isVisible = t
     const ed = editorRef.current;
     if (!ed || !instanceId) return false;
     try {
-      const snapshot = ed.store.getSnapshot();
+      const snapshot = (ed.store as unknown as { getSnapshot: () => unknown }).getSnapshot();
       const snapshotJson = JSON.stringify(snapshot);
       const shapeIds = Array.from(ed.getCurrentPageShapeIds().values());
 
@@ -80,6 +81,7 @@ const WhiteboardTab: React.FC<WhiteboardTabProps> = ({ instanceId, isVisible = t
       doSave(true); // silent auto-save
     }
     prevVisibleRef.current = isVisible;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isVisible]);
 
   // 14-I: Copy PNG to clipboard

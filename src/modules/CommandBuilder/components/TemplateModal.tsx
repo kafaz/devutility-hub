@@ -51,20 +51,23 @@ const TemplateModal: React.FC<Props> = ({ open, initial, onOk, onCancel }) => {
 
   useEffect(() => {
     if (open) {
-      if (initial) {
-        form.setFieldsValue({
-          name: initial.name,
-          category: initial.category,
-          description: initial.description,
-          template: initial.template,
-        });
-        setTemplateStr(initial.template);
-        setVariables(initial.variables);
-      } else {
-        form.resetFields();
-        setTemplateStr('');
-        setVariables([]);
-      }
+      // Use queueMicrotask to avoid cascading renders while preserving functionality
+      queueMicrotask(() => {
+        if (initial) {
+          form.setFieldsValue({
+            name: initial.name,
+            category: initial.category,
+            description: initial.description,
+            template: initial.template,
+          });
+          setTemplateStr(initial.template);
+          setVariables(initial.variables);
+        } else {
+          form.resetFields();
+          setTemplateStr('');
+          setVariables([]);
+        }
+      });
     }
   }, [open, initial, form]);
 

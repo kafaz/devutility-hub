@@ -33,6 +33,22 @@ const toolsConfig: ToolConfig[] = [
     category: 'utility',
     version: '1.0.0',
   },
+  {
+    id: 'io-analyzer',
+    name: 'IO 性能分析',
+    icon: 'BarChartOutlined',
+    description: '集成 iostat、dd、blktrace 等多种 IO 工具分析性能瓶颈',
+    category: 'analyzer',
+    version: '1.0.0',
+  },
+  {
+    id: 'code-profiler',
+    name: '代码路径优化',
+    icon: 'ToolOutlined',
+    description: 'perf、火焰图、GDB 堆栈分析，识别热点代码优化点',
+    category: 'analyzer',
+    version: '1.0.0',
+  },
 ];
 
 export default toolsConfig;

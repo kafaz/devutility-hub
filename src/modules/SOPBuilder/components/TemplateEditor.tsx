@@ -333,19 +333,22 @@ const TemplateEditor: React.FC<Props> = ({
 
   useEffect(() => {
     if (open) {
-      if (initial) {
-        form.setFieldsValue({
-          name: initial.name, category: initial.category,
-          description: initial.description, diagnosisHints: initial.diagnosisHints,
-        });
-        setChecks(initial.checks.map((c) => ({ ...c, subSteps: c.subSteps ?? [] })));
-        setVariables(initial.variables ?? []);
-      } else {
-        form.resetFields();
-        setChecks([]);
-        setVariables([]);
-      }
-      setActiveKeys([]);
+      // Use queueMicrotask to avoid cascading renders while preserving functionality
+      queueMicrotask(() => {
+        if (initial) {
+          form.setFieldsValue({
+            name: initial.name, category: initial.category,
+            description: initial.description, diagnosisHints: initial.diagnosisHints,
+          });
+          setChecks(initial.checks.map((c) => ({ ...c, subSteps: c.subSteps ?? [] })));
+          setVariables(initial.variables ?? []);
+        } else {
+          form.resetFields();
+          setChecks([]);
+          setVariables([]);
+        }
+        setActiveKeys([]);
+      });
     }
   }, [open, initial, form]);
 
@@ -465,7 +468,7 @@ const TemplateEditor: React.FC<Props> = ({
               dataIndex: 'type',
               render: (v, _, i) => <Select size="small" value={v} onChange={(val) => {
                 const nav = [...variables];
-                nav[i].type = val as any;
+                nav[i].type = val as 'text' | 'number' | 'path' | 'select';
                 setVariables(nav);
               }} style={{ width: 80 }} options={[{label:'文本', value:'text'}, {label:'数字', value:'number'}, {label:'路径', value:'path'}, {label:'下拉', value:'select'}]} />
             },

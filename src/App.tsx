@@ -15,6 +15,8 @@ const CrashAnalyzer     = lazy(() => import('./modules/CrashAnalyzer'));
 const ProtocolDecoder   = lazy(() => import('./modules/ProtocolDecoder'));
 const TimelineCorrelator = lazy(() => import('./modules/TimelineCorrelator'));
 const FaultBuilder      = lazy(() => import('./modules/FaultBuilder'));
+const IOAnalyzer        = lazy(() => import('./modules/IOAnalyzer'));
+const CodeProfiler      = lazy(() => import('./modules/CodeProfiler'));
 
 const Loading: React.FC = () => (
   <div
@@ -127,6 +129,22 @@ const App: React.FC = () => (
           element={
             <Suspense fallback={<Loading />}>
               <FaultBuilder />
+            </Suspense>
+          }
+        />
+        <Route
+          path="io-analyzer"
+          element={
+            <Suspense fallback={<Loading />}>
+              <IOAnalyzer />
+            </Suspense>
+          }
+        />
+        <Route
+          path="code-profiler"
+          element={
+            <Suspense fallback={<Loading />}>
+              <CodeProfiler />
             </Suspense>
           }
         />

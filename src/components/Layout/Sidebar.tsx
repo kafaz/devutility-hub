@@ -2,6 +2,7 @@ import {
     AlignLeftOutlined,
     ApartmentOutlined,
     AreaChartOutlined,
+    BarChartOutlined,
     BlockOutlined,
     BugOutlined,
     BulbOutlined,
@@ -15,6 +16,7 @@ import {
     SafetyCertificateOutlined,
     SettingOutlined,
     ThunderboltOutlined,
+    ToolOutlined,
 } from '@ant-design/icons';
 import { Layout, Menu, Tooltip, Typography } from 'antd';
 import React from 'react';
@@ -37,6 +39,8 @@ const ICON_MAP: Record<string, React.ReactNode> = {
   BugOutlined:        <BugOutlined />,
   ControlOutlined:    <ControlOutlined />,
   ThunderboltOutlined:<ThunderboltOutlined />,
+  BarChartOutlined:   <BarChartOutlined />,
+  ToolOutlined:       <ToolOutlined />,
 };
 
 const tools = [
@@ -111,6 +115,18 @@ const tools = [
     name: '故障注入生成器',
     icon: 'ThunderboltOutlined',
     path: '/fault-builder',
+  },
+  {
+    id:   'io-analyzer',
+    name: 'IO 性能分析',
+    icon: 'BarChartOutlined',
+    path: '/io-analyzer',
+  },
+  {
+    id:   'code-profiler',
+    name: '代码路径优化',
+    icon: 'ToolOutlined',
+    path: '/code-profiler',
   },
 ];
 

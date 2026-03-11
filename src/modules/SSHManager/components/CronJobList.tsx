@@ -31,7 +31,7 @@ const CronJobList: React.FC = () => {
     {
       title: '目标数',
       key: 'targets',
-      render: (_: any, record: CronJob) => {
+      render: (_: unknown, record: CronJob) => {
         const groups = record.targetGroupIds.length;
         const sessions = record.targetSessions.length;
         if (groups === 0 && sessions === 0) return <Text type="secondary">无</Text>;
@@ -52,7 +52,7 @@ const CronJobList: React.FC = () => {
     {
       title: '状态',
       key: 'enabled',
-      render: (_: any, record: CronJob) => (
+      render: (_: unknown, record: CronJob) => (
         <Switch
           checked={record.enabled}
           onChange={(checked) => toggleJob(record.id, checked)}
@@ -65,7 +65,7 @@ const CronJobList: React.FC = () => {
     {
       title: '操作',
       key: 'action',
-      render: (_: any, record: CronJob) => (
+      render: (_: unknown, record: CronJob) => (
         <Space size="middle">
           <Button
             type="text"

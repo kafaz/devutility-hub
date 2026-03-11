@@ -250,7 +250,7 @@ function makeWSHandler(
               rt.pendingManualCmd.startIndex = Math.max(0, rt.pendingManualCmd.startIndex - drop);
             }
           }
-        } catch (e) { /* ignore base64 parse error */ }
+        } catch { /* ignore base64 parse error */ }
         rt.onTermData?.(payload);
 
         // 14-E: asciinema \u5f55\u50cf — \u8ffd\u52a0\u5e27\u6570\u636e
@@ -272,11 +272,13 @@ function makeWSHandler(
               for (let i = 0; i < outputBin.length; i++) bytes[i] = outputBin.charCodeAt(i);
               const outputUtf8 = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
               
+              /* eslint-disable no-control-regex */
               const cleanOutput = outputUtf8
                 .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
                 .replace(/\x1b\][^\x07]*\x07/g, '')
                 .replace(/\x1b[()][0-9A-Za-z]/g, '')
                 .replace(/\x1b[=>]/g, '')
+              /* eslint-enable no-control-regex */
                 .trim();
               
               const sess = get().sessions.find(s => s.id === sessionId);
