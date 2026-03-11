@@ -211,6 +211,8 @@ export interface SOPInstance {
     solution: string;    // 解决方案
     prevention: string;  // 预防措施
   };
+  whiteboardSnapshot?: string; // Phase 13: 存储 tldraw JSON 原片
+  whiteboardSvg?: string;      // Phase 13: 存储导出的 Base64 图片 (供报告导出)
   createdAt: number;
   resolvedAt?: number;
 }

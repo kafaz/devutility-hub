@@ -14,22 +14,37 @@
  *   - 添加备注
  *   - 触发终端快照
  */
-import React, { useState } from 'react';
 import {
-  Typography, Tag, Space, Button, Input, Tooltip,
-  Select, Popconfirm, Empty, message, Badge, Modal,
-} from 'antd';
-import {
-  FileTextOutlined, CodeOutlined, CameraOutlined,
-  EditOutlined, DeleteOutlined, DownloadOutlined,
-  ClearOutlined, PlusOutlined,
-  CheckCircleOutlined, CloseCircleOutlined,
-  InfoCircleOutlined,
+    CameraOutlined,
+    CheckCircleOutlined,
+    ClearOutlined,
+    CloseCircleOutlined,
+    CodeOutlined,
+    DeleteOutlined, DownloadOutlined,
+    EditOutlined,
+    FileTextOutlined,
+    InfoCircleOutlined,
+    PlusOutlined,
 } from '@ant-design/icons';
+import {
+    Badge,
+    Button,
+    Empty,
+    Input,
+    message,
+    Modal,
+    Popconfirm,
+    Select,
+    Space,
+    Tag,
+    Tooltip,
+    Typography,
+} from 'antd';
+import React, { useState } from 'react';
 import ResizableOutput from '../../../components/shared/ResizableOutput';
-import { useJournalStore } from '../store/journalStore';
-import type { JournalEntry, JournalEntryType } from '../store/journalStore';
 import { useGlobalStore } from '../../../store/globalStore';
+import type { JournalEntry, JournalEntryType } from '../store/journalStore';
+import { useJournalStore } from '../store/journalStore';
 
 const { Text } = Typography;
 const { TextArea } = Input;
@@ -308,7 +323,7 @@ const SessionJournal: React.FC<Props> = ({ sessionId, sessionName, onSnapshotReq
       if (e.output) {
         lines.push('**输出**');
         lines.push('```');
-        lines.push(e.output.slice(0, 3000) + (e.output.length > 3000 ? '\n...(截断)' : ''));
+        lines.push(e.output);
         lines.push('```');
         lines.push('');
       }

@@ -554,12 +554,12 @@ wss.on('connection', (ws) => {
     /**
      * 写入 Shell：
      *   echo '===S:id==='   — 开始标记（单引号防止变量展开）
-     *   <命令>              — 实际命令
+     *   <命令>              — 实际命令 (临时覆盖 COLUMNS 防止如 ls 等命令输出发生换行截断/折行)
      *   echo "===E:id===:$?" — 结束标记（双引号以便 $? 展开）
      *
      * 三条命令一次性写入，确保在同一 Shell 上下文中原子执行
      */
-    shell.write(`echo '${mkS(id)}'\n${cmd}\necho "${mkE(id)}$?"\n`);
+    shell.write(`echo '${mkS(id)}'\nCOLUMNS=10000; ${cmd}\necho "${mkE(id)}$?"\n`);
   }
 
   /** 将命令加入队列，返回 Promise */
@@ -591,13 +591,16 @@ wss.on('connection', (ws) => {
 
         ssh = new Client();
         let cfg;
-        try { cfg = buildConnectConfig(msg); }
-        catch (e) {
+        let jumpCfg;
+        try { 
+          cfg = buildConnectConfig(msg);
+          if (msg.jumpHost) jumpCfg = buildConnectConfig(msg.jumpHost);
+        } catch (e) {
           send({ type: 'status', status: 'error', msg: e.message });
           return;
         }
 
-        ssh.on('ready', () => {
+        const handleReady = () => {
           send({ type: 'status', status: 'connected',
                  host: cfg.host, port: cfg.port, username: cfg.username });
 
@@ -640,7 +643,9 @@ wss.on('connection', (ws) => {
               });
             }
           );
-        });
+        };
+
+        ssh.on('ready', handleReady);
 
         ssh.on('error', (err) => {
           let userMsg = err.message;
@@ -655,9 +660,34 @@ wss.on('connection', (ws) => {
 
         ssh.on('end', () => send({ type: 'status', status: 'disconnected' }));
 
-        send({ type: 'status', status: 'connecting',
-               msg: `正在连接 ${cfg.username}@${cfg.host}:${cfg.port}…` });
-        ssh.connect(cfg);
+        if (jumpCfg) {
+          send({ type: 'status', status: 'connecting', msg: `正在连接跳板机 ${jumpCfg.username}@${jumpCfg.host}:${jumpCfg.port}…` });
+          
+          const jumpSsh = new Client();
+          jumpSsh.on('ready', () => {
+            send({ type: 'status', status: 'connecting', msg: `跳板机就绪，正在通过隧道连接目标机 ${cfg.username}@${cfg.host}:${cfg.port}…` });
+            jumpSsh.forwardOut('127.0.0.1', 12345, cfg.host, cfg.port, (err, stream) => {
+              if (err) {
+                jumpSsh.end();
+                send({ type: 'status', status: 'error', msg: `跳板机隧道转发失败: ${err.message}` });
+                return;
+              }
+              ssh.connect({ ...cfg, sock: stream });
+              
+              // 绑定生命周期：目标机端口则断开跳板机
+              ssh.on('close', () => jumpSsh.end());
+            });
+          });
+          
+          jumpSsh.on('error', (err) => {
+            send({ type: 'status', status: 'error', msg: `跳板机连接失败: ${err.message}` });
+          });
+          
+          jumpSsh.connect(jumpCfg);
+        } else {
+          send({ type: 'status', status: 'connecting', msg: `正在连接 ${cfg.username}@${cfg.host}:${cfg.port}…` });
+          ssh.connect(cfg);
+        }
         break;
       }
 
@@ -848,3 +878,5 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log('║    sudo/su 身份、cd 路径、source env 变量         ║');
   console.log('╚══════════════════════════════════════════════════╝\n');
 });
+
+

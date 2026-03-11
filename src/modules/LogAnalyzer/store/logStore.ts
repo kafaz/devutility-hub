@@ -1,7 +1,13 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { ParseRule, ParseResult, CFormatField, GrepGroup } from '../../../types';
-import { generateId, cFormatToRegex, parseGrepCOutput } from '../../../utils';
+import type { CFormatField, GrepGroup, ParseResult, ParseRule } from '../../../types';
+import { cFormatToRegex, generateId, parseGrepCOutput, type ParsedCLogCall } from '../../../utils';
+
+export interface CMacroTab {
+  id: string;
+  name: string;
+  macroInput: string;
+}
 
 interface LogStore {
   rules: ParseRule[];
@@ -12,9 +18,29 @@ interface LogStore {
   grepCMode: boolean;         // 是否启用 grep -C 聚合模式
   isParsing: boolean;
 
+  // CFunctionAnalyzer 相关状态
+  cMacroTabs: CMacroTab[];
+  activeCMacroTabId: string | null;
+  cfuncLogInput: string;
+  cfuncAnchored: boolean;
+  
+  // 内存态（不持久化），用于保持路由切换时的结果
+  cfuncParsed: ParsedCLogCall | null;
+  cfuncResults: any[]; // Any to avoid circular dependency or redefine MatchResult here
+
   setLogText: (text: string) => void;
   setActiveRule: (id: string | null) => void;
   setGrepCMode: (enabled: boolean) => void;
+
+  // CFunctionAnalyzer
+  addCMacroTab: (name: string, macroInput: string) => string;
+  updateCMacroTab: (id: string, data: Partial<CMacroTab>) => void;
+  deleteCMacroTab: (id: string) => void;
+  setActiveCMacroTab: (id: string | null) => void;
+  setCfuncLogInput: (text: string) => void;
+  setCfuncAnchored: (anchored: boolean) => void;
+  setCfuncParsed: (parsed: ParsedCLogCall | null) => void;
+  setCfuncResults: (results: any[]) => void;
 
   addRegexRule: (
     data: Omit<ParseRule, 'id' | 'createdAt' | 'updatedAt' | 'mode'>
@@ -183,10 +209,38 @@ export const useLogStore = create<LogStore>()(
       grepGroups: [],
       grepCMode: false,
       isParsing: false,
+      
+      cMacroTabs: [],
+      activeCMacroTabId: null,
+      cfuncLogInput: '',
+      cfuncAnchored: false,
+      cfuncParsed: null,
+      cfuncResults: [],
 
       setLogText: (text) => set({ logText: text }),
       setActiveRule: (id) => set({ activeRuleId: id }),
       setGrepCMode: (enabled) => set({ grepCMode: enabled }),
+
+      addCMacroTab: (name, macroInput) => {
+        const id = generateId();
+        set((s) => ({
+          cMacroTabs: [...s.cMacroTabs, { id, name, macroInput }],
+          activeCMacroTabId: id,
+        }));
+        return id;
+      },
+      updateCMacroTab: (id, data) => set((s) => ({
+        cMacroTabs: s.cMacroTabs.map(t => t.id === id ? { ...t, ...data } : t),
+      })),
+      deleteCMacroTab: (id) => set((s) => ({
+        cMacroTabs: s.cMacroTabs.filter(t => t.id !== id),
+        activeCMacroTabId: s.activeCMacroTabId === id ? null : s.activeCMacroTabId,
+      })),
+      setActiveCMacroTab: (id) => set({ activeCMacroTabId: id, cfuncParsed: null, cfuncResults: [] }),
+      setCfuncLogInput: (text) => set({ cfuncLogInput: text }),
+      setCfuncAnchored: (anchored) => set({ cfuncAnchored: anchored }),
+      setCfuncParsed: (parsed) => set({ cfuncParsed: parsed }),
+      setCfuncResults: (results) => set({ cfuncResults: results }),
 
       addRegexRule: (data) => {
         const id = generateId();
@@ -272,6 +326,9 @@ export const useLogStore = create<LogStore>()(
         rules: state.rules,
         activeRuleId: state.activeRuleId,
         grepCMode: state.grepCMode,
+        cMacroTabs: state.cMacroTabs,
+        activeCMacroTabId: state.activeCMacroTabId,
+        cfuncAnchored: state.cfuncAnchored,
       }),
     }
   )

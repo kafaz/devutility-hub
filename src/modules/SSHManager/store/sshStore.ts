@@ -32,6 +32,7 @@ export interface SSHProfile {
   username: string;
   authType: AuthType;
   keyFilePath?: string;
+  jumpHostProfileId?: string; // Phase 12: Bastion/Jump Host
   createdAt: number;
 }
 
@@ -173,7 +174,7 @@ interface SSHStore {
   checkProxy:  () => Promise<void>;
 
   // 每会话连接操作
-  connectSession:         (sessionId: string, params: { passphrase?: string; password?: string; agent?: string; cols?: number; rows?: number }) => void;
+  connectSession:         (sessionId: string, params: { passphrase?: string; password?: string; agent?: string; jumpPassphrase?: string; jumpPassword?: string; jumpAgent?: string; cols?: number; rows?: number }) => void;
   disconnectSession:      (sessionId: string) => void;
   sendInputToSession:     (sessionId: string, data: string) => void;
   resizeSession:          (sessionId: string, cols: number, rows: number) => void;
@@ -426,11 +427,23 @@ export const useSSHStore = create<SSHStore>()(
 
       // ── 建立 SSH 连接 ─────────────────────────────────────────────────────
 
-      connectSession: (sessionId, { passphrase, password, agent, cols = 220, rows = 50 }) => {
+      connectSession: (sessionId, { passphrase, password, agent, jumpPassphrase, jumpPassword, jumpAgent, cols = 220, rows = 50 }) => {
         const profile = get().profiles.find(
           (p) => p.id === get().sessions.find((s) => s.id === sessionId)?.profileId
         );
         if (!profile) return;
+
+        let jumpHostConfig = undefined;
+        if (profile.jumpHostProfileId) {
+          const jp = get().profiles.find(p => p.id === profile.jumpHostProfileId);
+          if (jp) {
+            jumpHostConfig = {
+              host: jp.host, port: jp.port, username: jp.username,
+              authType: jp.authType, keyFilePath: jp.keyFilePath,
+              passphrase: jumpPassphrase, password: jumpPassword, agent: jumpAgent
+            };
+          }
+        }
 
         const rt = getRT(sessionId);
         rt.ws?.close();
@@ -445,6 +458,7 @@ export const useSSHStore = create<SSHStore>()(
             host: profile.host, port: profile.port, username: profile.username,
             authType: profile.authType, keyFilePath: profile.keyFilePath,
             passphrase, password, agent, cols, rows,
+            jumpHost: jumpHostConfig,
           }));
         };
 

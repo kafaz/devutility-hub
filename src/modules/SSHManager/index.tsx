@@ -309,10 +309,11 @@ const NodeCard: React.FC<{
 const ProfileModal: React.FC<{
   open: boolean;
   initial?: SSHProfile | null;
+  profiles: SSHProfile[];
   onOk: (p: Omit<SSHProfile, 'id' | 'createdAt'>) => void;
   onCancel: () => void;
   checkKeyFile: (p: string) => Promise<{ ok: boolean; resolved?: string; msg?: string }>;
-}> = ({ open, initial, onOk, onCancel, checkKeyFile }) => {
+}> = ({ open, initial, profiles, onOk, onCancel, checkKeyFile }) => {
   const [form] = Form.useForm();
   const [authType, setAuthType] = useState<'privateKey' | 'password' | 'agent'>('privateKey');
   const [keyMsg,   setKeyMsg]   = useState('');
@@ -372,6 +373,13 @@ const ProfileModal: React.FC<{
             </Space.Compact>
           </Form.Item>
         )}
+        <Form.Item name="jumpHostProfileId" label="跳板机 (可选)" extra={<Text style={{ fontSize: 11 }}>经由该跳板机连接目标机器</Text>}>
+          <Select allowClear placeholder="不使用跳板机">
+            {profiles.filter(p => !initial || p.id !== initial.id).map(p => (
+              <Select.Option key={p.id} value={p.id}>{p.name} ({p.host})</Select.Option>
+            ))}
+          </Select>
+        </Form.Item>
       </Form>
     </Modal>
   );
@@ -798,21 +806,49 @@ const SSHManager: React.FC = () => {
 
   // ── 连接会话 ──────────────────────────────────────────────────────────────
   const handleOpenConnect = (sessionId: string) => {
-    setConnectingSessionId(sessionId);
-    connectForm.resetFields();
-    setConnectModal(true);
+    const sess = sessions.find((x) => x.id === sessionId);
+    const prf = profiles.find((x) => x.id === sess?.profileId);
+    if (sess && prf) {
+      setConnectingSessionId(sessionId);
+      const hasHostCreds = prf.authType === 'password' || prf.authType === 'privateKey';
+      const jumpPrf = profiles.find((x) => x.id === prf.jumpHostProfileId);
+      const hasJumpCreds = jumpPrf && (jumpPrf.authType === 'password' || jumpPrf.authType === 'privateKey');
+
+      if (hasHostCreds || hasJumpCreds) {
+        setConnectModal(true);
+        connectForm.resetFields();
+      } else {
+        // agent 模式直接连
+        connectSession(sessionId, { agent: 'true', jumpAgent: jumpPrf?.authType === 'agent' ? 'true' : undefined });
+      }
+    }
   };
 
   const handleConnect = async () => {
     const vals = await connectForm.validateFields().catch(() => null);
     if (!vals) return;
-    connectSession(connectingSessionId, { passphrase: vals.passphrase, password: vals.password });
+    
+    const sess = sessions.find((s) => s.id === connectingSessionId);
+    const prf = profiles.find((p) => p.id === sess?.profileId);
+    const jumpPrf = prf?.jumpHostProfileId ? profiles.find((p) => p.id === prf.jumpHostProfileId) : null;
+    
+    connectSession(connectingSessionId, { 
+      passphrase: vals.passphrase, 
+      password: vals.password,
+      agent: prf?.authType === 'agent' ? 'true' : undefined,
+      jumpPassphrase: vals.jumpPassphrase,
+      jumpPassword: vals.jumpPassword,
+      jumpAgent: jumpPrf?.authType === 'agent' ? 'true' : undefined,
+    });
     setConnectModal(false);
   };
 
   const connectingProfile = profiles.find(
     (p) => p.id === sessions.find((s) => s.id === connectingSessionId)?.profileId
   );
+  const connectingJumpProfile = connectingProfile?.jumpHostProfileId 
+    ? profiles.find(p => p.id === connectingProfile.jumpHostProfileId) 
+    : null;
 
   // ── 渲染 ──────────────────────────────────────────────────────────────────
 
@@ -1366,6 +1402,7 @@ const SSHManager: React.FC = () => {
       <ProfileModal
         open={profileModal}
         initial={editingProfile}
+        profiles={profiles}
         onOk={(p) => {
           if (editingProfile) updateProfile(editingProfile.id, p);
           else addProfile(p);
@@ -1382,15 +1419,31 @@ const SSHManager: React.FC = () => {
         okText="连接" cancelText="取消">
         <Form form={connectForm} layout="vertical" style={{ marginTop: 12 }}>
           {connectingProfile?.authType === 'privateKey' && (
-            <Form.Item name="passphrase" label="私钥 Passphrase">
+            <Form.Item name="passphrase" label="目标主机私钥 Passphrase">
               <Password prefix={<LockOutlined />} placeholder="私钥加密口令，无加密则留空" autoComplete="off" />
             </Form.Item>
           )}
           {connectingProfile?.authType === 'password' && (
-            <Form.Item name="password" label="密码" rules={[{ required: true }]}>
+            <Form.Item name="password" label="目标主机密码" rules={[{ required: true }]}>
               <Password prefix={<LockOutlined />} placeholder="SSH 登录密码" autoComplete="off" />
             </Form.Item>
           )}
+
+          {connectingJumpProfile && (
+            <>
+              {connectingJumpProfile.authType === 'privateKey' && (
+                <Form.Item name="jumpPassphrase" label="跳板机私钥 Passphrase">
+                  <Password prefix={<LockOutlined />} placeholder={`[${connectingJumpProfile.name}] 私钥口令，无加密则留空`} autoComplete="off" />
+                </Form.Item>
+              )}
+              {connectingJumpProfile.authType === 'password' && (
+                <Form.Item name="jumpPassword" label="跳板机密码" rules={[{ required: true }]}>
+                  <Password prefix={<LockOutlined />} placeholder={`[${connectingJumpProfile.name}] SSH 登录密码`} autoComplete="off" />
+                </Form.Item>
+              )}
+            </>
+          )}
+
           <Alert type="info" showIcon={false}
             message={<Text style={{ fontSize: 12 }}>凭证仅本次会话使用，不保存</Text>} />
         </Form>

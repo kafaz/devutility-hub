@@ -629,6 +629,11 @@ export function generateInstanceReport(params: ReportParams): string {
     )
     .join('\n---\n\n');
 
+  // Phase 13: 拼装白板图片段落
+  const whiteboardSection = instance.whiteboardSvg
+    ? `\n## 问题定位白板\n\n<img src="${instance.whiteboardSvg}" alt="问题定位白板" style="max-width:100%;border:1px solid #e4e4e7;border-radius:8px;" />\n`
+    : '';
+
   return `# 故障排查报告
 
 ## 基本信息
@@ -670,7 +675,7 @@ ${instance.diagnosis.solution || '_（未填写）_'}
 ### 预防措施
 
 ${instance.diagnosis.prevention || '_（未填写）_'}
-
+${whiteboardSection}
 ---
 
 > 由 **DevUtility Hub · SOP 故障排查工具** 生成  
@@ -829,8 +834,8 @@ export function generateMultiNodeReport(params: {
           return (
             `#### ${emoji} 步骤 ${i + 1}：${s.name}${reason}\n\n` +
             `**命令**\n\`\`\`bash\n${s.command}\n\`\`\`\n\n` +
-            (s.stdout ? `**输出**\n\`\`\`\n${s.stdout.slice(0, 2000)}${s.stdout.length > 2000 ? '\n...(截断)' : ''}\n\`\`\`\n` : '') +
-            (s.stderr ? `**错误**\n\`\`\`\n${s.stderr.slice(0, 500)}\n\`\`\`\n` : '') +
+            (s.stdout ? `**输出**\n\`\`\`\n${s.stdout}\n\`\`\`\n` : '') +
+            (s.stderr ? `**错误**\n\`\`\`\n${s.stderr}\n\`\`\`\n` : '') +
             capVar
           );
         })

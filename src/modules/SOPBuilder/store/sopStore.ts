@@ -34,6 +34,7 @@ interface SOPStore {
   ) => void;
   addExtraCheck: (instanceId: string, check: Omit<SOPCheckResult, 'checkId'>) => void;
   updateDiagnosis: (instanceId: string, field: keyof SOPInstance['diagnosis'], value: string) => void;
+  updateWhiteboard: (instanceId: string, snapshot: string, svg: string) => void;
   setInstanceStatus: (instanceId: string, status: SOPInstance['status']) => void;
   deleteInstance: (id: string) => void;
   renderCheckCommand: (instanceId: string, checkId: string, varValues: Record<string, string>) => void;
@@ -385,6 +386,19 @@ export const useSOPStore = create<SOPStore>()(
             return {
               ...inst,
               diagnosis: { ...inst.diagnosis, [field]: value },
+            };
+          }),
+        }));
+      },
+
+      updateWhiteboard: (instanceId, snapshot, svg) => {
+        set((s) => ({
+          instances: s.instances.map((inst) => {
+            if (inst.id !== instanceId) return inst;
+            return {
+              ...inst,
+              whiteboardSnapshot: snapshot,
+              whiteboardSvg: svg,
             };
           }),
         }));

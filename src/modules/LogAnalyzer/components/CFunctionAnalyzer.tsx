@@ -16,20 +16,38 @@
  *     time       : 1609459200
  *     fail_times : 3
  */
-import React, { useState, useCallback } from 'react';
 import {
-  Typography, Input, Button, Space, Card, Tag, Alert,
-  Table, Tooltip, Switch, Divider, Badge, message,
-} from 'antd';
-import {
-  SearchOutlined, CopyOutlined, CheckCircleOutlined,
-  CloseCircleOutlined, InfoCircleOutlined, DownloadOutlined,
+    CheckCircleOutlined,
+    CloseCircleOutlined,
+    CopyOutlined,
+    DownloadOutlined,
+    EditOutlined,
+    InfoCircleOutlined,
+    SearchOutlined,
+    ThunderboltOutlined
 } from '@ant-design/icons';
-import { parseCLogMacroCall, applyCLogRule, cFormatToRegex, downloadJSON } from '../../../utils';
-import type { ParsedCLogCall } from '../../../utils';
-import { useGlobalStore } from '../../../store/globalStore';
-import { useClipboard } from '../../../hooks/useClipboard';
+import {
+    Alert,
+    Badge,
+    Button,
+    Card,
+    Divider,
+    Input,
+    message,
+    Space,
+    Switch,
+    Table,
+    Tabs,
+    Tag,
+    Tooltip,
+    Typography
+} from 'antd';
+import React, { useCallback, useEffect, useState } from 'react';
 import ResizableOutput from '../../../components/shared/ResizableOutput';
+import { useClipboard } from '../../../hooks/useClipboard';
+import { useGlobalStore } from '../../../store/globalStore';
+import { applyCLogRule, cFormatToRegex, downloadJSON, parseCLogMacroCall } from '../../../utils';
+import { useLogStore } from '../store/logStore';
 
 const { Text } = Typography;
 const { TextArea } = Input;
@@ -167,6 +185,38 @@ const FieldCard: React.FC<{
   );
 };
 
+// ─── 标签页名称编辑组件 ──────────────────────────────────────────────────────
+const EditableTabName: React.FC<{
+  name: string;
+  onSave: (newName: string) => void;
+}> = ({ name, onSave }) => {
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState(name);
+
+  if (editing) {
+    return (
+      <Input
+        size="small"
+        value={val}
+        autoFocus
+        onChange={e => setVal(e.target.value)}
+        onBlur={() => { setEditing(false); if (val.trim()) onSave(val.trim()); else setVal(name); }}
+        onPressEnter={() => { setEditing(false); if (val.trim()) onSave(val.trim()); else setVal(name); }}
+        style={{ width: 120, fontSize: 12 }}
+      />
+    );
+  }
+  return (
+    <Space size={4}>
+      <Text style={{ fontSize: 13 }}>{name}</Text>
+      <EditOutlined
+        style={{ fontSize: 12, color: '#6b7280', cursor: 'pointer' }}
+        onClick={(e) => { e.stopPropagation(); setEditing(true); }}
+      />
+    </Space>
+  );
+};
+
 // ─── 主组件 ────────────────────────────────────────────────────────────────
 
 const CFunctionAnalyzer: React.FC = () => {
@@ -174,68 +224,136 @@ const CFunctionAnalyzer: React.FC = () => {
   const isDark    = theme === 'dark';
   const [messageApi, ctx] = message.useMessage();
 
-  // ① 函数调用输入
-  const [macroInput, setMacroInput] = useState('');
-  const [parsed,     setParsed]     = useState<ParsedCLogCall | null>(null);
-  const [parseError, setParseError] = useState('');
-  const [anchored,   setAnchored]   = useState(false); // false=日志行含前缀时也能匹配
+  const {
+    cMacroTabs, activeCMacroTabId, cfuncLogInput, cfuncAnchored, cfuncParsed, cfuncResults,
+    addCMacroTab, updateCMacroTab, deleteCMacroTab, setActiveCMacroTab,
+    setCfuncLogInput, setCfuncAnchored, setCfuncParsed, setCfuncResults
+  } = useLogStore();
 
-  // ② 日志输入
-  const [logInput,   setLogInput]   = useState('');
-  const [results,    setResults]    = useState<MatchResult[]>([]);
+  const [parseError, setParseError] = useState('');
+
+  // 初始化默认 Tab
+  useEffect(() => {
+    if (cMacroTabs.length === 0) {
+      addCMacroTab('默认函数', '');
+    }
+  }, [cMacroTabs.length, addCMacroTab]);
+
+  const activeTab = cMacroTabs.find(t => t.id === activeCMacroTabId) ?? cMacroTabs[0];
+  const macroInput = activeTab?.macroInput ?? '';
 
   const cardBg     = isDark ? '#252526' : '#ffffff';
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const borderColor = isDark ? '#3e3e42' : '#e4e4e7';
 
-  // ── 解析 C 函数调用 ──────────────────────────────────────────────────────
-  const handleParse = useCallback(() => {
-    if (!macroInput.trim()) { setParseError('请输入 C 日志宏调用'); return; }
-    const result = parseCLogMacroCall(macroInput);
-    if (!result) {
-      setParseError('解析失败：请确认格式为 MACRO("格式串", 参数1, 参数2, ...)');
-      setParsed(null);
-      return;
+  // ── 解析 C 函数调用（已由下方 useEffect 自动触发，此处保留备用） ────────
+  // const handleParse = useCallback((input: string) => {
+  //   if (!input.trim()) { setParseError('请输入 C 日志宏调用'); setCfuncParsed(null); return; }
+  //   const result = parseCLogMacroCall(input);
+  //   if (!result) {
+  //     setParseError('解析失败：请确认格式为 MACRO("格式串", 参数1, 参数2, ...)');
+  //     setCfuncParsed(null);
+  //     return;
+  //   }
+  //   setCfuncParsed(result);
+  //   setParseError('');
+  // }, [setCfuncParsed]);
+
+  // 当 Tab 或宏内容变化时自动静默解析（以确保预览更新）
+  useEffect(() => {
+    if (macroInput) {
+      const result = parseCLogMacroCall(macroInput);
+      if (result) {
+        setCfuncParsed(result);
+        setParseError('');
+      } else {
+        setParseError('解析失败：请确认格式符合 C/C++ 宏规范');
+        setCfuncParsed(null);
+      }
+    } else {
+      setParseError('');
+      setCfuncParsed(null);
     }
-    setParsed(result);
-    setParseError('');
-    setResults([]);
-  }, [macroInput]);
+  }, [macroInput, setCfuncParsed]);
+
+
+  const handleMacroChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    if (activeTab) {
+      updateCMacroTab(activeTab.id, { macroInput: e.target.value });
+      // Clear matching results when pattern changes
+      setCfuncResults([]);
+    }
+  };
+
+  // ── 自动匹配最佳 Tab ──────────────────────────────────────────────────────
+  const handleAutoMatch = () => {
+    if (!cfuncLogInput.trim()) { messageApi.warning('请先粘贴日志内容'); return; }
+    if (cMacroTabs.length === 0) return;
+
+    const lines = cfuncLogInput.split('\n').filter(l => l.trim());
+    if (lines.length === 0) return;
+    const firstLine = lines[0];
+
+    // 寻找匹配的模式
+    for (const tab of cMacroTabs) {
+      if (!tab.macroInput.trim()) continue;
+      const parsed = parseCLogMacroCall(tab.macroInput);
+      if (!parsed) continue;
+
+      const { matched } = applyCLogRule(firstLine, parsed, cfuncAnchored);
+      if (matched) {
+        if (activeCMacroTabId !== tab.id) {
+          setActiveCMacroTab(tab.id);
+        }
+        messageApi.success(`已自动匹配至: ${tab.name}`);
+        
+        // 自动触发一次分析
+        const matchResults = lines.map((line, i) => {
+          const { matched: m, fields } = applyCLogRule(line, parsed, cfuncAnchored);
+          return { lineIndex: i, rawLine: line, matched: m, fields };
+        });
+        setCfuncResults(matchResults);
+        return;
+      }
+    }
+    messageApi.warning('未找到任何匹配的函数格式标签页');
+  };
 
   // ── 分析日志行 ────────────────────────────────────────────────────────────
   const handleAnalyze = useCallback(() => {
-    if (!parsed)          { messageApi.warning('请先解析函数调用'); return; }
-    if (!logInput.trim()) { messageApi.warning('请输入日志内容');   return; }
+    if (!cfuncParsed) { messageApi.warning('请确保函数调用解析成功'); return; }
+    if (!cfuncLogInput.trim()) { messageApi.warning('请输入日志内容'); return; }
 
-    const lines = logInput.split('\n').filter((l) => l.trim());
-    const matchResults: MatchResult[] = lines.map((line, i) => {
-      const { matched, fields } = applyCLogRule(line, parsed, anchored);
+    const lines = cfuncLogInput.split('\n').filter((l) => l.trim());
+    const matchResults = lines.map((line, i) => {
+      const { matched, fields } = applyCLogRule(line, cfuncParsed, cfuncAnchored);
       return { lineIndex: i, rawLine: line, matched, fields };
     });
-    setResults(matchResults);
-  }, [parsed, logInput, anchored, messageApi]);
+    setCfuncResults(matchResults as any[]);
+  }, [cfuncParsed, cfuncLogInput, cfuncAnchored, setCfuncResults, messageApi]);
 
   // ── 导出结果 ──────────────────────────────────────────────────────────────
   const handleExport = () => {
-    if (results.length === 0) return;
-    const data = results.map((r) => ({
+    if (cfuncResults.length === 0) return;
+    const data = cfuncResults.map((r: any) => ({
       line:    r.lineIndex + 1,
       matched: r.matched,
       raw:     r.rawLine,
       ...r.fields,
     }));
-    downloadJSON(data, `c-log-analysis.json`);
+    downloadJSON(data, 'c-log-analysis.json');
   };
 
-  const matchCount   = results.filter((r) => r.matched).length;
-  const useCardView  = results.length <= 5;
+  const matchCount   = cfuncResults.filter((r: any) => r.matched).length;
+  const useCardView  = cfuncResults.length <= 5;
 
   // 生成当前正则预览
-  const regexPreview = parsed
-    ? (() => { try { return cFormatToRegex(parsed.formatString, anchored).regex; } catch { return ''; } })()
+  const regexPreview = cfuncParsed
+    ? (() => { try { return cFormatToRegex(cfuncParsed.formatString, cfuncAnchored).regex; } catch { return ''; } })()
     : '';
 
   // Table 列（多行模式）
-  const tableColumns = parsed
+  const tableColumns = cfuncParsed
     ? [
         {
           title:      '行号',
@@ -251,11 +369,9 @@ const CFunctionAnalyzer: React.FC = () => {
             v ? <CheckCircleOutlined style={{ color: '#22c55e' }} />
               : <CloseCircleOutlined style={{ color: '#ef4444' }} />,
         },
-        ...parsed.paramNames.map((name) => ({
-          // 列宽：短名 120px，长名按字符数自适应（最宽 280px）
+        ...cfuncParsed.paramNames.map((name) => ({
           width:    Math.min(280, Math.max(120, name.length * 9 + 24)),
           ellipsis: { showTitle: false },
-          // 列头：hover 展示完整变量名
           title: (
             <Tooltip title={name} placement="topLeft">
               <span
@@ -311,61 +427,77 @@ const CFunctionAnalyzer: React.FC = () => {
       ]
     : [];
 
+  if (!activeTab) return null;
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       {ctx}
 
-      {/* ① 输入 C 函数调用 */}
+      {/* ① 分页选项卡与 C 函数调用 */}
       <Card
         size="small"
-        title={
-          <Space>
+        style={{ background: cardBg, border: `1px solid \${borderColor}` }}
+        bodyStyle={{ paddingTop: 0 }}
+      >
+        <Tabs
+          type="editable-card"
+          onChange={(k) => setActiveCMacroTab(k)}
+          activeKey={activeTab.id}
+          onEdit={(targetKey, action) => {
+            if (action === 'add') {
+              addCMacroTab(`新函数\${cMacroTabs.length + 1}`, '');
+            } else if (action === 'remove' && typeof targetKey === 'string') {
+              deleteCMacroTab(targetKey);
+            }
+          }}
+          items={cMacroTabs.map((tab) => ({
+            key: tab.id,
+            label: <EditableTabName name={tab.name} onSave={(v) => updateCMacroTab(tab.id, { name: v })} />,
+            children: null,
+          }))}
+          style={{ marginBottom: 16 }}
+        />
+
+        <div style={{ padding: '0 8px' }}>
+          <Space style={{ marginBottom: 8 }}>
             <Text strong>① 粘贴 C 日志宏调用</Text>
-            <Tooltip title="支持任意 C 日志宏，如 LOG_ERROR / printf / LOGTRACE 等，要求第一个参数是格式字符串">
+            <Tooltip title="支持任意 C 日志宏要求第一个参数是格式字符串。这会保存在当前标签页供随时复用。">
               <InfoCircleOutlined style={{ color: '#6b7280' }} />
             </Tooltip>
           </Space>
-        }
-        style={{ background: cardBg, border: `1px solid ${borderColor}` }}
-      >
-        <TextArea
-          value={macroInput}
-          onChange={(e) => setMacroInput(e.target.value)}
-          rows={3}
-          placeholder={
-            'LOG_ERROR_WITH_TRACE("%u ,%u, %u, %u", age, status, time, fail_times);\n' +
-            '// 或：\n' +
-            'LOG_DEBUG("[%s] action=%d elapsed=%lu", ctx->name, action_type, elapsed_ms);'
-          }
-          style={{
-            fontFamily: 'JetBrains Mono, Fira Code, Consolas, monospace',
-            fontSize:    12,
-            background:  isDark ? '#1e1e1e' : '#f8f8f8',
-            resize:     'vertical',
-          }}
-          onPressEnter={(e) => { if (e.ctrlKey) handleParse(); }}
-        />
-        <Space style={{ marginTop: 8 }}>
-          <Button type="primary" icon={<SearchOutlined />} onClick={handleParse}>
-            解析函数调用
-          </Button>
-          <Text type="secondary" style={{ fontSize: 11 }}>Ctrl+Enter</Text>
-        </Space>
-        {parseError && (
-          <Alert type="error" showIcon message={parseError} style={{ marginTop: 8 }} />
-        )}
+
+          <TextArea
+            value={macroInput}
+            onChange={handleMacroChange}
+            rows={2}
+            placeholder={
+              'LOG_ERROR_WITH_TRACE("%u ,%u, %u", age, time, fail_times);\n' +
+              '// 或：\n' +
+              'printf("[%s] act=%d", name, action);'
+            }
+            style={{
+              fontFamily: 'JetBrains Mono, Fira Code, Consolas, monospace',
+              fontSize:    12,
+              background:  isDark ? '#1e1e1e' : '#f8f8f8',
+              resize:     'vertical',
+            }}
+          />
+          {parseError && (
+            <Alert type="error" showIcon message={parseError} style={{ marginTop: 8, padding: '4px 12px' }} />
+          )}
+        </div>
       </Card>
 
       {/* 解析结果预览 */}
-      {parsed && (
+      {cfuncParsed && !parseError && (
         <Card
           size="small"
           title={<Text strong>解析结果</Text>}
           style={{ background: cardBg, border: `1px solid #22c55e44` }}
           extra={
-            parsed.mismatch && (
+            cfuncParsed.mismatch && (
               <Tag color="warning">
-                ⚠️ 格式符 {parsed.specifierCount} 个 ≠ 参数 {parsed.paramNames.length} 个
+                ⚠️ 格式符 {cfuncParsed.specifierCount} 个 ≠ 参数 {cfuncParsed.paramNames.length} 个
               </Tag>
             )
           }
@@ -376,7 +508,7 @@ const CFunctionAnalyzer: React.FC = () => {
               <Text type="secondary" style={{ fontSize: 11 }}>函数/宏名</Text>
               <div>
                 <Tag color="purple" style={{ fontSize: 12, fontFamily: 'JetBrains Mono, Consolas, monospace' }}>
-                  {parsed.macroName}
+                  {cfuncParsed.macroName}
                 </Tag>
               </div>
             </div>
@@ -395,17 +527,17 @@ const CFunctionAnalyzer: React.FC = () => {
                   marginTop:   2,
                 }}
               >
-                &quot;{parsed.formatString}&quot;
+                &quot;{cfuncParsed.formatString}&quot;
               </div>
             </div>
 
             {/* 参数列表：展示完整表达式，长名截断后 hover 显示全称 */}
             <div style={{ flex: 2, minWidth: 280 }}>
               <Text type="secondary" style={{ fontSize: 11 }}>
-                参数名（{parsed.paramNames.length} 个）
+                参数名（{cfuncParsed.paramNames.length} 个）
               </Text>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 2 }}>
-                {parsed.paramNames.map((name, i) => (
+                {cfuncParsed.paramNames.map((name, i) => (
                   <Tooltip
                     key={i}
                     title={name.length > 30 ? name : undefined}
@@ -450,8 +582,8 @@ const CFunctionAnalyzer: React.FC = () => {
             <Space size={6}>
               <Switch
                 size="small"
-                checked={anchored}
-                onChange={setAnchored}
+                checked={cfuncAnchored}
+                onChange={setCfuncAnchored}
               />
               <Tooltip title="开启后正则加 ^ $ 锚点，要求格式串占满整行。日志行有时间戳/级别前缀时请关闭。">
                 <Text type="secondary" style={{ fontSize: 11, cursor: 'help' }}>
@@ -464,89 +596,97 @@ const CFunctionAnalyzer: React.FC = () => {
       )}
 
       {/* ② 粘贴日志内容 */}
-      {parsed && (
-        <Card
-          size="small"
-          title={<Text strong>② 粘贴日志输出（支持多行）</Text>}
-          style={{ background: cardBg, border: `1px solid ${borderColor}` }}
-        >
-          <ResizableOutput
-            content={logInput}
-            isDark={isDark}
-            minHeight={100}
-            maxHeight={400}
-            showCopy={false}
-            onChange={setLogInput}
-            placeholder={
-              '粘贴日志输出，每行对应一条日志记录，例如：\n' +
-              '12 ,5, 1609459200, 3\n' +
-              '18 ,2, 1609459230, 0'
-            }
-          />
-          <Space style={{ marginTop: 8 }}>
-            <Button type="primary" icon={<SearchOutlined />} onClick={handleAnalyze}>
-              分析日志
-            </Button>
-            {results.length > 0 && (
-              <>
-                <Badge
-                  count={matchCount}
-                  color="#22c55e"
-                  overflowCount={9999}
-                  title={`${matchCount} 行匹配`}
-                >
-                  <Tag color="success">✅ 匹配</Tag>
-                </Badge>
-                {results.length - matchCount > 0 && (
-                  <Badge
-                    count={results.length - matchCount}
-                    color="#ef4444"
-                    overflowCount={9999}
-                  >
-                    <Tag color="error">❌ 未匹配</Tag>
-                  </Badge>
-                )}
-                <Button
-                  size="small"
-                  icon={<DownloadOutlined />}
-                  onClick={handleExport}
-                >
-                  导出 JSON
-                </Button>
-              </>
-            )}
+      <Card
+        size="small"
+        title={
+          <Space>
+            <Text strong>② 粘贴记录的日志</Text>
+            <Tooltip title="在任何保存的页签下直接粘贴，然后点击自动匹配">
+              <Button size="small" type="primary" ghost icon={<ThunderboltOutlined />} onClick={handleAutoMatch}>
+                自动匹配标签页并分析
+              </Button>
+            </Tooltip>
           </Space>
-        </Card>
-      )}
+        }
+        style={{ background: cardBg, border: `1px solid \${borderColor}` }}
+      >
+        <ResizableOutput
+          content={cfuncLogInput}
+          isDark={isDark}
+          minHeight={100}
+          maxHeight={400}
+          showCopy={false}
+          onChange={setCfuncLogInput}
+          placeholder={
+            '粘贴日志输出，每行对应一条日志记录，例如：\n' +
+            '12 ,5, 1609459200, 3\n' +
+            '18 ,2, 1609459230, 0'
+          }
+        />
+        <Space style={{ marginTop: 8 }}>
+          <Button type="primary" icon={<SearchOutlined />} onClick={handleAnalyze} disabled={!cfuncParsed}>
+            使用当前格式分析
+          </Button>
+          <Button onClick={() => setCfuncResults([])}>清空结果</Button>
+          {cfuncResults.length > 0 && (
+            <>
+              <Badge
+                count={matchCount}
+                color="#22c55e"
+                overflowCount={9999}
+                title={`\${matchCount} 行匹配`}
+              >
+                <Tag color="success">✅ 匹配</Tag>
+              </Badge>
+              {cfuncResults.length - matchCount > 0 && (
+                <Badge
+                  count={cfuncResults.length - matchCount}
+                  color="#ef4444"
+                  overflowCount={9999}
+                >
+                  <Tag color="error">❌ 未匹配</Tag>
+                </Badge>
+              )}
+              <Button
+                size="small"
+                icon={<DownloadOutlined />}
+                onClick={handleExport}
+              >
+                导出 JSON
+              </Button>
+            </>
+          )}
+        </Space>
+      </Card>
 
       {/* ③ 分析结果 */}
-      {results.length > 0 && parsed && (
+      {cfuncResults.length > 0 && cfuncParsed && (
         <Card
           size="small"
           title={
             <Space>
               <Text strong>分析结果</Text>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                {results.length} 行 · {matchCount} 匹配
+                {cfuncResults.length} 行 · {matchCount} 匹配
               </Text>
             </Space>
           }
-          style={{ background: cardBg, border: `1px solid ${borderColor}` }}
+          style={{ background: cardBg, border: `1px solid \${borderColor}` }}
         >
           {useCardView ? (
             /* 少量行：卡片式展示，字段名对齐 */
-            results.map((r) => (
+            cfuncResults.map((r: any) => (
               <FieldCard
                 key={r.lineIndex}
                 result={r}
-                paramNames={parsed.paramNames}
+                paramNames={cfuncParsed.paramNames}
                 isDark={isDark}
               />
             ))
           ) : (
             /* 多行：紧凑表格 */
             <Table
-              dataSource={results}
+              dataSource={cfuncResults}
               columns={tableColumns}
               rowKey="lineIndex"
               size="small"
@@ -554,7 +694,7 @@ const CFunctionAnalyzer: React.FC = () => {
                 pageSize: 50,
                 showSizeChanger: true,
                 pageSizeOptions: [20, 50, 100],
-                showTotal: (t) => `共 ${t} 行`,
+                showTotal: (total: number) => `共 ${total} 行`,
               }}
               scroll={{ x: 'max-content' }}
               rowClassName={(r: MatchResult) => r.matched ? '' : 'ant-table-row-error'}

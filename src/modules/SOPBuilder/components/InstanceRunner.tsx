@@ -21,6 +21,7 @@ import {
     Popconfirm,
     Select,
     Space,
+    Tabs,
     Tag,
     Tooltip,
     Typography,
@@ -31,6 +32,7 @@ import { useClipboard } from '../../../hooks/useClipboard';
 import { useGlobalStore } from '../../../store/globalStore';
 import type { SOPCheckResult, SOPInstance, SOPTemplate } from '../../../types';
 import { generateInstanceReport } from '../../../utils';
+import WhiteboardTab from './WhiteboardTab';
 
 const { Title, Text } = Typography;
 const { TextArea } = Input;
@@ -505,122 +507,149 @@ const InstanceRunner: React.FC<Props> = ({
           </Space>
         </div>
 
-        {/* 根因提示折叠区 */}
-        {template?.diagnosisHints && (
-          <Collapse
-            size="small"
-            ghost
-            style={{ marginTop: 8 }}
-            items={[{
-              key: '1',
-              label: (
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  <ThunderboltOutlined style={{ marginRight: 4 }} />
-                  常见根因提示（展开参考）
-                </Text>
-              ),
-              children: (
-                <Alert
-                  message={
-                    <div style={{ fontSize: 12, whiteSpace: 'pre-line' }}>
-                      {template.diagnosisHints.replace(/\*\*/g, '')}
-                    </div>
-                  }
-                  type="info"
-                  showIcon={false}
-                />
-              ),
-            }]}
-          />
-        )}
-      </Card>
-
-      {/* 排查步骤列表 */}
-      <div style={{ marginBottom: 12 }}>
-        {instance.checkResults.map((result, i) => {
-          const templateCheck = template?.checks.find((c) => c.id === result.checkId);
-          return (
-            <CheckCard
-              key={result.checkId}
-              result={result}
-              stepNum={i + 1}
-              templateCheck={templateCheck}
-              isDark={isDark}
-              instanceVariables={instance.variables}
-              onUpdate={(data) => onUpdateCheck(result.checkId, data)}
-            />
-          );
-        })}
-
-        {/* 临时追加的步骤 */}
-        {instance.extraChecks.map((result, i) => (
-          <CheckCard
-            key={result.checkId}
-            result={result}
-            stepNum={instance.checkResults.length + i + 1}
-            isDark={isDark}
-            instanceVariables={instance.variables}
-            onUpdate={(data) => onUpdateCheck(result.checkId, data)}
-          />
-        ))}
-
-        <Button
-          type="dashed"
-          icon={<PlusOutlined />}
-          onClick={() => setExtraModalOpen(true)}
-          style={{ width: '100%', marginTop: 4 }}
+      {/* 根因提示折叠区 */}
+      {template?.diagnosisHints && (
+        <Collapse
           size="small"
-        >
-          追加临时排查步骤
-        </Button>
-      </div>
-
-      {/* 诊断结论区 */}
-      <Card
-        size="small"
-        title={
-          <Space>
-            <Text strong>诊断结论</Text>
-            {abnormalCount > 0 && (
-              <Tag color="error">{abnormalCount} 项异常需处理</Tag>
-            )}
-          </Space>
-        }
-        style={{ background: cardBg, border: `1px solid ${borderColor}` }}
-      >
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: '1fr 1fr',
-            gap: 12,
-          }}
-        >
-          {(
-            [
-              { field: 'phenomenon', label: '故障现象', placeholder: '描述用户感知到的故障表现...' },
-              { field: 'rootCause', label: '根因分析', placeholder: '分析故障的根本原因...' },
-              { field: 'solution', label: '解决方案', placeholder: '描述执行了哪些操作解决了问题...' },
-              { field: 'prevention', label: '预防措施', placeholder: '如何避免此类故障再次发生...' },
-            ] as const
-          ).map(({ field, label, placeholder }) => (
-            <div key={field}>
-              <Text
-                strong
-                style={{ fontSize: 12, display: 'block', marginBottom: 4 }}
-              >
-                {label}
+          ghost
+          style={{ marginTop: 8 }}
+          items={[{
+            key: '1',
+            label: (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                <ThunderboltOutlined style={{ marginRight: 4 }} />
+                常见根因提示（展开参考）
               </Text>
-              <TextArea
-                rows={3}
-                value={instance.diagnosis[field]}
-                onChange={(e) => onUpdateDiagnosis(field, e.target.value)}
-                placeholder={placeholder}
-                style={{ fontSize: 12, resize: 'vertical' }}
+            ),
+            children: (
+              <Alert
+                message={
+                  <div style={{ fontSize: 12, whiteSpace: 'pre-line' }}>
+                    {template.diagnosisHints.replace(/\*\*/g, '')}
+                  </div>
+                }
+                type="info"
+                showIcon={false}
               />
-            </div>
-          ))}
-        </div>
-      </Card>
+            ),
+          }]}
+        />
+      )}
+    </Card>
+
+    <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+      <Tabs
+        defaultActiveKey="steps"
+        style={{ flex: 1, display: 'flex', flexDirection: 'column' }}
+        items={[
+          {
+            key: 'steps',
+            label: '排查步骤与诊断',
+            children: (
+              <div style={{ height: '100%', overflowY: 'auto', paddingRight: 4 }}>
+                {/* 排查步骤列表 */}
+                <div style={{ marginBottom: 12 }}>
+                  {instance.checkResults.map((result, i) => {
+                    const templateCheck = template?.checks.find((c) => c.id === result.checkId);
+                    return (
+                      <CheckCard
+                        key={result.checkId}
+                        result={result}
+                        stepNum={i + 1}
+                        templateCheck={templateCheck}
+                        isDark={isDark}
+                        instanceVariables={instance.variables}
+                        onUpdate={(data) => onUpdateCheck(result.checkId, data)}
+                      />
+                    );
+                  })}
+
+                  {/* 临时追加的步骤 */}
+                  {instance.extraChecks.map((result, i) => (
+                    <CheckCard
+                      key={result.checkId}
+                      result={result}
+                      stepNum={instance.checkResults.length + i + 1}
+                      isDark={isDark}
+                      instanceVariables={instance.variables}
+                      onUpdate={(data) => onUpdateCheck(result.checkId, data)}
+                    />
+                  ))}
+
+                  <Button
+                    type="dashed"
+                    icon={<PlusOutlined />}
+                    onClick={() => setExtraModalOpen(true)}
+                    style={{ width: '100%', marginTop: 4 }}
+                    size="small"
+                  >
+                    追加临时排查步骤
+                  </Button>
+                </div>
+
+                {/* 诊断结论区 */}
+                <Card
+                  size="small"
+                  title={
+                    <Space>
+                      <Text strong>诊断结论</Text>
+                      {abnormalCount > 0 && (
+                        <Tag color="error">{abnormalCount} 项异常需处理</Tag>
+                      )}
+                    </Space>
+                  }
+                  style={{ background: cardBg, border: `1px solid ${borderColor}`, marginBottom: 12 }}
+                >
+                  <div
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: '1fr 1fr',
+                      gap: 12,
+                    }}
+                  >
+                    {(
+                      [
+                        { field: 'phenomenon', label: '故障现象', placeholder: '描述用户感知到的故障表现...' },
+                        { field: 'rootCause', label: '根因分析', placeholder: '分析故障的根本原因...' },
+                        { field: 'solution', label: '解决方案', placeholder: '描述执行了哪些操作解决了问题...' },
+                        { field: 'prevention', label: '预防措施', placeholder: '如何避免此类故障再次发生...' },
+                      ] as const
+                    ).map(({ field, label, placeholder }) => (
+                      <div key={field}>
+                        <Text
+                          strong
+                          style={{ fontSize: 12, display: 'block', marginBottom: 4 }}
+                        >
+                          {label}
+                        </Text>
+                        <TextArea
+                          rows={3}
+                          value={instance.diagnosis[field]}
+                          onChange={(e) => onUpdateDiagnosis(field, e.target.value)}
+                          placeholder={placeholder}
+                          style={{ fontSize: 12, resize: 'vertical' }}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </Card>
+              </div>
+            )
+          },
+          {
+            key: 'whiteboard',
+            label: '定界专属白板 (Beta)',
+            children: (
+              <div style={{ height: '500px', border: `1px solid ${borderColor}`, borderRadius: 8, overflow: 'hidden' }}>
+                <React.Suspense fallback={<div style={{ padding: 20 }}>Loading Whiteboard...</div>}>
+                  <WhiteboardTab instanceId={instance.id} />
+                </React.Suspense>
+              </div>
+            )
+          }
+        ]}
+      />
+    </div>
 
       {/* 追加步骤弹窗 */}
       <Modal
