@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "devutility-hub-agent": {
+      "command": "node",
+      "args": [
+        "/Users/kafaz/dev/dev_utils/devutility-hub/mcp-server/dist/index.js"
+      ],
+      "env": {
+        "DEVUTILITY_AGENT_BASE_URL": "http://127.0.0.1:3001"
+      }
+    }
+  }
+}

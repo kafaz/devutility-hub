@@ -36,6 +36,18 @@ const path   = require('path');
 const os     = require('os');
 const crypto = require('crypto');
 const { simpleGit } = require('simple-git');
+const { ManagedAgentSession } = require('./lib/managedAgentSession');
+const {
+  getNode,
+  getPrepareProfile,
+  listNodes,
+  listPrepareProfiles,
+  resolveNode,
+  saveNode,
+  savePrepareProfile,
+  updateNode,
+  updatePrepareProfile,
+} = require('./lib/agentRegistry');
 
 const app    = express();
 const server = http.createServer(app);
@@ -239,6 +251,346 @@ const AGENT_COMMAND_BLACKLIST = [
   /:(\s*)\{\s*\|\|\s*:\s*\&\s*\}\s*;\s*:/ // bash fork bomb
 ];
 
+function writeAgentAuditLog(text) {
+  const logFilePath = path.join(os.tmpdir(), 'agent-execution-audit.log');
+  fs.appendFileSync(logFilePath, text, 'utf8');
+}
+
+function getBlockedCommandError(cmd) {
+  for (const regex of AGENT_COMMAND_BLACKLIST) {
+    if (regex.test(cmd)) {
+      return `[Agent Security Block] 拒绝执行具有受限或破坏性特征的命令: ${cmd}`;
+    }
+  }
+  return null;
+}
+
+function sanitizeNode(node) {
+  if (!node) return null;
+  const {
+    keyContent, password, passphrase,
+    jumpPassword, jumpPassphrase, jumpKeyContent,
+    ...rest
+  } = node;
+  return rest;
+}
+
+function describeSession(sessionId, session) {
+  if (!session) return null;
+  if (typeof session.getInfo === 'function') return session.getInfo();
+  return {
+    sessionId,
+    nodeId: session.nodeId || null,
+    name: session.name || sessionId,
+    host: session.host,
+    port: session.port || 22,
+    username: session.username,
+    source: session.source || 'ui',
+    status: 'connected',
+    createdAt: session.createdAt || null,
+    connectedAt: session.connectedAt || null,
+    lastActivityAt: session.lastActivityAt || null,
+    shellReady: Boolean(session.shellStream || session.shell),
+  };
+}
+
+function resolveJumpSource(connection) {
+  if (connection.jumpHost) return connection.jumpHost;
+  if (connection.jumpHostId) {
+    const jumpNode = getNode(connection.jumpHostId);
+    if (!jumpNode) throw new Error(`jumpHostId 不存在: ${connection.jumpHostId}`);
+    return jumpNode;
+  }
+  return null;
+}
+
+function materializeConnectionSpec(body) {
+  let rawConnection = body.connection;
+  let node = null;
+
+  if (body.nodeId) {
+    node = getNode(body.nodeId);
+    if (!node) throw new Error(`节点不存在: ${body.nodeId}`);
+    rawConnection = node;
+  }
+
+  if (!rawConnection) {
+    throw new Error('缺少 nodeId 或 connection 参数');
+  }
+
+  const authOverrides = body.auth || {};
+  const jumpOverrides = body.jumpAuth || {};
+
+  const connectSource = {
+    host: rawConnection.host,
+    port: rawConnection.port || 22,
+    username: rawConnection.username,
+    authType: rawConnection.authType || 'agent',
+    keyContent: rawConnection.keyContent,
+    keyFilePath: rawConnection.keyFilePath,
+    passphrase: rawConnection.passphrase,
+    password: rawConnection.password,
+    agent: rawConnection.agent,
+    readyTimeout: rawConnection.readyTimeout,
+    ...authOverrides,
+  };
+
+  const jumpSource = resolveJumpSource(rawConnection);
+  const jumpConfig = jumpSource
+    ? buildConnectConfig({
+      host: jumpSource.host,
+      port: jumpSource.port || 22,
+      username: jumpSource.username,
+      authType: jumpSource.authType || 'agent',
+      keyContent: jumpSource.keyContent,
+      keyFilePath: jumpSource.keyFilePath,
+      passphrase: jumpSource.passphrase,
+      password: jumpSource.password,
+      agent: jumpSource.agent,
+      readyTimeout: jumpSource.readyTimeout,
+      ...jumpOverrides,
+    })
+    : undefined;
+
+  return {
+    node,
+    connectConfig: buildConnectConfig(connectSource),
+    jumpConfig,
+    name: rawConnection.name || rawConnection.nodeId || rawConnection.host,
+    host: rawConnection.host,
+    port: rawConnection.port || 22,
+    username: rawConnection.username,
+  };
+}
+
+async function executeStructuredSteps(session, steps, opts = {}) {
+  const varContext = { ...(opts.variables || {}) };
+  const results = [];
+  const continueOnError = opts.continueOnError === true;
+
+  for (const step of steps || []) {
+    if (!step?.cmd) continue;
+
+    const resolvedCmd = step.cmd.replace(
+      /\$\{([^}]+)\}/g,
+      (_, name) => varContext[name] !== undefined ? varContext[name] : `\${${name}}`
+    );
+
+    const blocked = getBlockedCommandError(resolvedCmd);
+    if (blocked) {
+      results.push({
+        name: step.name || resolvedCmd,
+        cmd: step.cmd,
+        resolvedCmd,
+        stdout: '',
+        stderr: blocked,
+        exitCode: -1,
+        durationMs: 0,
+        status: 'failed',
+        statusReason: blocked,
+        varSnapshot: { ...varContext },
+      });
+      if (!continueOnError) break;
+      continue;
+    }
+
+    const result = await session.enqueueShellCmd(resolvedCmd, step.timeoutMs || step.timeout || 30000);
+    let processedOutput = result.stdout;
+    let scriptResult;
+    let scriptError;
+
+    if (step.scriptPath) {
+      const sr = await runPythonScript(step.scriptPath, result.stdout, 15000);
+      if (sr.exitCode === 0) {
+        processedOutput = sr.stdout;
+        scriptResult = { exitCode: sr.exitCode, stdout: sr.stdout };
+      } else {
+        scriptError = `脚本执行失败(exit ${sr.exitCode}): ${sr.stderr}`;
+      }
+    }
+
+    const evalResult = evalOutputStatus(processedOutput, {
+      abnormalRegex: step.abnormalRegex,
+      normalRegex: step.normalRegex,
+      exitCode: result.exitCode,
+    });
+
+    let capturedVar;
+    if (step.captureVar && evalResult.status !== 'failed') {
+      let value = processedOutput.trim();
+      if (step.capturePattern) {
+        try {
+          const matched = new RegExp(step.capturePattern).exec(processedOutput);
+          if (matched) value = matched[1] !== undefined ? matched[1] : matched[0];
+        } catch { /* ignore invalid regex */ }
+      }
+      if (value) {
+        varContext[step.captureVar] = value;
+        capturedVar = { name: step.captureVar, value };
+      }
+    }
+
+    results.push({
+      name: step.name || resolvedCmd,
+      cmd: step.cmd,
+      resolvedCmd,
+      stdout: result.stdout,
+      processedOutput: step.scriptPath ? processedOutput : undefined,
+      stderr: result.stderr,
+      exitCode: result.exitCode,
+      durationMs: result.durationMs,
+      status: evalResult.status,
+      statusReason: evalResult.reason,
+      capturedVar,
+      scriptResult,
+      scriptError,
+      varSnapshot: { ...varContext },
+    });
+
+    if (evalResult.status === 'failed' && !continueOnError) break;
+  }
+
+  return {
+    status: results.some((item) => item.status === 'failed') ? 'failed' : 'done',
+    steps: results,
+    finalVarContext: varContext,
+  };
+}
+
+async function executeSingleCommand(session, cmd, timeout, mode) {
+  if (mode === 'exec') {
+    if (typeof session.execCommand === 'function') {
+      return session.execCommand(cmd, timeout);
+    }
+
+    if (session.sshClient) {
+      return new Promise((resolve) => {
+        const startTs = Date.now();
+        let stdout = '';
+        let stderr = '';
+
+        session.sshClient.exec(cmd, (err, stream) => {
+          if (err) {
+            resolve({ stdout: '', stderr: err.message, exitCode: -1, durationMs: Date.now() - startTs });
+            return;
+          }
+          stream.on('data', (data) => { stdout += data.toString(); });
+          stream.stderr.on('data', (data) => { stderr += data.toString(); });
+          stream.on('close', (code) => {
+            resolve({
+              stdout: stdout.trimEnd(),
+              stderr: stderr.trimEnd(),
+              exitCode: code ?? 0,
+              durationMs: Date.now() - startTs,
+            });
+          });
+        });
+      });
+    }
+  }
+
+  return session.enqueueShellCmd(cmd, timeout);
+}
+
+// 节点注册
+app.get('/api/agent/nodes', (_req, res) => {
+  res.json({ ok: true, data: listNodes().map(sanitizeNode) });
+});
+
+app.post('/api/agent/nodes/resolve', (req, res) => {
+  const matched = resolveNode(req.body?.query);
+  res.json({ ok: true, data: { matched: Boolean(matched), node: sanitizeNode(matched) } });
+});
+
+app.post('/api/agent/nodes', (req, res) => {
+  const { nodeId, name, host, username } = req.body || {};
+  if (!nodeId || !name || !host || !username) {
+    return res.status(400).json({ ok: false, error: 'nodeId/name/host/username 为必填项' });
+  }
+  const saved = saveNode(req.body);
+  res.json({ ok: true, data: sanitizeNode(saved) });
+});
+
+app.patch('/api/agent/nodes/:nodeId', (req, res) => {
+  const saved = updateNode(req.params.nodeId, req.body || {});
+  if (!saved) {
+    return res.status(404).json({ ok: false, error: '节点不存在' });
+  }
+  res.json({ ok: true, data: sanitizeNode(saved) });
+});
+
+// 预操作模板
+app.get('/api/agent/prepare-profiles', (_req, res) => {
+  res.json({ ok: true, data: listPrepareProfiles() });
+});
+
+app.post('/api/agent/prepare-profiles', (req, res) => {
+  const { profileId, name } = req.body || {};
+  if (!profileId || !name) {
+    return res.status(400).json({ ok: false, error: 'profileId/name 为必填项' });
+  }
+  res.json({ ok: true, data: savePrepareProfile(req.body) });
+});
+
+app.patch('/api/agent/prepare-profiles/:profileId', (req, res) => {
+  const saved = updatePrepareProfile(req.params.profileId, req.body || {});
+  if (!saved) {
+    return res.status(404).json({ ok: false, error: '预操作模板不存在' });
+  }
+  res.json({ ok: true, data: saved });
+});
+
+// agent 自建会话
+app.post('/api/agent/sessions/open', async (req, res) => {
+  let sessionId = null;
+  try {
+    const { node, connectConfig, jumpConfig, name, host, port, username } = materializeConnectionSpec(req.body || {});
+    const reuseIfExists = req.body?.reuseIfExists !== false;
+
+    if (reuseIfExists) {
+      for (const [sessionId, session] of global.activeSessions.entries()) {
+        const info = describeSession(sessionId, session);
+        if (info?.status === 'connected' && (
+          (node?.nodeId && info.nodeId === node.nodeId) ||
+          (info.host === host && info.username === username)
+        )) {
+          return res.json({ ok: true, data: info, reused: true });
+        }
+      }
+    }
+
+    sessionId = req.body?.sessionId || `agent_${crypto.randomBytes(6).toString('hex')}`;
+    const managedSession = new ManagedAgentSession({
+      sessionId,
+      nodeId: node?.nodeId,
+      name,
+      host,
+      port,
+      username,
+      reason: req.body?.reason,
+      ttlSec: req.body?.ttlSec,
+      connectConfig,
+      jumpConfig,
+      onClose: () => {
+        global.activeSessions.delete(sessionId);
+      },
+    });
+
+    global.activeSessions.set(sessionId, managedSession);
+    await managedSession.connect();
+    res.json({ ok: true, data: managedSession.getInfo() });
+  } catch (e) {
+    if (sessionId) {
+      const failedSession = global.activeSessions.get(sessionId);
+      if (failedSession && typeof failedSession.close === 'function') {
+        failedSession.close('connect_failed');
+      }
+      global.activeSessions.delete(sessionId);
+    }
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 /**
  * GET /api/agent/sessions
  * 暴露当前活跃的会话列表给 Agent
@@ -246,13 +598,103 @@ const AGENT_COMMAND_BLACKLIST = [
 app.get('/api/agent/sessions', (req, res) => {
   const sessions = [];
   for (const [id, session] of global.activeSessions.entries()) {
-    sessions.push({
-      sessionId: id,
-      host: session.host,
-      username: session.username
-    });
+    sessions.push(describeSession(id, session));
   }
   res.json({ ok: true, sessions });
+});
+
+app.get('/api/agent/sessions/:sessionId', (req, res) => {
+  const session = global.activeSessions.get(req.params.sessionId);
+  if (!session) {
+    return res.status(404).json({ ok: false, error: 'Session 不存在或已断开连接' });
+  }
+  res.json({ ok: true, data: describeSession(req.params.sessionId, session) });
+});
+
+app.delete('/api/agent/sessions/:sessionId', (req, res) => {
+  const session = global.activeSessions.get(req.params.sessionId);
+  if (!session) {
+    return res.status(404).json({ ok: false, error: 'Session 不存在或已断开连接' });
+  }
+
+  if (typeof session.close === 'function') {
+    session.close('closed_by_api');
+  } else if (session.sshClient) {
+    session.sshClient.end();
+    global.activeSessions.delete(req.params.sessionId);
+  }
+
+  res.json({ ok: true, data: { sessionId: req.params.sessionId, closed: true } });
+});
+
+app.post('/api/agent/sessions/:sessionId/prepare', async (req, res) => {
+  const session = global.activeSessions.get(req.params.sessionId);
+  if (!session) {
+    return res.status(404).json({ ok: false, error: 'Session 不存在或已断开连接' });
+  }
+
+  const profile = req.body?.profileId ? getPrepareProfile(req.body.profileId) : null;
+  const steps = req.body?.steps || profile?.steps;
+  if (!steps || !Array.isArray(steps) || steps.length === 0) {
+    return res.status(400).json({ ok: false, error: '缺少 prepare steps' });
+  }
+
+  try {
+    const result = await executeStructuredSteps(session, steps, {
+      continueOnError: req.body?.continueOnError,
+      variables: req.body?.variables,
+    });
+    res.json({
+      ok: true,
+      data: {
+        session: describeSession(req.params.sessionId, session),
+        profile: profile || null,
+        ...result,
+      },
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/api/agent/sessions/:sessionId/commands', async (req, res) => {
+  const { cmd, timeoutMs = 30000, mode = 'pty' } = req.body || {};
+  if (!cmd) {
+    return res.status(400).json({ ok: false, error: '缺少 cmd 参数' });
+  }
+
+  const blocked = getBlockedCommandError(cmd);
+  if (blocked) {
+    return res.status(403).json({ ok: false, error: blocked });
+  }
+
+  const session = global.activeSessions.get(req.params.sessionId);
+  if (!session) {
+    return res.status(404).json({ ok: false, error: 'Session 不存在或已断开连接' });
+  }
+
+  const startTime = new Date().toISOString();
+
+  try {
+    const result = await executeSingleCommand(session, cmd, timeoutMs, mode);
+    writeAgentAuditLog(
+      `[${startTime}] Agent Command on ${session.username}@${session.host} (Session: ${req.params.sessionId})\n` +
+      `Mode    : ${mode}\n` +
+      `Command : ${cmd}\n` +
+      `ExitCode: ${result.exitCode}\n` +
+      `Duration: ${result.durationMs}ms\n` +
+      `Stdout  :\n${result.stdout}\n` +
+      `Stderr  :\n${result.stderr}\n` +
+      '---------------------------------------------------\n'
+    );
+    res.json({ ok: true, data: result });
+  } catch (e) {
+    writeAgentAuditLog(
+      `[${startTime}] Agent Command ERR on ${session.username}@${session.host} (Session: ${req.params.sessionId})\n` +
+      `Command: ${cmd}\nError: ${e.message}\n---------------------------------------------------\n`
+    );
+    res.status(500).json({ ok: false, error: e.message });
+  }
 });
 
 /**
@@ -267,13 +709,10 @@ app.post('/api/agent/execute', async (req, res) => {
     return res.status(400).json({ ok: false, error: '缺少 sessionId 或 cmd 参数' });
   }
 
-  // 安全检查：黑名单验证
-  for (const regex of AGENT_COMMAND_BLACKLIST) {
-    if (regex.test(cmd)) {
-      const errMsg = `[Agent Security Block] 拒绝执行具有受限或破坏性特征的命令: ${cmd}`;
-      console.warn(errMsg);
-      return res.status(403).json({ ok: false, error: errMsg });
-    }
+  const blocked = getBlockedCommandError(cmd);
+  if (blocked) {
+    console.warn(blocked);
+    return res.status(403).json({ ok: false, error: blocked });
   }
 
   const session = global.activeSessions.get(sessionId);
@@ -287,16 +726,15 @@ app.post('/api/agent/execute', async (req, res) => {
     result = await session.enqueueShellCmd(cmd, timeout);
     
     // 审计日志: 保存执行记录到临时文件
-    const logEntry = `[${startTime}] Agent Execution on ${session.username}@${session.host} (Session: ${sessionId})
-Command : ${cmd}
-ExitCode: ${result.exitCode}
-Duration: ${result.durationMs}ms
-Stdout  :\n${result.stdout}
-Stderr  :\n${result.stderr}
----------------------------------------------------\n`;
-    
-    const logFilePath = path.join(os.tmpdir(), 'agent-execution-audit.log');
-    fs.appendFileSync(logFilePath, logEntry, 'utf8');
+    writeAgentAuditLog(
+      `[${startTime}] Agent Execution on ${session.username}@${session.host} (Session: ${sessionId})\n` +
+      `Command : ${cmd}\n` +
+      `ExitCode: ${result.exitCode}\n` +
+      `Duration: ${result.durationMs}ms\n` +
+      `Stdout  :\n${result.stdout}\n` +
+      `Stderr  :\n${result.stderr}\n` +
+      '---------------------------------------------------\n'
+    );
 
     res.json({
       ok: true,
@@ -308,9 +746,10 @@ Stderr  :\n${result.stderr}
       }
     });
   } catch (e) {
-    const errorEntry = `[${startTime}] Agent Execution ERR on ${session.username}@${session.host} (Session: ${sessionId})\nCommand: ${cmd}\nError: ${e.message}\n---------------------------------------------------\n`;
-    const logFilePath = path.join(os.tmpdir(), 'agent-execution-audit.log');
-    fs.appendFileSync(logFilePath, errorEntry, 'utf8');
+    writeAgentAuditLog(
+      `[${startTime}] Agent Execution ERR on ${session.username}@${session.host} (Session: ${sessionId})\n` +
+      `Command: ${cmd}\nError: ${e.message}\n---------------------------------------------------\n`
+    );
 
     res.status(500).json({ ok: false, error: e.message });
   }
@@ -878,5 +1317,3 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log('║    sudo/su 身份、cd 路径、source env 变量         ║');
   console.log('╚══════════════════════════════════════════════════╝\n');
 });
-
-

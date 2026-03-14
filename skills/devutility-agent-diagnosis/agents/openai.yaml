@@ -1,0 +1,4 @@
+interface:
+  display_name: "DevUtility Diagnosis"
+  short_description: "Use DevUtility MCP tools for remote diagnosis."
+  default_prompt: "Use $devutility-agent-diagnosis to diagnose a remote node through the local DevUtility Hub MCP tools."
