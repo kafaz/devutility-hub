@@ -78,8 +78,10 @@ server.tool(
 
 server.tool(
   "open_session",
-  "Open or reuse a diagnosis session to a node. Prefer nodeId; fall back to direct connection only when the node is not registered.",
+  "Open or reuse a diagnosis session. Use presetId for preset-based auto-login, otherwise use nodeId/direct connection.",
   {
+    presetId: z.string().min(1).optional(),
+    sessionId: z.string().min(1).optional(),
     nodeId: z.string().optional(),
     reason: z.string().optional(),
     reuseIfExists: z.boolean().optional(),
@@ -89,7 +91,8 @@ server.tool(
     jumpAuth: z.record(z.string(), z.unknown()).optional(),
   },
   async (input) => {
-    const data = await requestApi("POST", "/api/agent/sessions/open", input);
+    const route = input.presetId ? "/api/agent/connect" : "/api/agent/sessions/open";
+    const data = await requestApi("POST", route, input);
     return formatResult("Opened session", data);
   }
 );
