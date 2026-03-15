@@ -17,6 +17,7 @@ const TimelineCorrelator = lazy(() => import('./modules/TimelineCorrelator'));
 const FaultBuilder      = lazy(() => import('./modules/FaultBuilder'));
 const IOAnalyzer        = lazy(() => import('./modules/IOAnalyzer'));
 const CodeProfiler      = lazy(() => import('./modules/CodeProfiler'));
+const DiagnosticWorkbench = lazy(() => import('./modules/DiagnosticWorkbench'));
 
 const Loading: React.FC = () => (
   <div
@@ -145,6 +146,14 @@ const App: React.FC = () => (
           element={
             <Suspense fallback={<Loading />}>
               <CodeProfiler />
+            </Suspense>
+          }
+        />
+        <Route
+          path="diagnostic-workbench"
+          element={
+            <Suspense fallback={<Loading />}>
+              <DiagnosticWorkbench />
             </Suspense>
           }
         />

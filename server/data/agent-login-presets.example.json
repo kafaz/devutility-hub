@@ -1,0 +1,23 @@
+{
+  "presets": [
+    {
+      "id": "prod-root-key",
+      "name": "生产 root 密钥登录",
+      "host": "192.168.1.10",
+      "port": 22,
+      "username": "root",
+      "authType": "privateKey",
+      "keyFilePath": "~/.ssh/id_rsa",
+      "passphrase": ""
+    },
+    {
+      "id": "staging-app-password",
+      "name": "预发 app 密码登录",
+      "host": "192.168.1.20",
+      "port": 22,
+      "username": "app",
+      "authType": "password",
+      "password": "replace-me"
+    }
+  ]
+}

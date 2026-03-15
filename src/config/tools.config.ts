@@ -49,6 +49,14 @@ const toolsConfig: ToolConfig[] = [
     category: 'analyzer',
     version: '1.0.0',
   },
+  {
+    id: 'diagnostic-workbench',
+    name: '诊断工作台',
+    icon: 'RadarChartOutlined',
+    description: '结构化归档诊断 Run，做相似故障召回与多 Agent 编排',
+    category: 'utility',
+    version: '1.0.0',
+  },
 ];
 
 export default toolsConfig;

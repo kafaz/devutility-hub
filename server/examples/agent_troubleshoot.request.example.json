@@ -1,0 +1,55 @@
+{
+  "presetId": "prod-root-key",
+  "title": "订单接口超时诊断",
+  "symptom": "订单接口超时，部分节点返回 502",
+  "notes": "最近刚发布过新版本",
+  "collectionPlan": [
+    {
+      "name": "检查进程",
+      "command": "ps aux | grep order-service | grep -v grep",
+      "timeoutMs": 15000
+    },
+    {
+      "name": "检查端口",
+      "command": "ss -tlnp | grep 8080",
+      "timeoutMs": 15000
+    },
+    {
+      "name": "最近日志",
+      "command": "journalctl -n 100 --no-pager",
+      "timeoutMs": 20000
+    }
+  ],
+  "analysisRules": [
+    {
+      "name": "超时特征",
+      "pattern": "timeout|timed out|超时",
+      "source": "all",
+      "severity": "critical",
+      "summary": "日志中出现超时信号"
+    },
+    {
+      "name": "连接拒绝",
+      "pattern": "connection refused|refused|连接被拒绝",
+      "source": "all",
+      "severity": "critical",
+      "summary": "疑似端口未监听或依赖不可达"
+    }
+  ],
+  "businessActions": [
+    {
+      "name": "业务冒烟",
+      "scriptPath": "examples/business_smoke_test.py",
+      "args": [
+        "--action",
+        "health-check",
+        "--target",
+        "order-service"
+      ],
+      "stdinPayload": "{\"scene\":\"order-check\"}",
+      "runMode": "before_collection",
+      "timeoutMs": 15000
+    }
+  ],
+  "autoDisconnect": true
+}

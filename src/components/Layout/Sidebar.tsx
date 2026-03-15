@@ -13,6 +13,7 @@ import {
     MenuFoldOutlined,
     MenuUnfoldOutlined,
     NumberOutlined,
+    RadarChartOutlined,
     SafetyCertificateOutlined,
     SettingOutlined,
     ThunderboltOutlined,
@@ -41,6 +42,7 @@ const ICON_MAP: Record<string, React.ReactNode> = {
   ThunderboltOutlined:<ThunderboltOutlined />,
   BarChartOutlined:   <BarChartOutlined />,
   ToolOutlined:       <ToolOutlined />,
+  RadarChartOutlined: <RadarChartOutlined />,
 };
 
 const tools = [
@@ -127,6 +129,12 @@ const tools = [
     name: '代码路径优化',
     icon: 'ToolOutlined',
     path: '/code-profiler',
+  },
+  {
+    id:   'diagnostic-workbench',
+    name: '诊断工作台',
+    icon: 'RadarChartOutlined',
+    path: '/diagnostic-workbench',
   },
 ];
 

@@ -48,6 +48,29 @@ const {
   updateNode,
   updatePrepareProfile,
 } = require('./lib/agentRegistry');
+const {
+  appendRun,
+  buildDiagnosticReport,
+  buildHeuristicFindings,
+  buildSignals,
+  getRunById,
+  listRuns,
+  recallSimilarRuns,
+} = require('./diagnosticKb');
+const {
+  deletePreset,
+  getPresetById,
+  listPresets,
+  savePreset,
+} = require('./agentPresets');
+const {
+  addAllowedBaseCommand,
+  assertCommandAllowed,
+  getCommandPolicySnapshot,
+  removeAllowedBaseCommand,
+  replaceAllowedBaseCommands,
+  resetCommandPolicy,
+} = require('./commandPolicy');
 
 const app    = express();
 const server = http.createServer(app);
@@ -134,6 +157,598 @@ async function runPythonScript(scriptPath, inputData, timeoutMs = 15000) {
     proc.stdin.write(inputData ?? '');
     proc.stdin.end();
   });
+}
+
+function resolveUserFilePath(inputPath) {
+  if (!inputPath) return '';
+  if (inputPath.startsWith('~')) {
+    return path.join(process.env.HOME || process.env.USERPROFILE || '', inputPath.slice(1));
+  }
+  if (path.isAbsolute(inputPath)) return inputPath;
+
+  const candidates = [
+    path.resolve(process.cwd(), inputPath),
+    path.resolve(__dirname, inputPath),
+    path.resolve(__dirname, '..', inputPath),
+  ];
+
+  const matched = candidates.find((candidate) => fs.existsSync(candidate));
+  return matched || candidates[0];
+}
+
+async function runPythonControlScript(scriptPath, args = [], inputData = '', timeoutMs = 20000) {
+  return new Promise((resolve) => {
+    const resolved = resolveUserFilePath(scriptPath);
+    const pythonBin = process.platform === 'win32' ? 'python' : 'python3';
+    let stdout = '';
+    let stderr = '';
+    let proc;
+
+    try {
+      proc = spawn(pythonBin, [resolved, ...args.map((arg) => String(arg))], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (e) {
+      resolve({ stdout: '', stderr: String(e), exitCode: -1, durationMs: 0, resolvedPath: resolved });
+      return;
+    }
+
+    const startedAt = Date.now();
+    proc.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+    proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+
+    const timer = setTimeout(() => {
+      proc.kill();
+      resolve({
+        stdout: stdout.trimEnd(),
+        stderr: `[TIMEOUT] ${stderr}`.trim(),
+        exitCode: -1,
+        durationMs: Date.now() - startedAt,
+        resolvedPath: resolved,
+      });
+    }, timeoutMs);
+
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({
+        stdout: stdout.trimEnd(),
+        stderr: stderr.trimEnd(),
+        exitCode: code ?? 0,
+        durationMs: Date.now() - startedAt,
+        resolvedPath: resolved,
+      });
+    });
+
+    proc.on('error', (err) => {
+      clearTimeout(timer);
+      resolve({
+        stdout: '',
+        stderr: err.message,
+        exitCode: -1,
+        durationMs: Date.now() - startedAt,
+        resolvedPath: resolved,
+      });
+    });
+
+    proc.stdin.write(inputData ?? '');
+    proc.stdin.end();
+  });
+}
+
+function makeEntityId(prefix = 'diag') {
+  return `${prefix}-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
+}
+
+function parseArgsValue(args) {
+  if (Array.isArray(args)) return args.map((item) => String(item));
+  if (typeof args === 'string') {
+    try {
+      const parsed = JSON.parse(args);
+      if (Array.isArray(parsed)) return parsed.map((item) => String(item));
+    } catch {
+      return args.split(/\s+/).map((item) => item.trim()).filter(Boolean);
+    }
+  }
+  return [];
+}
+
+function normalizeSSHError(err, cfg, prefix = '') {
+  const scope = prefix ? `${prefix}` : '';
+  if (/authentication/i.test(err.message)) {
+    return `${scope}认证失败：请检查密钥、口令或密码是否正确`.trim();
+  }
+  if (/ECONNREFUSED/.test(err.message)) {
+    return `${scope}连接被拒绝：${cfg.host}:${cfg.port} 不可达`.trim();
+  }
+  if (/ETIMEDOUT/.test(err.message)) {
+    return `${scope}连接超时：${cfg.host}:${cfg.port} 无响应`.trim();
+  }
+  return `${scope}${err.message}`.trim();
+}
+
+function disconnectActiveSession(sessionId) {
+  const session = global.activeSessions.get(sessionId);
+  if (!session) return;
+
+  try { session.close?.(); } catch (_) {}
+  try { session.shellStream?.end?.(); } catch (_) {}
+  try { session.sshClient?.end?.(); } catch (_) {}
+  try { session.jumpClient?.end?.(); } catch (_) {}
+  global.activeSessions.delete(sessionId);
+}
+
+function createManagedCommandQueue(shellStream) {
+  let captureCtx = null;
+  const shellQueue = [];
+  let shellBusy = false;
+
+  function onShellData(rawData) {
+    if (!captureCtx) return;
+
+    const text = stripAnsi(rawData.toString())
+      .replace(/\r\n/g, '\n')
+      .replace(/\r/g, '\n');
+
+    captureCtx.partialLine += text;
+    const parts = captureCtx.partialLine.split('\n');
+    captureCtx.partialLine = parts.pop() ?? '';
+
+    for (const line of parts) {
+      const trimmed = line.trim();
+
+      if (!captureCtx.started) {
+        if (trimmed === mkS(captureCtx.id)) {
+          captureCtx.started = true;
+        }
+        continue;
+      }
+
+      if (trimmed.startsWith(mkE(captureCtx.id))) {
+        const activeCtx = captureCtx;
+        const exitStr = trimmed.slice(mkE(activeCtx.id).length).match(/^(\d+)/);
+        const exitCode = exitStr ? parseInt(exitStr[1], 10) : 0;
+        const durationMs = Date.now() - activeCtx.startTs;
+
+        clearTimeout(activeCtx.timer);
+        captureCtx = null;
+        shellBusy = false;
+
+        const stdout = activeCtx.lines
+          .filter((capturedLine) => {
+            const lineText = capturedLine.trim();
+            return (
+              lineText !== `echo '${mkS(activeCtx.id)}'` &&
+              !lineText.startsWith(`echo "===E:${activeCtx.id}`) &&
+              !lineText.startsWith(`echo '===E:${activeCtx.id}`)
+            );
+          })
+          .join('\n')
+          .trim();
+
+        activeCtx.resolver({ stdout, stderr: '', exitCode, durationMs });
+        processShellQueue();
+        return;
+      }
+
+      const isEchoMarker =
+        trimmed === `echo '${mkS(captureCtx.id)}'` ||
+        trimmed.startsWith(`echo "===E:${captureCtx.id}`);
+
+      if (!isEchoMarker) {
+        captureCtx.lines.push(line);
+      }
+    }
+  }
+
+  function processShellQueue() {
+    if (shellBusy || shellQueue.length === 0) return;
+
+    shellBusy = true;
+    const { id, cmd, timeoutMs, resolve } = shellQueue.shift();
+    const startTs = Date.now();
+
+    captureCtx = {
+      id,
+      started: false,
+      lines: [],
+      partialLine: '',
+      resolver: resolve,
+      startTs,
+      timer: setTimeout(() => {
+        const ctx = captureCtx;
+        captureCtx = null;
+        shellBusy = false;
+        ctx?.resolver({
+          stdout: ctx?.lines.join('\n').trim() || '',
+          stderr: '[命令执行超时]',
+          exitCode: -1,
+          durationMs: timeoutMs,
+        });
+        processShellQueue();
+      }, timeoutMs),
+    };
+
+    shellStream.write(`echo '${mkS(id)}'\nCOLUMNS=10000; ${cmd}\necho "${mkE(id)}$?"\n`);
+  }
+
+  function enqueueShellCmd(cmd, timeoutMs = 30000) {
+    return new Promise((resolve) => {
+      shellQueue.push({ id: makeMarkerId(), cmd, timeoutMs, resolve });
+      processShellQueue();
+    });
+  }
+
+  function dispose(reason = 'Shell 已关闭') {
+    shellStream.off('data', onShellData);
+    shellStream.stderr?.off?.('data', onShellData);
+
+    if (captureCtx) {
+      clearTimeout(captureCtx.timer);
+      captureCtx.resolver({
+        stdout: captureCtx.lines.join('\n').trim(),
+        stderr: reason,
+        exitCode: -1,
+        durationMs: 0,
+      });
+      captureCtx = null;
+    }
+
+    shellBusy = false;
+    const pending = shellQueue.splice(0);
+    pending.forEach((item) => item.resolve({
+      stdout: '',
+      stderr: reason,
+      exitCode: -1,
+      durationMs: 0,
+    }));
+  }
+
+  shellStream.on('data', onShellData);
+  shellStream.stderr?.on?.('data', onShellData);
+
+  return { enqueueShellCmd, dispose };
+}
+
+async function connectManagedSession({
+  sessionId = makeEntityId('agent-session'),
+  cols = 220,
+  rows = 50,
+  ...connectMsg
+}) {
+  disconnectActiveSession(sessionId);
+
+  let cfg;
+  let jumpCfg;
+  try {
+    cfg = buildConnectConfig(connectMsg);
+    if (connectMsg.jumpHost) jumpCfg = buildConnectConfig(connectMsg.jumpHost);
+  } catch (e) {
+    throw new Error(e.message);
+  }
+
+  return new Promise((resolve, reject) => {
+    const ssh = new Client();
+    let jumpClient = null;
+    let settled = false;
+    let disposer = null;
+
+    const cleanup = () => {
+      if (disposer) {
+        disposer('Shell 已关闭');
+        disposer = null;
+      }
+      const current = global.activeSessions.get(sessionId);
+      if (current?.sshClient === ssh) {
+        global.activeSessions.delete(sessionId);
+      }
+    };
+
+    const close = () => {
+      cleanup();
+      try { ssh.end(); } catch (_) {}
+      try { jumpClient?.end(); } catch (_) {}
+    };
+
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      close();
+      reject(error);
+    };
+
+    const succeed = (session) => {
+      if (settled) return;
+      settled = true;
+      resolve(session);
+    };
+
+    const handleShellReady = () => {
+      ssh.shell({ term: 'xterm-256color', cols, rows }, (err, stream) => {
+        if (err) {
+          fail(new Error(err.message));
+          return;
+        }
+
+        const queue = createManagedCommandQueue(stream);
+        disposer = queue.dispose;
+
+        const session = {
+          sessionId,
+          sshClient: ssh,
+          jumpClient,
+          shellStream: stream,
+          enqueueShellCmd: queue.enqueueShellCmd,
+          host: cfg.host,
+          port: cfg.port,
+          username: cfg.username,
+          managedBy: 'agent-api',
+          close,
+        };
+
+        global.activeSessions.set(sessionId, session);
+
+        stream.on('close', cleanup);
+        succeed(session);
+      });
+    };
+
+    ssh.on('ready', handleShellReady);
+    ssh.on('error', (err) => {
+      if (!settled) {
+        fail(new Error(normalizeSSHError(err, cfg)));
+      } else {
+        cleanup();
+      }
+    });
+    ssh.on('end', cleanup);
+    ssh.on('close', cleanup);
+
+    if (jumpCfg) {
+      jumpClient = new Client();
+      jumpClient.on('ready', () => {
+        jumpClient.forwardOut('127.0.0.1', 12345, cfg.host, cfg.port, (err, stream) => {
+          if (err) {
+            fail(new Error(`跳板机隧道转发失败: ${err.message}`));
+            return;
+          }
+          ssh.connect({ ...cfg, sock: stream });
+        });
+      });
+      jumpClient.on('error', (err) => {
+        fail(new Error(normalizeSSHError(err, jumpCfg, '跳板机')));
+      });
+      jumpClient.connect(jumpCfg);
+    } else {
+      ssh.connect(cfg);
+    }
+  });
+}
+
+function normalizeDiagnosticPayload(payload) {
+  const {
+    title,
+    symptom,
+    notes = '',
+    sessionId = '',
+    collectionPlan = [],
+    analysisRules = [],
+    businessActions = [],
+  } = payload || {};
+
+  if (!title || !symptom) {
+    throw new Error('title 和 symptom 不能为空');
+  }
+
+  if (!Array.isArray(collectionPlan) && !Array.isArray(businessActions)) {
+    throw new Error('缺少 collectionPlan 或 businessActions');
+  }
+
+  if ((!collectionPlan || collectionPlan.length === 0) && (!businessActions || businessActions.length === 0)) {
+    throw new Error('至少需要一个采集步骤或业务动作');
+  }
+
+  const blockedStep = (collectionPlan || []).find((step) =>
+    (() => {
+      try {
+        assertCommandAllowed(step.command || step.cmd || '', 'diagnostic-collection');
+        return false;
+      } catch {
+        return true;
+      }
+    })()
+  );
+  if (blockedStep) {
+    try {
+      assertCommandAllowed(blockedStep.command || blockedStep.cmd || '', 'diagnostic-collection');
+    } catch (e) {
+      throw new Error(e.message);
+    }
+  }
+
+  return {
+    title,
+    symptom,
+    notes,
+    sessionId,
+    normalizedRules: Array.isArray(analysisRules)
+      ? analysisRules.map((rule, index) => ({
+        id: rule.id || `rule-${index + 1}`,
+        name: rule.name || `规则 ${index + 1}`,
+        pattern: String(rule.pattern || ''),
+        summary: String(rule.summary || ''),
+        severity: rule.severity || 'warning',
+        source: rule.source || 'all',
+      }))
+      : [],
+    normalizedPlan: Array.isArray(collectionPlan)
+      ? collectionPlan.map((step, index) => ({
+        id: step.id || makeEntityId('step'),
+        name: step.name || `采集步骤 ${index + 1}`,
+        command: String(step.command || step.cmd || ''),
+        timeoutMs: Number(step.timeoutMs || step.timeout || 30000),
+      }))
+      : [],
+    normalizedActions: Array.isArray(businessActions)
+      ? businessActions.map((action, index) => ({
+        id: action.id || makeEntityId('biz'),
+        name: action.name || `业务动作 ${index + 1}`,
+        scriptPath: String(action.scriptPath || ''),
+        args: parseArgsValue(action.args),
+        stdinPayload: String(action.stdinPayload || action.payload || ''),
+        runMode: action.runMode === 'after_collection' ? 'after_collection' : 'before_collection',
+        timeoutMs: Number(action.timeoutMs || action.timeout || 20000),
+      }))
+      : [],
+  };
+}
+
+async function executeBusinessStage(actions, runMode) {
+  const results = [];
+  for (const action of actions.filter((item) => item.runMode === runMode)) {
+    const output = await runPythonControlScript(
+      action.scriptPath,
+      action.args,
+      action.stdinPayload,
+      action.timeoutMs
+    );
+
+    results.push({
+      id: action.id,
+      name: action.name,
+      scriptPath: action.scriptPath,
+      resolvedPath: output.resolvedPath,
+      args: action.args,
+      stdinPayload: action.stdinPayload,
+      runMode: action.runMode,
+      stdout: output.stdout,
+      stderr: output.stderr,
+      exitCode: output.exitCode,
+      durationMs: output.durationMs,
+      status: output.exitCode === 0 ? 'done' : 'failed',
+    });
+  }
+  return results;
+}
+
+async function runDiagnosticOrchestration(payload) {
+  const {
+    title,
+    symptom,
+    notes,
+    sessionId,
+    normalizedPlan,
+    normalizedRules,
+    normalizedActions,
+  } = normalizeDiagnosticPayload(payload);
+
+  const session = sessionId ? global.activeSessions.get(sessionId) : null;
+  if (normalizedPlan.length > 0 && !session) {
+    throw new Error('采集步骤需要有效的 SSH 会话');
+  }
+
+  const startedAt = Date.now();
+  const beforeActions = await executeBusinessStage(normalizedActions, 'before_collection');
+  const collectionSteps = [];
+
+  for (const step of normalizedPlan) {
+    try {
+      const result = await session.enqueueShellCmd(step.command, step.timeoutMs);
+      collectionSteps.push({
+        id: step.id,
+        name: step.name,
+        command: step.command,
+        resolvedCommand: step.command,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exitCode: result.exitCode,
+        durationMs: result.durationMs,
+        status: result.exitCode === 0 ? 'done' : 'failed',
+        conclusion: result.exitCode === 0 ? '命令执行完成' : `命令退出非零 (${result.exitCode})`,
+        agent: 'collector',
+      });
+    } catch (e) {
+      collectionSteps.push({
+        id: step.id,
+        name: step.name,
+        command: step.command,
+        resolvedCommand: step.command,
+        stdout: '',
+        stderr: e.message,
+        exitCode: -1,
+        durationMs: 0,
+        status: 'failed',
+        conclusion: `采集执行异常: ${e.message}`,
+        agent: 'collector',
+      });
+    }
+  }
+
+  const afterActions = await executeBusinessStage(normalizedActions, 'after_collection');
+  const allBusinessActions = [...beforeActions, ...afterActions];
+  const findings = buildHeuristicFindings({
+    collectionSteps,
+    businessActions: allBusinessActions,
+    analysisRules: normalizedRules,
+  });
+  const similarCases = recallSimilarRuns({
+    title,
+    symptom,
+    notes,
+    collectionSteps,
+    businessActions: allBusinessActions,
+    findings,
+    report: null,
+  }, listRuns(), 5);
+  const report = buildDiagnosticReport({
+    title,
+    symptom,
+    notes,
+    collectionSteps,
+    businessActions: allBusinessActions,
+    findings,
+    similarCases,
+  });
+  const signals = buildSignals({
+    title,
+    symptom,
+    notes,
+    collectionSteps,
+    businessActions: allBusinessActions,
+    findings,
+    report,
+  });
+
+  const run = {
+    id: makeEntityId('run'),
+    title,
+    symptom,
+    notes,
+    status:
+      findings.some((finding) => finding.severity === 'critical') ||
+      collectionSteps.some((step) => (step.exitCode ?? 0) !== 0) ||
+      allBusinessActions.some((action) => (action.exitCode ?? 0) !== 0)
+        ? 'attention'
+        : 'completed',
+    startedAt,
+    finishedAt: Date.now(),
+    sessionId: sessionId || '',
+    sessionLabel: session ? `${session.username}@${session.host}` : '',
+    agentStatus: {
+      collector: normalizedPlan.length ? 'completed' : 'skipped',
+      logAnalyst: 'completed',
+      summarizer: 'completed',
+    },
+    collectionSteps,
+    analysisRules: normalizedRules,
+    businessActions: allBusinessActions,
+    findings,
+    similarCases,
+    report,
+    signals,
+  };
+
+  appendRun(run);
+  return run;
 }
 
 /**
@@ -241,15 +856,117 @@ app.post('/api/check-key', (req, res) => {
 
 // ─── AI Agent / MCP 远程控制 API ──────────────────────────────────────────
 
-const AGENT_COMMAND_BLACKLIST = [
-  /rm\s+-rf/,
-  /mkfs/,
-  /dd\s+if=/,
-  /reboot/,
-  /shutdown/,
-  /init\s+[06]/,
-  /:(\s*)\{\s*\|\|\s*:\s*\&\s*\}\s*;\s*:/ // bash fork bomb
-];
+app.get('/api/agent/login-presets', (_req, res) => {
+  res.json({ ok: true, presets: listPresets() });
+});
+
+app.post('/api/agent/login-presets', (req, res) => {
+  try {
+    const preset = savePreset(req.body || {});
+    res.json({ ok: true, preset });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+app.delete('/api/agent/login-presets/:id', (req, res) => {
+  const deleted = deletePreset(req.params.id);
+  if (!deleted) {
+    return res.status(404).json({ ok: false, error: '登录预设不存在' });
+  }
+  return res.json({ ok: true });
+});
+
+app.post('/api/agent/connect', async (req, res) => {
+  const {
+    presetId,
+    sessionId = makeEntityId('agent-session'),
+    cols = 220,
+    rows = 50,
+    ...overrides
+  } = req.body || {};
+
+  let baseConfig = {};
+  if (presetId) {
+    const preset = getPresetById(presetId);
+    if (!preset) {
+      return res.status(404).json({ ok: false, error: '登录预设不存在' });
+    }
+    baseConfig = preset;
+  }
+
+  const connectConfig = {
+    ...baseConfig,
+    ...overrides,
+    sessionId,
+    cols,
+    rows,
+  };
+
+  try {
+    const session = await connectManagedSession(connectConfig);
+    return res.json({
+      ok: true,
+      sessionId: session.sessionId,
+      host: session.host,
+      port: session.port,
+      username: session.username,
+      managedBy: session.managedBy,
+      status: 'connected',
+    });
+  } catch (e) {
+    return res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/api/agent/disconnect', (req, res) => {
+  const { sessionId } = req.body || {};
+  if (!sessionId) {
+    return res.status(400).json({ ok: false, error: '缺少 sessionId' });
+  }
+  disconnectActiveSession(sessionId);
+  return res.json({ ok: true });
+});
+
+app.get('/api/agent/command-policy', (_req, res) => {
+  res.json({ ok: true, policy: getCommandPolicySnapshot() });
+});
+
+app.put('/api/agent/command-policy', (req, res) => {
+  try {
+    const policy = replaceAllowedBaseCommands(req.body?.allowedBaseCommands);
+    res.json({ ok: true, policy });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/api/agent/command-policy/allow', (req, res) => {
+  try {
+    const policy = addAllowedBaseCommand(req.body?.command);
+    res.json({ ok: true, policy });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+app.delete('/api/agent/command-policy/allow/:command', (req, res) => {
+  try {
+    const policy = removeAllowedBaseCommand(req.params.command);
+    res.json({ ok: true, policy });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/api/agent/command-policy/reset', (_req, res) => {
+  try {
+    const policy = resetCommandPolicy();
+    res.json({ ok: true, policy });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
 
 function writeAgentAuditLog(text) {
   const logFilePath = path.join(os.tmpdir(), 'agent-execution-audit.log');
@@ -709,10 +1426,11 @@ app.post('/api/agent/execute', async (req, res) => {
     return res.status(400).json({ ok: false, error: '缺少 sessionId 或 cmd 参数' });
   }
 
-  const blocked = getBlockedCommandError(cmd);
-  if (blocked) {
-    console.warn(blocked);
-    return res.status(403).json({ ok: false, error: blocked });
+  try {
+    assertCommandAllowed(cmd, 'agent-execute');
+  } catch (e) {
+    console.warn(e.message);
+    return res.status(403).json({ ok: false, error: e.message });
   }
 
   const session = global.activeSessions.get(sessionId);
@@ -752,6 +1470,141 @@ app.post('/api/agent/execute', async (req, res) => {
     );
 
     res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ─── 诊断知识库 / 多 Agent 编排 API ───────────────────────────────────────
+
+app.get('/api/diagnostic/runs', (req, res) => {
+  const limit = Math.max(1, Math.min(200, Number(req.query.limit) || 50));
+  const runs = listRuns()
+    .slice(0, limit)
+    .map((run) => ({
+      id: run.id,
+      title: run.title,
+      symptom: run.symptom,
+      status: run.status,
+      startedAt: run.startedAt,
+      finishedAt: run.finishedAt,
+      sessionLabel: run.sessionLabel,
+      findingCount: (run.findings || []).length,
+      summary: run.report?.summary || '',
+    }));
+
+  res.json({ ok: true, runs });
+});
+
+app.get('/api/diagnostic/runs/:id', (req, res) => {
+  const run = getRunById(req.params.id);
+  if (!run) {
+    return res.status(404).json({ ok: false, error: '诊断记录不存在' });
+  }
+  return res.json({ ok: true, run });
+});
+
+app.post('/api/diagnostic/recall', (req, res) => {
+  const {
+    title = '',
+    symptom = '',
+    notes = '',
+    collectionPlan = [],
+    businessActions = [],
+    limit = 5,
+  } = req.body || {};
+
+  const draft = {
+    title,
+    symptom,
+    notes,
+    collectionSteps: Array.isArray(collectionPlan)
+      ? collectionPlan.map((step) => ({
+        name: step.name || '未命名步骤',
+        command: step.command || step.cmd || '',
+        resolvedCommand: step.command || step.cmd || '',
+      }))
+      : [],
+    businessActions: Array.isArray(businessActions)
+      ? businessActions.map((action) => ({
+        name: action.name || '未命名业务动作',
+        scriptPath: action.scriptPath || '',
+        args: parseArgsValue(action.args),
+      }))
+      : [],
+    findings: [],
+    report: null,
+  };
+
+  const matches = recallSimilarRuns(draft, listRuns(), Math.max(1, Math.min(10, Number(limit) || 5)));
+  return res.json({ ok: true, matches });
+});
+
+app.post('/api/diagnostic/orchestrate', async (req, res) => {
+  try {
+    const run = await runDiagnosticOrchestration(req.body || {});
+    return res.json({ ok: true, run });
+  } catch (e) {
+    return res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/api/agent/troubleshoot', async (req, res) => {
+  const {
+    presetId,
+    connection = null,
+    keepSession = false,
+    autoDisconnect = true,
+    sessionId: requestedSessionId,
+    cols = 220,
+    rows = 50,
+    ...payload
+  } = req.body || {};
+
+  let sessionId = requestedSessionId || '';
+  let autoConnected = false;
+
+  try {
+    if (!sessionId || !global.activeSessions.get(sessionId)) {
+      let baseConfig = {};
+      if (presetId) {
+        const preset = getPresetById(presetId);
+        if (!preset) {
+          return res.status(404).json({ ok: false, error: '登录预设不存在' });
+        }
+        baseConfig = preset;
+      }
+
+      const session = await connectManagedSession({
+        ...baseConfig,
+        ...(connection && typeof connection === 'object' ? connection : {}),
+        sessionId: sessionId || makeEntityId('agent-session'),
+        cols,
+        rows,
+      });
+      sessionId = session.sessionId;
+      autoConnected = true;
+    }
+
+    const run = await runDiagnosticOrchestration({
+      ...payload,
+      sessionId,
+    });
+
+    if (autoConnected && autoDisconnect && !keepSession) {
+      disconnectActiveSession(sessionId);
+    }
+
+    return res.json({
+      ok: true,
+      sessionId,
+      autoConnected,
+      keptSession: keepSession || !autoDisconnect,
+      run,
+    });
+  } catch (e) {
+    if (autoConnected && sessionId && autoDisconnect && !keepSession) {
+      disconnectActiveSession(sessionId);
+    }
+    return res.status(400).json({ ok: false, error: e.message });
   }
 });
 
@@ -1065,7 +1918,9 @@ wss.on('connection', (ws) => {
                   shellStream: stream,
                   enqueueShellCmd: enqueueShellCmd,
                   host: cfg.host,
-                  username: cfg.username
+                  port: cfg.port,
+                  username: cfg.username,
+                  managedBy: 'ui-shell',
                 });
               }
 
@@ -1137,6 +1992,19 @@ wss.on('connection', (ws) => {
       // ── 独立 exec 通道（快速测试，不共享 Shell 状态） ───────────────────
       case 'exec': {
         if (!ssh) { send({ type: 'exec_result', id: msg.id, error: '未连接' }); return; }
+        try {
+          assertCommandAllowed(msg.cmd, 'ws-exec');
+        } catch (e) {
+          send({
+            type: 'exec_result',
+            id: msg.id,
+            stdout: '',
+            stderr: e.message,
+            exitCode: -1,
+            durationMs: 0,
+          });
+          return;
+        }
         const startTs = Date.now();
         let stdout = '', stderr = '';
         ssh.exec(msg.cmd, (err, stream) => {
@@ -1203,6 +2071,24 @@ wss.on('connection', (ws) => {
             /\$\{([^}]+)\}/g,
             (_, name) => varContext[name] !== undefined ? varContext[name] : `\${${name}}`
           );
+
+          try {
+            assertCommandAllowed(resolvedCmd, 'ws-exec-plan');
+          } catch (e) {
+            send({
+              type:         'plan_step',
+              planId,
+              stepId:       step.id,
+              status:       'failed',
+              statusReason: e.message,
+              stdout:       '',
+              stderr:       e.message,
+              exitCode:     -1,
+              durationMs:   0,
+              resolvedCmd,
+            });
+            continue;
+          }
 
           send({ type: 'plan_step', planId, stepId: step.id, status: 'running',
                  resolvedCmd });

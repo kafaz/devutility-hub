@@ -10,6 +10,162 @@ If you are running the Agent remotely, you must tunnel this port using a tool li
 
 ---
 
+## 0. Agent 自动登录（MVP）
+
+为了让外部 Agent 可以仅通过 prompt 指定“使用哪个已配置的登录方式”，服务端新增了登录预设与自动建连接口。
+
+登录预设文件位于：
+
+- `server/data/agent-login-presets.json`
+
+可参考示例：
+
+- `server/data/agent-login-presets.example.json`
+- `server/examples/agent_connect.request.example.json`
+
+### 0.1 List Login Presets
+
+**Endpoint:** `GET /api/agent/login-presets`
+
+用途：
+
+- 列出当前可用的登录预设
+- Agent 可根据 `id` 或 `name` 选择使用哪个密钥/密码配置
+
+### 0.2 Save / Update Login Preset
+
+**Endpoint:** `POST /api/agent/login-presets`
+
+用途：
+
+- 保存或更新一条登录预设
+- 支持 `privateKey` / `password` / `agent`
+
+### 0.3 Connect by Preset
+
+**Endpoint:** `POST /api/agent/connect`
+
+**Request Example:**
+```json
+{
+  "presetId": "prod-root-key",
+  "sessionId": "agent-prod-001"
+}
+```
+
+**Response Example:**
+```json
+{
+  "ok": true,
+  "sessionId": "agent-prod-001",
+  "host": "192.168.1.10",
+  "port": 22,
+  "username": "root",
+  "managedBy": "agent-api",
+  "status": "connected"
+}
+```
+
+当返回 `ok: true` 时，表示 SSH 登录成功且交互式 Shell 已建立，可直接进入后续问题定位。
+
+也可直接使用样例请求文件：
+
+- `server/examples/agent_connect.request.example.json`
+
+---
+
+## 0.4 Command Policy
+
+服务端新增了命令白名单策略，用于在服务层统一拦截非法命令执行。
+
+当前策略特点：
+
+- 仅允许常见诊断类、只读类命令
+- 拦截破坏性命令和高风险操作
+- 在 `agent/execute`、`agent/troubleshoot`、`diagnostic/orchestrate` 以及 WebSocket `exec/exec_plan` 路径统一生效
+- 白名单允许在运行中动态修改，并持久化到 `server/data/command-policy.json`
+
+**Endpoint:** `GET /api/agent/command-policy`
+
+用途：
+
+- 查询当前服务端命令策略快照
+- 供前端或外部 Agent 了解当前允许的命令范围
+
+典型会被拦截的场景：
+
+- `rm -rf`
+- `dd if=`
+- `chmod` / `chown`
+- `kill` / `pkill`
+- `curl -X POST`
+- `sed -i`
+- `find -exec`
+- 非白名单命令入口
+
+可参考白名单文件示例：
+
+- `server/data/command-policy.example.json`
+
+### 0.4.1 Replace Full Whitelist
+
+**Endpoint:** `PUT /api/agent/command-policy`
+
+**Request Example:**
+```json
+{
+  "allowedBaseCommands": [
+    "echo",
+    "grep",
+    "ps",
+    "journalctl",
+    "curl"
+  ]
+}
+```
+
+用途：
+
+- 整体替换服务端白名单
+- 修改后立即生效，无需重启服务
+
+### 0.4.2 Add One Allowed Command
+
+**Endpoint:** `POST /api/agent/command-policy/allow`
+
+**Request Example:**
+```json
+{
+  "command": "kubectl"
+}
+```
+
+用途：
+
+- 在当前白名单基础上动态新增一条允许命令
+
+### 0.4.3 Remove One Allowed Command
+
+**Endpoint:** `DELETE /api/agent/command-policy/allow/:command`
+
+示例：
+
+- `DELETE /api/agent/command-policy/allow/curl`
+
+用途：
+
+- 从当前白名单中删除一条允许命令
+
+### 0.4.4 Reset Whitelist
+
+**Endpoint:** `POST /api/agent/command-policy/reset`
+
+用途：
+
+- 将白名单恢复为服务默认值
+
+---
+
 ## 1. List Connected Sessions
 Allows an agent to dynamically discover which servers the developer is currently connected to.
 
@@ -63,7 +219,7 @@ It blocks the HTTP request and awaits the final standard output + exit code to r
 ```json
 {
   "ok": false,
-  "error": "Session 不存在或已断开连接"   // Session does not exist or disconnected
+  "error": "Session 不存在或已断开连接"
 }
 ```
 *or* (If it timed out resolving the marker)
@@ -79,6 +235,8 @@ It blocks the HTTP request and awaits the final standard output + exit code to r
 }
 ```
 
+如果命令不在白名单内，服务会返回 `403`，并在错误信息中明确指出拦截原因。
+
 ---
 
 ## Technical Details for Agent Implementation
@@ -86,3 +244,75 @@ It blocks the HTTP request and awaits the final standard output + exit code to r
 1. **Statefulness:** Because commands share the exact same active Shell as the user interface, the Agent should avoid using highly destructive looping operations that cannot be killed. Calling interactive commands like `vim`, `top` or `nano` without a specific limit will lock the session until `timeout` crashes it out.
 2. **Standard Practice:** If you need to observe ongoing metrics, use commands like `ps aux` instead of `top`, or `cat filename` instead of `less`.
 3. **Execution Queues:** Commands are funneled through an atomic FIFO queue. If the user is currently running a heavy SOP plan, the Agent's command requested will wait patiently until the shell becomes free again.
+
+---
+
+## 3. Single-Agent Troubleshooting (MVP)
+
+当前提供一个 MVP 版本的单 Agent 问题定位入口，它会顺序完成：
+
+1. 自动登录（如果未提供活动 `sessionId`）
+2. 可选业务脚本执行
+3. 远程命令采集
+4. 日志分析与启发式发现
+5. 诊断报告归纳
+6. 结果归档到诊断知识库
+
+**Endpoint:** `POST /api/agent/troubleshoot`
+
+### Request Example
+
+```json
+{
+  "presetId": "prod-root-key",
+  "title": "订单接口超时诊断",
+  "symptom": "订单接口超时，部分节点返回 502",
+  "notes": "最近刚发布过新版本",
+  "collectionPlan": [
+    { "name": "检查进程", "command": "ps aux | grep order-service | grep -v grep" },
+    { "name": "最近日志", "command": "journalctl -n 100 --no-pager" }
+  ],
+  "analysisRules": [
+    { "name": "超时特征", "pattern": "timeout|timed out|超时", "source": "all", "severity": "critical", "summary": "日志中出现超时信号" }
+  ],
+  "businessActions": [
+    {
+      "name": "业务冒烟",
+      "scriptPath": "examples/business_smoke_test.py",
+      "args": ["--action", "health-check", "--target", "order-service"],
+      "stdinPayload": "{\"scene\":\"order-check\"}",
+      "runMode": "before_collection"
+    }
+  ],
+  "autoDisconnect": true
+}
+```
+
+也可直接使用样例请求文件：
+
+- `server/examples/agent_troubleshoot.request.example.json`
+
+### Response Example
+
+```json
+{
+  "ok": true,
+  "sessionId": "agent-session-abc123",
+  "autoConnected": true,
+  "keptSession": false,
+  "run": {
+    "id": "run-xxx",
+    "title": "订单接口超时诊断",
+    "status": "attention",
+    "collectionSteps": [],
+    "findings": [],
+    "report": {}
+  }
+}
+```
+
+说明：
+
+- 如果传入活动 `sessionId`，则会复用该会话
+- 如果未传入 `sessionId`，则会优先使用 `presetId` 自动登录
+- `autoDisconnect=true` 时，排障完成后自动断开该 Agent 建立的 SSH 会话
