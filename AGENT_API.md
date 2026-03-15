@@ -166,6 +166,33 @@ If you are running the Agent remotely, you must tunnel this port using a tool li
 
 ---
 
+
+## 0.5 Open Session (Two Modes)
+
+**Endpoint:** `POST /api/agent/sessions/open`
+
+该接口现支持两种建连模式：
+
+1. **node/direct 模式**（原有行为）
+   - 传入 `nodeId`（推荐），或 `connection` + 可选 `auth/jumpAuth`
+   - 用于节点注册体系内或临时直连
+2. **preset 模式**（新增兼容）
+   - 传入 `presetId`（可选 `sessionId`）
+   - 服务端会复用 `connect` 逻辑自动登录
+
+### 0.5.1 `open` with presetId
+
+```json
+{
+  "presetId": "prod-root-key"
+}
+```
+
+成功时返回可用会话信息（含 `sessionId`），后续可直接调用：
+
+- `GET /api/agent/sessions`
+- `GET /api/agent/sessions/:sessionId`
+
 ## 1. List Connected Sessions
 Allows an agent to dynamically discover which servers the developer is currently connected to.
 

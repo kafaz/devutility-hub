@@ -38,12 +38,35 @@ export DEVUTILITY_AGENT_BASE_URL=http://127.0.0.1:3001
 - `list_nodes`
 - `resolve_node`
 - `list_prepare_profiles`
-- `open_session`
+- `open_session` (supports node/direct mode and preset auto-login mode)
 - `list_sessions`
 - `get_session`
 - `prepare_session`
 - `run_command`
 - `close_session`
+
+
+### `open_session` Modes
+
+`open_session` now supports two connection modes:
+
+1. **node/direct mode** (default):
+   - Provide `nodeId`, or `connection` (+ optional `auth` / `jumpAuth`)
+   - MCP forwards request to `POST /api/agent/sessions/open`
+2. **preset mode**:
+   - Provide `presetId` (optional `sessionId`)
+   - MCP forwards request to `POST /api/agent/connect`
+   - Suitable for Agent auto-login with preconfigured credentials only
+
+Example preset mode payload:
+
+```json
+{
+  "presetId": "prod-root-key"
+}
+```
+
+Example request file: `examples/open_session_preset.request.json`
 
 ## Generic MCP Client Configuration
 

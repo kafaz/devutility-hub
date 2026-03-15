@@ -1259,6 +1259,50 @@ app.patch('/api/agent/prepare-profiles/:profileId', (req, res) => {
 
 // agent 自建会话
 app.post('/api/agent/sessions/open', async (req, res) => {
+  if (req.body?.presetId) {
+    const {
+      presetId,
+      sessionId = makeEntityId('agent-session'),
+      cols = 220,
+      rows = 50,
+      ...overrides
+    } = req.body || {};
+
+    let baseConfig = {};
+    if (presetId) {
+      const preset = getPresetById(presetId);
+      if (!preset) {
+        return res.status(404).json({ ok: false, error: '登录预设不存在' });
+      }
+      baseConfig = preset;
+    }
+
+    const connectConfig = {
+      ...baseConfig,
+      ...overrides,
+      sessionId,
+      cols,
+      rows,
+    };
+
+    try {
+      const session = await connectManagedSession(connectConfig);
+      return res.json({
+        ok: true,
+        data: {
+          sessionId: session.sessionId,
+          host: session.host,
+          port: session.port,
+          username: session.username,
+          managedBy: session.managedBy,
+          status: 'connected',
+        },
+      });
+    } catch (e) {
+      return res.status(400).json({ ok: false, error: e.message });
+    }
+  }
+
   let sessionId = null;
   try {
     const { node, connectConfig, jumpConfig, name, host, port, username } = materializeConnectionSpec(req.body || {});

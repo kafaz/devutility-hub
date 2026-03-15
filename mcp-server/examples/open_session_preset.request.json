@@ -1,0 +1,13 @@
+{
+  "tool": "open_session",
+  "arguments": {
+    "presetId": "prod-root-key"
+  },
+  "expected": {
+    "contains": ["sessionId", "status"]
+  },
+  "followup": [
+    "list_sessions",
+    "get_session(sessionId from open_session)"
+  ]
+}
