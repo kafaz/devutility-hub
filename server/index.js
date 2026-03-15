@@ -70,6 +70,7 @@ const {
   removeAllowedBaseCommand,
   replaceAllowedBaseCommands,
   resetCommandPolicy,
+  validateCommandPolicy,
 } = require('./commandPolicy');
 
 const app    = express();
@@ -973,11 +974,10 @@ function writeAgentAuditLog(text) {
   fs.appendFileSync(logFilePath, text, 'utf8');
 }
 
-function getBlockedCommandError(cmd) {
-  for (const regex of AGENT_COMMAND_BLACKLIST) {
-    if (regex.test(cmd)) {
-      return `[Agent Security Block] 拒绝执行具有受限或破坏性特征的命令: ${cmd}`;
-    }
+function getBlockedCommandError(cmd, context = 'agent-command') {
+  const result = validateCommandPolicy(cmd, context);
+  if (!result.ok) {
+    return `[Command Policy Block] ${result.reason}: ${cmd}`;
   }
   return null;
 }
@@ -1093,7 +1093,7 @@ async function executeStructuredSteps(session, steps, opts = {}) {
       (_, name) => varContext[name] !== undefined ? varContext[name] : `\${${name}}`
     );
 
-    const blocked = getBlockedCommandError(resolvedCmd);
+    const blocked = getBlockedCommandError(resolvedCmd, 'structured-steps');
     if (blocked) {
       results.push({
         name: step.name || resolvedCmd,
@@ -1380,7 +1380,7 @@ app.post('/api/agent/sessions/:sessionId/commands', async (req, res) => {
     return res.status(400).json({ ok: false, error: '缺少 cmd 参数' });
   }
 
-  const blocked = getBlockedCommandError(cmd);
+  const blocked = getBlockedCommandError(cmd, 'agent-session-command');
   if (blocked) {
     return res.status(403).json({ ok: false, error: blocked });
   }
