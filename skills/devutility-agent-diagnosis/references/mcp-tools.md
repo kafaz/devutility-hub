@@ -9,7 +9,8 @@ Use the tools in this order for most investigations:
 3. `list_prepare_profiles` when a prepare profile is needed
 4. `prepare_session`
 5. `run_command`
-6. `close_session`
+6. `get_session_logs` (optional, use when user asks for command trace)
+7. `close_session`
 
 ## Tool Summary
 
@@ -103,6 +104,26 @@ Example input:
 ```
 
 Use `mode="exec"` only for stateless checks.
+
+
+### `get_session_logs`
+
+Retrieve recent per-session logs captured by the server.
+
+Use this when users ask:
+
+- which commands the Agent actually executed
+- what stdout/stderr was returned
+- whether command policy blocked a command
+
+Example input:
+
+```json
+{
+  "sessionId": "agent_xxx",
+  "limit": 120
+}
+```
 
 ### `close_session`
 

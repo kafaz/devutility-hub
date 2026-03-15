@@ -43,6 +43,7 @@ export DEVUTILITY_AGENT_BASE_URL=http://127.0.0.1:3001
 - `get_session`
 - `prepare_session`
 - `run_command`
+- `get_session_logs`
 - `close_session`
 
 
@@ -67,6 +68,22 @@ Example preset mode payload:
 ```
 
 Example request file: `examples/open_session_preset.request.json`
+
+## `get_session_logs`
+
+Query recent in-memory logs for a given session.
+
+This is useful when you need to inspect what the Agent executed and what output came back (stdout/stderr snapshots) without parsing full run history.
+
+Example input:
+
+```json
+{
+  "sessionId": "agent_xxx",
+  "limit": 80
+}
+```
+
 
 ## Generic MCP Client Configuration
 
@@ -93,4 +110,5 @@ Example environment:
 3. `list_prepare_profiles`
 4. `prepare_session`
 5. `run_command`
-6. `close_session`
+6. `get_session_logs` (optional, for audit/traceability)
+7. `close_session`

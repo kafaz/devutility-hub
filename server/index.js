@@ -79,6 +79,29 @@ const wss    = new WebSocketServer({ server, path: '/terminal' });
 
 // 全局 Session 会话池 - 供 Agent / MCP Remote API 访问
 global.activeSessions = new Map();
+global.agentSessionLogs = new Map();
+
+const AGENT_SESSION_LOG_LIMIT = 200;
+
+function trimLogText(value, maxLen = 12000) {
+  const text = String(value || '');
+  if (text.length <= maxLen) return text;
+  return `${text.slice(0, maxLen)}\n...[truncated ${text.length - maxLen} chars]`;
+}
+
+function appendSessionLog(sessionId, payload) {
+  if (!sessionId) return;
+  const logs = global.agentSessionLogs.get(sessionId) || [];
+  logs.push({
+    id: makeEntityId('agent-log'),
+    ts: Date.now(),
+    ...payload,
+  });
+  if (logs.length > AGENT_SESSION_LOG_LIMIT) {
+    logs.splice(0, logs.length - AGENT_SESSION_LOG_LIMIT);
+  }
+  global.agentSessionLogs.set(sessionId, logs);
+}
 
 app.use(cors({ origin: '*' }));
 app.use(express.json());
@@ -1315,6 +1338,11 @@ app.post('/api/agent/sessions/open', async (req, res) => {
           (node?.nodeId && info.nodeId === node.nodeId) ||
           (info.host === host && info.username === username)
         )) {
+          appendSessionLog(sessionId, {
+            type: 'session_reused',
+            level: 'info',
+            message: `会话已复用: ${info.username}@${info.host}`,
+          });
           return res.json({ ok: true, data: info, reused: true });
         }
       }
@@ -1339,6 +1367,11 @@ app.post('/api/agent/sessions/open', async (req, res) => {
 
     global.activeSessions.set(sessionId, managedSession);
     await managedSession.connect();
+    appendSessionLog(sessionId, {
+      type: 'session_opened',
+      level: 'info',
+      message: `会话已建立: ${username}@${host}:${port}`,
+    });
     res.json({ ok: true, data: managedSession.getInfo() });
   } catch (e) {
     if (sessionId) {
@@ -1385,7 +1418,30 @@ app.delete('/api/agent/sessions/:sessionId', (req, res) => {
     global.activeSessions.delete(req.params.sessionId);
   }
 
+  appendSessionLog(req.params.sessionId, {
+    type: 'session_closed',
+    level: 'info',
+    message: '会话已被 API 主动关闭',
+  });
+
   res.json({ ok: true, data: { sessionId: req.params.sessionId, closed: true } });
+});
+
+app.get('/api/agent/sessions/:sessionId/logs', (req, res) => {
+  const sessionId = req.params.sessionId;
+  const limit = Math.min(Math.max(Number(req.query.limit || 120), 1), AGENT_SESSION_LOG_LIMIT);
+  const logs = global.agentSessionLogs.get(sessionId) || [];
+  const session = global.activeSessions.get(sessionId);
+
+  res.json({
+    ok: true,
+    data: {
+      sessionId,
+      session: describeSession(sessionId, session),
+      total: logs.length,
+      logs: logs.slice(-limit),
+    },
+  });
 });
 
 app.post('/api/agent/sessions/:sessionId/prepare', async (req, res) => {
@@ -1426,6 +1482,13 @@ app.post('/api/agent/sessions/:sessionId/commands', async (req, res) => {
 
   const blocked = getBlockedCommandError(cmd, 'agent-session-command');
   if (blocked) {
+    appendSessionLog(req.params.sessionId, {
+      type: 'command_blocked',
+      level: 'warning',
+      cmd,
+      mode,
+      message: blocked,
+    });
     return res.status(403).json({ ok: false, error: blocked });
   }
 
@@ -1435,9 +1498,27 @@ app.post('/api/agent/sessions/:sessionId/commands', async (req, res) => {
   }
 
   const startTime = new Date().toISOString();
+  appendSessionLog(req.params.sessionId, {
+    type: 'command_started',
+    level: 'info',
+    cmd,
+    mode,
+    message: `开始执行命令 (${mode})`,
+  });
 
   try {
     const result = await executeSingleCommand(session, cmd, timeoutMs, mode);
+    appendSessionLog(req.params.sessionId, {
+      type: 'command_result',
+      level: result.exitCode === 0 ? 'info' : 'warning',
+      cmd,
+      mode,
+      exitCode: result.exitCode,
+      durationMs: result.durationMs,
+      stdout: trimLogText(result.stdout),
+      stderr: trimLogText(result.stderr),
+      message: `命令执行完成，exit=${result.exitCode}，duration=${result.durationMs}ms`,
+    });
     writeAgentAuditLog(
       `[${startTime}] Agent Command on ${session.username}@${session.host} (Session: ${req.params.sessionId})\n` +
       `Mode    : ${mode}\n` +
@@ -1450,6 +1531,13 @@ app.post('/api/agent/sessions/:sessionId/commands', async (req, res) => {
     );
     res.json({ ok: true, data: result });
   } catch (e) {
+    appendSessionLog(req.params.sessionId, {
+      type: 'command_error',
+      level: 'error',
+      cmd,
+      mode,
+      message: e.message,
+    });
     writeAgentAuditLog(
       `[${startTime}] Agent Command ERR on ${session.username}@${session.host} (Session: ${req.params.sessionId})\n` +
       `Command: ${cmd}\nError: ${e.message}\n---------------------------------------------------\n`

@@ -119,6 +119,24 @@ server.tool(
   }
 );
 
+
+server.tool(
+  "get_session_logs",
+  "Get recent Agent session activity logs, including command execution and returned stdout/stderr snapshots.",
+  {
+    sessionId: z.string().min(1),
+    limit: z.number().int().positive().max(200).optional(),
+  },
+  async ({ sessionId, limit }) => {
+    const query = limit ? `?limit=${encodeURIComponent(String(limit))}` : "";
+    const data = await requestApi(
+      "GET",
+      `/api/agent/sessions/${encodeURIComponent(sessionId)}/logs${query}`
+    );
+    return formatResult("Session logs", data);
+  }
+);
+
 server.tool(
   "prepare_session",
   "Run pre-operation steps inside an existing PTY-backed session. Use profileId when possible, or pass explicit steps.",

@@ -48,6 +48,20 @@ interface SessionOption {
   username: string;
 }
 
+interface AgentSessionLogItem {
+  id: string;
+  ts: number;
+  type: string;
+  level?: 'info' | 'warning' | 'error';
+  cmd?: string;
+  mode?: 'pty' | 'exec' | string;
+  message?: string;
+  exitCode?: number;
+  durationMs?: number;
+  stdout?: string;
+  stderr?: string;
+}
+
 interface SimilarCase {
   runId: string;
   title: string;
@@ -199,6 +213,8 @@ const DiagnosticWorkbench: React.FC = () => {
   const [commandPolicy, setCommandPolicy] = useState<CommandPolicySnapshot | null>(null);
   const [newAllowedCommand, setNewAllowedCommand] = useState('');
   const [policyEditorValue, setPolicyEditorValue] = useState('');
+  const [sessionLogs, setSessionLogs] = useState<AgentSessionLogItem[]>([]);
+  const [loadingSessionLogs, setLoadingSessionLogs] = useState(false);
 
   useEffect(() => {
     if (!activePlaybook) return;
@@ -212,6 +228,18 @@ const DiagnosticWorkbench: React.FC = () => {
     void fetchRuns();
     void fetchCommandPolicy();
   }, []);
+
+  useEffect(() => {
+    if (!selectedSessionId) {
+      setSessionLogs([]);
+      return;
+    }
+    void fetchSessionLogs(selectedSessionId, false);
+    const timer = window.setInterval(() => {
+      void fetchSessionLogs(selectedSessionId, false);
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [selectedSessionId]);
 
   async function fetchSessions() {
     setLoadingSessions(true);
@@ -239,6 +267,25 @@ const DiagnosticWorkbench: React.FC = () => {
       messageApi.warning('未能加载诊断知识库历史记录');
     } finally {
       setLoadingRuns(false);
+    }
+  }
+
+  async function fetchSessionLogs(sessionId: string, withLoading = true) {
+    if (withLoading) setLoadingSessionLogs(true);
+    try {
+      const response = await fetch(`${PROXY_HTTP}/api/agent/sessions/${encodeURIComponent(sessionId)}/logs?limit=120`);
+      const data = await response.json();
+      if (!data.ok) {
+        messageApi.warning(data.error || '会话日志拉取失败');
+        return;
+      }
+      setSessionLogs(Array.isArray(data.data?.logs) ? data.data.logs : []);
+    } catch {
+      if (withLoading) {
+        messageApi.warning('会话日志拉取失败');
+      }
+    } finally {
+      if (withLoading) setLoadingSessionLogs(false);
     }
   }
 
@@ -700,6 +747,74 @@ const DiagnosticWorkbench: React.FC = () => {
                             <Tag key={signal}>{signal}</Tag>
                           ))}
                         </div>
+                      </Space>
+                    }
+                  />
+                </List.Item>
+              )}
+            />
+          )}
+        </Card>
+      </div>
+
+      <div style={{ marginTop: 16 }}>
+        <Card
+          title="Agent 会话监控"
+          extra={
+            <Space>
+              <Tag color={selectedSessionId ? 'processing' : 'default'}>{selectedSessionId || '未选择会话'}</Tag>
+              <Button
+                icon={<ReloadOutlined />}
+                size="small"
+                disabled={!selectedSessionId}
+                onClick={() => selectedSessionId && void fetchSessionLogs(selectedSessionId, true)}
+              >
+                刷新日志
+              </Button>
+            </Space>
+          }
+        >
+          {!selectedSessionId ? (
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请先选择目标 SSH 会话" />
+          ) : loadingSessionLogs && sessionLogs.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: '20px 0' }}>
+              <Spin />
+            </div>
+          ) : sessionLogs.length === 0 ? (
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前会话暂无日志" />
+          ) : (
+            <List
+              size="small"
+              dataSource={[...sessionLogs].reverse()}
+              renderItem={(item) => (
+                <List.Item>
+                  <List.Item.Meta
+                    title={
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                        <Text strong>{item.type}</Text>
+                        <Tag color={item.level === 'error' ? 'red' : item.level === 'warning' ? 'orange' : 'blue'}>{item.level || 'info'}</Tag>
+                        <Text type="secondary">{formatTs(item.ts)}</Text>
+                        {typeof item.exitCode === 'number' && <Tag color={item.exitCode === 0 ? 'green' : 'red'}>exit {item.exitCode}</Tag>}
+                        {typeof item.durationMs === 'number' && <Tag>{item.durationMs}ms</Tag>}
+                        {item.mode && <Tag>{item.mode}</Tag>}
+                      </div>
+                    }
+                    description={
+                      <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                        {item.cmd && <Text code>{item.cmd}</Text>}
+                        {item.message && <Text>{item.message}</Text>}
+                        {item.stdout && (
+                          <div>
+                            <Text strong>stdout</Text>
+                            <ResizableOutput content={item.stdout} isDark={isDark} minHeight={56} maxHeight={180} />
+                          </div>
+                        )}
+                        {item.stderr && (
+                          <div>
+                            <Text strong>stderr</Text>
+                            <ResizableOutput content={item.stderr} isDark={isDark} minHeight={56} maxHeight={180} />
+                          </div>
+                        )}
                       </Space>
                     }
                   />
