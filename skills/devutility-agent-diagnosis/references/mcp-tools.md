@@ -2,17 +2,41 @@
 
 ## Tool Order
 
-Use the tools in this order for most investigations:
+Use one of these two paths.
+
+When a SOP is available, let the SOP structure decide which path should dominate. Use the tools to implement the SOP's intent, variables, checks, and follow-up branches.
+
+### Fast First Pass
+
+1. `recall_similar_runs`
+2. `troubleshoot`
+3. `get_diagnostic_run`
+4. `get_session_logs` or `run_command` for targeted follow-up
+5. `close_session`
+
+### Interactive Drill-Down
 
 1. `resolve_node` or `list_nodes`
 2. `open_session`
 3. `list_prepare_profiles` when a prepare profile is needed
 4. `prepare_session`
 5. `run_command`
-6. `get_session_logs` (optional, use when user asks for command trace)
-7. `close_session`
+6. `get_session_logs`
+7. `recall_similar_runs` when a historical case may unblock the diagnosis
+8. `close_session`
 
 ## Tool Summary
+
+## SOP Note
+
+This repository already has SOP templates and server-side `exec_plan`, but the current MCP layer does not yet expose first-class SOP tools such as `list_sop_templates` or `run_sop`.
+
+Until those tools exist:
+
+- use SOP as a reasoning scaffold
+- translate SOP variables into the inputs you pass to `troubleshoot`, `prepare_session`, and `run_command`
+- translate SOP checks into bounded command batches
+- record any missing branch as candidate SOP material instead of leaving it implicit
 
 ### `list_nodes`
 
@@ -57,6 +81,8 @@ Example input:
 ```
 
 Use direct `connection` only when the node is not registered.
+
+You can also pass direct top-level fields such as `host`, `port`, `username`, `password`, `keyContent`, or `keyFilePath`.
 
 ### `list_prepare_profiles`
 
@@ -105,6 +131,39 @@ Example input:
 
 Use `mode="exec"` only for stateless checks.
 
+### `troubleshoot`
+
+Run the single-agent first-pass diagnosis flow.
+
+Use this when the user already has a target, a symptom, and a bounded collection plan, and you want one structured run that combines:
+
+- optional auto-login
+- collection
+- analysis
+- report generation
+- knowledge-base archiving
+
+Prefer `keepSession=true` when you expect a second interactive round after the first-pass results.
+This is also the preferred first-pass executor when you are reusing a SOP concept but do not yet have a formal MCP `run_sop` tool.
+
+### `recall_similar_runs`
+
+Recall similar historical diagnostic runs before or during an investigation.
+
+Use this when:
+
+- the symptom is broad
+- the first pass is stuck
+- the user wants known-good next commands
+
+### `get_diagnostic_run`
+
+Fetch the archived output of one diagnosis run.
+
+Use this after `troubleshoot` when you need the structured findings and report before deciding the next manual commands.
+
+Use it as the evidence base for deciding whether a new SOP fragment should be proposed.
+
 
 ### `get_session_logs`
 
@@ -141,3 +200,7 @@ Treat these fields as primary evidence:
 Do not treat an empty `stdout` as success by itself. Always consider `exitCode` and the command semantics.
 
 When a prepare step or command fails, report the exact failed step and the output that supports the conclusion.
+
+When `troubleshoot` and manual commands disagree, trust the raw evidence and explain the discrepancy instead of hiding it.
+
+When an existing SOP and the raw evidence disagree, explain whether the SOP is stale, incomplete, or misapplied.

@@ -15,6 +15,23 @@ function makeMarkerId() {
 const mkS = (id) => `===S:${id}===`;
 const mkE = (id) => `===E:${id}===:`;
 
+function normalizeManagedSSHError(err, cfg, prefix = '') {
+  const scope = prefix ? `${prefix}` : '';
+  if (/authentication/i.test(err.message)) {
+    return `${scope}认证失败：请检查密钥、口令或密码是否正确`.trim();
+  }
+  if (/ECONNREFUSED/.test(err.message)) {
+    return `${scope}连接被拒绝：${cfg.host}:${cfg.port} 不可达`.trim();
+  }
+  if (/ETIMEDOUT/.test(err.message)) {
+    return `${scope}连接超时：${cfg.host}:${cfg.port} 无响应`.trim();
+  }
+  if (/ENOTFOUND|getaddrinfo/i.test(err.message)) {
+    return `${scope}主机名解析失败：${cfg.host}`.trim();
+  }
+  return `${scope}${err.message}`.trim();
+}
+
 class ManagedAgentSession {
   constructor(params) {
     this.sessionId = params.sessionId;
@@ -72,7 +89,7 @@ class ManagedAgentSession {
       const fail = (error) => {
         if (this.status === 'closed' || this.status === 'connected') return;
         this.status = 'error';
-        reject(error);
+        reject(new Error(normalizeManagedSSHError(error, this.connectConfig)));
       };
 
       const handleReady = () => {
@@ -119,7 +136,11 @@ class ManagedAgentSession {
           });
         });
 
-        jumpSsh.on('error', fail);
+        jumpSsh.on('error', (error) => {
+          if (this.status === 'closed' || this.status === 'connected') return;
+          this.status = 'error';
+          reject(new Error(normalizeManagedSSHError(error, this.jumpConfig, '跳板机')));
+        });
         jumpSsh.on('end', () => {
           if (this.status !== 'closed') {
             this.handleClose('jump_ssh_end');

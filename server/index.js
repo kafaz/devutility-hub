@@ -38,6 +38,8 @@ const crypto = require('crypto');
 const { simpleGit } = require('simple-git');
 const { ManagedAgentSession } = require('./lib/managedAgentSession');
 const {
+  deleteNode,
+  deletePrepareProfile,
   getNode,
   getPrepareProfile,
   listNodes,
@@ -455,8 +457,13 @@ async function connectManagedSession({
     let jumpClient = null;
     let settled = false;
     let disposer = null;
+    let session = null;
 
     const cleanup = () => {
+      if (session) {
+        session.status = 'closed';
+        session.lastActivityAt = Date.now();
+      }
       if (disposer) {
         disposer('Shell 已关闭');
         disposer = null;
@@ -496,17 +503,30 @@ async function connectManagedSession({
         const queue = createManagedCommandQueue(stream);
         disposer = queue.dispose;
 
-        const session = {
+        session = {
           sessionId,
           sshClient: ssh,
           jumpClient,
           shellStream: stream,
-          enqueueShellCmd: queue.enqueueShellCmd,
+          createdAt: Date.now(),
+          connectedAt: Date.now(),
+          lastActivityAt: Date.now(),
           host: cfg.host,
           port: cfg.port,
           username: cfg.username,
+          source: 'agent-api',
           managedBy: 'agent-api',
-          close,
+          status: 'connected',
+          enqueueShellCmd: async (cmd, timeoutMs) => {
+            session.lastActivityAt = Date.now();
+            const result = await queue.enqueueShellCmd(cmd, timeoutMs);
+            session.lastActivityAt = Date.now();
+            return result;
+          },
+          close: (reason) => {
+            session.status = 'closed';
+            close(reason);
+          },
         };
 
         global.activeSessions.set(sessionId, session);
@@ -810,6 +830,14 @@ function evalOutputStatus(stdout, opts) {
 }
 
 /** 构造 paramiko 等效连接配置 */
+function inferAuthType(msg = {}) {
+  if (msg.authType) return msg.authType;
+  if (msg.password) return 'password';
+  if (msg.keyContent || msg.keyFilePath || msg.privateKey) return 'privateKey';
+  if (msg.agent || process.env.SSH_AUTH_SOCK) return 'agent';
+  return 'privateKey';
+}
+
 function buildConnectConfig(msg) {
   const cfg = {
     host:              msg.host,
@@ -820,11 +848,16 @@ function buildConnectConfig(msg) {
     keepaliveCountMax: 5,
   };
 
-  const authType = msg.authType || 'privateKey';
+  if (!cfg.host) throw new Error('缺少 host');
+  if (!cfg.username) throw new Error('缺少 username');
+
+  const authType = inferAuthType(msg);
 
   if (authType === 'privateKey') {
-    if (msg.keyContent) {
-      cfg.privateKey = msg.keyContent;
+    if (Buffer.isBuffer(msg.privateKey)) {
+      cfg.privateKey = msg.privateKey;
+    } else if (msg.keyContent || msg.privateKey) {
+      cfg.privateKey = msg.keyContent || msg.privateKey;
     } else if (msg.keyFilePath) {
       const resolved = msg.keyFilePath.startsWith('~')
         ? path.join(process.env.HOME || process.env.USERPROFILE || '', msg.keyFilePath.slice(1))
@@ -907,6 +940,7 @@ app.post('/api/agent/connect', async (req, res) => {
     sessionId = makeEntityId('agent-session'),
     cols = 220,
     rows = 50,
+    reuseIfExists = true,
     ...overrides
   } = req.body || {};
 
@@ -928,15 +962,35 @@ app.post('/api/agent/connect', async (req, res) => {
   };
 
   try {
+    if (reuseIfExists) {
+      const reusable = findReusableSession({
+        host: connectConfig.host,
+        port: connectConfig.port || 22,
+        username: connectConfig.username,
+      });
+      if (reusable) {
+        return res.json({
+          ok: true,
+          ...reusable,
+          data: reusable,
+          reused: true,
+        });
+      }
+    }
+
     const session = await connectManagedSession(connectConfig);
-    return res.json({
-      ok: true,
+    const data = {
       sessionId: session.sessionId,
       host: session.host,
       port: session.port,
       username: session.username,
       managedBy: session.managedBy,
       status: 'connected',
+    };
+    return res.json({
+      ok: true,
+      ...data,
+      data,
     });
   } catch (e) {
     return res.status(400).json({ ok: false, error: e.message });
@@ -1005,6 +1059,30 @@ function getBlockedCommandError(cmd, context = 'agent-command') {
   return null;
 }
 
+function extractDirectConnectionFromBody(body = {}) {
+  if (!body || typeof body !== 'object') return null;
+  if (body.connection && typeof body.connection === 'object') return null;
+  if (!body.host && !body.username && !body.password && !body.keyContent && !body.keyFilePath && !body.agent) {
+    return null;
+  }
+
+  return {
+    name: body.name,
+    host: body.host,
+    port: body.port || 22,
+    username: body.username,
+    authType: body.authType,
+    keyContent: body.keyContent,
+    keyFilePath: body.keyFilePath,
+    passphrase: body.passphrase,
+    password: body.password,
+    agent: body.agent,
+    readyTimeout: body.readyTimeout,
+    jumpHost: body.jumpHost,
+    jumpHostId: body.jumpHostId,
+  };
+}
+
 function sanitizeNode(node) {
   if (!node) return null;
   const {
@@ -1026,12 +1104,36 @@ function describeSession(sessionId, session) {
     port: session.port || 22,
     username: session.username,
     source: session.source || 'ui',
-    status: 'connected',
+    managedBy: session.managedBy || null,
+    status: session.status || 'connected',
     createdAt: session.createdAt || null,
     connectedAt: session.connectedAt || null,
     lastActivityAt: session.lastActivityAt || null,
     shellReady: Boolean(session.shellStream || session.shell),
   };
+}
+
+function findReusableSession({ nodeId, host, port, username }) {
+  for (const [existingSessionId, session] of global.activeSessions.entries()) {
+    const info = describeSession(existingSessionId, session);
+    if (info?.status !== 'connected') continue;
+
+    if (nodeId && info.nodeId === nodeId) {
+      return info;
+    }
+
+    if (
+      host &&
+      username &&
+      info.host === host &&
+      info.username === username &&
+      Number(info.port || 22) === Number(port || 22)
+    ) {
+      return info;
+    }
+  }
+
+  return null;
 }
 
 function resolveJumpSource(connection) {
@@ -1055,7 +1157,11 @@ function materializeConnectionSpec(body) {
   }
 
   if (!rawConnection) {
-    throw new Error('缺少 nodeId 或 connection 参数');
+    rawConnection = extractDirectConnectionFromBody(body);
+  }
+
+  if (!rawConnection) {
+    throw new Error('缺少 nodeId、connection，或顶层 host/username 直连参数');
   }
 
   const authOverrides = body.auth || {};
@@ -1259,6 +1365,14 @@ app.patch('/api/agent/nodes/:nodeId', (req, res) => {
   res.json({ ok: true, data: sanitizeNode(saved) });
 });
 
+app.delete('/api/agent/nodes/:nodeId', (req, res) => {
+  const deleted = deleteNode(req.params.nodeId);
+  if (!deleted) {
+    return res.status(404).json({ ok: false, error: '节点不存在' });
+  }
+  res.json({ ok: true });
+});
+
 // 预操作模板
 app.get('/api/agent/prepare-profiles', (_req, res) => {
   res.json({ ok: true, data: listPrepareProfiles() });
@@ -1280,6 +1394,14 @@ app.patch('/api/agent/prepare-profiles/:profileId', (req, res) => {
   res.json({ ok: true, data: saved });
 });
 
+app.delete('/api/agent/prepare-profiles/:profileId', (req, res) => {
+  const deleted = deletePrepareProfile(req.params.profileId);
+  if (!deleted) {
+    return res.status(404).json({ ok: false, error: '预操作模板不存在' });
+  }
+  res.json({ ok: true });
+});
+
 // agent 自建会话
 app.post('/api/agent/sessions/open', async (req, res) => {
   if (req.body?.presetId) {
@@ -1288,6 +1410,7 @@ app.post('/api/agent/sessions/open', async (req, res) => {
       sessionId = makeEntityId('agent-session'),
       cols = 220,
       rows = 50,
+      reuseIfExists = true,
       ...overrides
     } = req.body || {};
 
@@ -1309,6 +1432,17 @@ app.post('/api/agent/sessions/open', async (req, res) => {
     };
 
     try {
+      if (reuseIfExists) {
+        const reusable = findReusableSession({
+          host: connectConfig.host,
+          port: connectConfig.port || 22,
+          username: connectConfig.username,
+        });
+        if (reusable) {
+          return res.json({ ok: true, data: reusable, reused: true });
+        }
+      }
+
       const session = await connectManagedSession(connectConfig);
       return res.json({
         ok: true,
@@ -1332,19 +1466,19 @@ app.post('/api/agent/sessions/open', async (req, res) => {
     const reuseIfExists = req.body?.reuseIfExists !== false;
 
     if (reuseIfExists) {
-      for (const [sessionId, session] of global.activeSessions.entries()) {
-        const info = describeSession(sessionId, session);
-        if (info?.status === 'connected' && (
-          (node?.nodeId && info.nodeId === node.nodeId) ||
-          (info.host === host && info.username === username)
-        )) {
-          appendSessionLog(sessionId, {
-            type: 'session_reused',
-            level: 'info',
-            message: `会话已复用: ${info.username}@${info.host}`,
-          });
-          return res.json({ ok: true, data: info, reused: true });
-        }
+      const reusable = findReusableSession({
+        nodeId: node?.nodeId,
+        host,
+        port,
+        username,
+      });
+      if (reusable) {
+        appendSessionLog(reusable.sessionId, {
+          type: 'session_reused',
+          level: 'info',
+          message: `会话已复用: ${reusable.username}@${reusable.host}`,
+        });
+        return res.json({ ok: true, data: reusable, reused: true });
       }
     }
 
@@ -1705,15 +1839,34 @@ app.post('/api/agent/troubleshoot', async (req, res) => {
         baseConfig = preset;
       }
 
-      const session = await connectManagedSession({
+      const directConnection = extractDirectConnectionFromBody(req.body || {});
+      const connectSource = {
         ...baseConfig,
+        ...(directConnection || {}),
         ...(connection && typeof connection === 'object' ? connection : {}),
-        sessionId: sessionId || makeEntityId('agent-session'),
-        cols,
-        rows,
-      });
-      sessionId = session.sessionId;
-      autoConnected = true;
+      };
+
+      if (req.body?.reuseIfExists !== false) {
+        const reusable = findReusableSession({
+          host: connectSource.host,
+          port: connectSource.port || 22,
+          username: connectSource.username,
+        });
+        if (reusable) {
+          sessionId = reusable.sessionId;
+        }
+      }
+
+      if (!sessionId || !global.activeSessions.get(sessionId)) {
+        const session = await connectManagedSession({
+          ...connectSource,
+          sessionId: sessionId || makeEntityId('agent-session'),
+          cols,
+          rows,
+        });
+        sessionId = session.sessionId;
+        autoConnected = true;
+      }
     }
 
     const run = await runDiagnosticOrchestration({
@@ -1725,12 +1878,17 @@ app.post('/api/agent/troubleshoot', async (req, res) => {
       disconnectActiveSession(sessionId);
     }
 
-    return res.json({
-      ok: true,
+    const data = {
       sessionId,
       autoConnected,
       keptSession: keepSession || !autoDisconnect,
       run,
+    };
+
+    return res.json({
+      ok: true,
+      ...data,
+      data,
     });
   } catch (e) {
     if (autoConnected && sessionId && autoDisconnect && !keepSession) {

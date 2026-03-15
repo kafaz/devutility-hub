@@ -1,4 +1,4 @@
 interface:
   display_name: "DevUtility Diagnosis"
-  short_description: "Use DevUtility MCP tools for remote diagnosis."
-  default_prompt: "Use $devutility-agent-diagnosis to diagnose a remote node through the local DevUtility Hub MCP tools."
+  short_description: "Use DevUtility MCP tools for SOP-aware remote diagnosis with user handoff when stuck."
+  default_prompt: "Use $devutility-agent-diagnosis to diagnose a remote node through the local DevUtility Hub MCP tools, prefer reusable SOP structure when it applies, and switch into a structured user-collaboration loop when evidence is weak."

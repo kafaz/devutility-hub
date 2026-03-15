@@ -193,6 +193,48 @@ If you are running the Agent remotely, you must tunnel this port using a tool li
 - `GET /api/agent/sessions`
 - `GET /api/agent/sessions/:sessionId`
 
+### 0.5.2 `open` with direct host + password
+
+现在 `POST /api/agent/sessions/open` 同时支持两种直连写法：
+
+1. 传统写法：`connection` + `auth`
+2. 简化写法：直接传顶层 `host` / `username` / `password`
+
+以下两种请求都会生效。
+
+传统写法：
+
+```json
+{
+  "connection": {
+    "host": "192.168.1.10",
+    "port": 22,
+    "username": "root"
+  },
+  "auth": {
+    "authType": "password",
+    "password": "replace-me"
+  }
+}
+```
+
+简化写法：
+
+```json
+{
+  "host": "192.168.1.10",
+  "port": 22,
+  "username": "root",
+  "password": "replace-me"
+}
+```
+
+如果没有显式传 `authType`，服务端会自动推断：
+
+- 有 `password` 时按 `password` 模式
+- 有 `keyContent` / `keyFilePath` 时按 `privateKey` 模式
+- 都没有时优先尝试 `agent`（如果本机有 `SSH_AUTH_SOCK`）
+
 ## 1. List Connected Sessions
 Allows an agent to dynamically discover which servers the developer is currently connected to.
 
@@ -342,4 +384,6 @@ It blocks the HTTP request and awaits the final standard output + exit code to r
 
 - 如果传入活动 `sessionId`，则会复用该会话
 - 如果未传入 `sessionId`，则会优先使用 `presetId` 自动登录
+- 如果未传入 `sessionId`，也可以直接传顶层 `host` / `username` / `password` 做直连登录
+- 如果传入了目标连接信息且存在同目标的活跃会话，默认会优先复用已有会话
 - `autoDisconnect=true` 时，排障完成后自动断开该 Agent 建立的 SSH 会话

@@ -1,0 +1,29 @@
+{
+  "tool": "troubleshoot",
+  "arguments": {
+    "presetId": "prod-root-key",
+    "title": "order api timeout",
+    "symptom": "some requests return 502",
+    "collectionPlan": [
+      {
+        "name": "process",
+        "cmd": "ps aux | grep order-service | grep -v grep"
+      },
+      {
+        "name": "port",
+        "cmd": "ss -tlnp | grep 8080"
+      }
+    ],
+    "analysisRules": [
+      {
+        "name": "timeout",
+        "pattern": "timeout|timed out|502",
+        "severity": "critical",
+        "source": "all"
+      }
+    ]
+  },
+  "expected": {
+    "contains": ["sessionId", "run"]
+  }
+}

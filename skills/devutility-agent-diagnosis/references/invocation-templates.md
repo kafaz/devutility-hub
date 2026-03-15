@@ -106,7 +106,45 @@ Output:
 5. next step
 ```
 
-## 9. Minimal Invocation
+## 9. Human-in-the-Loop Diagnosis
+
+```text
+Use $devutility-agent-diagnosis for a collaborative investigation.
+Target: <node name, alias, nodeId, or host>
+Symptom: <problem statement>
+Plan:
+- start with a bounded first-pass diagnosis
+- if confidence stays low or evidence conflicts, do not keep guessing
+- instead, summarize what has been checked, what remains unexplained, and ask me for the exact missing context or suspicious log clue
+- after I reply, reuse the current session and run only the focused follow-up commands needed to test that hint
+Output:
+1. symptom
+2. confirmed evidence
+3. unresolved gap
+4. what you need from me
+5. next hypothesis after my reply
+```
+
+## 10. SOP-First Diagnosis
+
+```text
+Use $devutility-agent-diagnosis in SOP-first mode.
+Target: <node name, alias, nodeId, or host>
+Symptom: <problem statement>
+Execution rules:
+- first identify whether an existing SOP or SOP fragment applies
+- if a SOP fits, follow its intent, variables, checks, and decision points instead of improvising from scratch
+- if the SOP only partially fits, use it as the baseline and clearly separate the new delta
+- after diagnosis, report which SOP parts were reused and which new steps should be solidified back into SOP
+Output:
+1. chosen SOP or SOP fragment
+2. evidence
+3. likely cause
+4. SOP gap
+5. candidate SOP updates
+```
+
+## 11. Minimal Invocation
 
 ```text
 Use $devutility-agent-diagnosis to diagnose "<problem>" on "<node>" and summarize the evidence and likely cause.

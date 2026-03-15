@@ -5,6 +5,33 @@ import { z } from "zod";
 const BASE_URL = process.env.DEVUTILITY_AGENT_BASE_URL || "http://127.0.0.1:3001";
 
 type JsonRecord = Record<string, unknown>;
+const looseObjectSchema = z.record(z.string(), z.unknown());
+
+function unwrapPayload(payload: JsonRecord) {
+  const preferredKeys = [
+    "data",
+    "result",
+    "sessions",
+    "presets",
+    "policy",
+    "run",
+    "matches",
+    "agents",
+  ] as const;
+
+  for (const key of preferredKeys) {
+    if (payload[key] !== undefined) return payload[key];
+  }
+
+  if (payload.ok === true) {
+    const keys = Object.keys(payload).filter((key) => key !== "ok");
+    if (keys.length === 1) {
+      return payload[keys[0]];
+    }
+  }
+
+  return payload;
+}
 
 async function requestApi(method: string, path: string, body?: JsonRecord) {
   const response = await fetch(`${BASE_URL}${path}`, {
@@ -22,10 +49,7 @@ async function requestApi(method: string, path: string, body?: JsonRecord) {
     throw new Error(String(payload.error || `HTTP ${response.status}`));
   }
 
-  if (payload.data !== undefined) return payload.data;
-  if (payload.result !== undefined) return payload.result;
-  if (payload.sessions !== undefined) return payload.sessions;
-  return payload;
+  return unwrapPayload(payload as JsonRecord);
 }
 
 function formatResult(title: string, data: unknown) {
@@ -45,12 +69,103 @@ const server = new McpServer({
 });
 
 server.tool(
+  "health_check",
+  "Check whether the local DevUtility Hub service is reachable.",
+  {},
+  async () => {
+    const data = await requestApi("GET", "/api/health");
+    return formatResult("Health check", data);
+  }
+);
+
+server.tool(
+  "list_ssh_agents",
+  "List local SSH agent sockets or agent providers that DevUtility Hub can use for agent-based authentication.",
+  {},
+  async () => {
+    const data = await requestApi("GET", "/api/agents");
+    return formatResult("SSH agents", data);
+  }
+);
+
+server.tool(
+  "list_login_presets",
+  "List saved login presets that can be used for preset-based auto-login.",
+  {},
+  async () => {
+    const data = await requestApi("GET", "/api/agent/login-presets");
+    return formatResult("Login presets", data);
+  }
+);
+
+server.tool(
+  "save_login_preset",
+  "Create or update a login preset. preset must include id, name, host, username, and authType.",
+  {
+    preset: looseObjectSchema,
+  },
+  async ({ preset }) => {
+    const data = await requestApi("POST", "/api/agent/login-presets", preset);
+    return formatResult("Saved login preset", data);
+  }
+);
+
+server.tool(
+  "delete_login_preset",
+  "Delete a saved login preset by preset id.",
+  {
+    presetId: z.string().min(1),
+  },
+  async ({ presetId }) => {
+    const data = await requestApi("DELETE", `/api/agent/login-presets/${encodeURIComponent(presetId)}`);
+    return formatResult("Deleted login preset", data);
+  }
+);
+
+server.tool(
   "list_nodes",
   "List locally registered diagnosis nodes with nodeId, name, IP, role, tags, and prepare profile.",
   {},
   async () => {
     const data = await requestApi("GET", "/api/agent/nodes");
     return formatResult("Registered nodes", data);
+  }
+);
+
+server.tool(
+  "save_node",
+  "Create or update a registered node. node must include nodeId, name, host, and username.",
+  {
+    node: looseObjectSchema,
+  },
+  async ({ node }) => {
+    const data = await requestApi("POST", "/api/agent/nodes", node);
+    return formatResult("Saved node", data);
+  }
+);
+
+server.tool(
+  "delete_node",
+  "Delete a registered node by nodeId.",
+  {
+    nodeId: z.string().min(1),
+  },
+  async ({ nodeId }) => {
+    const data = await requestApi("DELETE", `/api/agent/nodes/${encodeURIComponent(nodeId)}`);
+    return formatResult("Deleted node", data);
+  }
+);
+
+server.tool(
+  "update_node",
+  "Patch an existing registered node by nodeId.",
+  {
+    nodeId: z.string().min(1),
+    patch: looseObjectSchema,
+  },
+  async ({ nodeId, patch }) => {
+    const data = await requestApi("PATCH", `/api/agent/nodes/${encodeURIComponent(nodeId)}`, patch);
+    return formatResult("Updated node", data);
   }
 );
 
@@ -67,6 +182,43 @@ server.tool(
 );
 
 server.tool(
+  "save_prepare_profile",
+  "Create or update a prepare profile. profile must include profileId and name.",
+  {
+    profile: looseObjectSchema,
+  },
+  async ({ profile }) => {
+    const data = await requestApi("POST", "/api/agent/prepare-profiles", profile);
+    return formatResult("Saved prepare profile", data);
+  }
+);
+
+server.tool(
+  "delete_prepare_profile",
+  "Delete a prepare profile by profileId.",
+  {
+    profileId: z.string().min(1),
+  },
+  async ({ profileId }) => {
+    const data = await requestApi("DELETE", `/api/agent/prepare-profiles/${encodeURIComponent(profileId)}`);
+    return formatResult("Deleted prepare profile", data);
+  }
+);
+
+server.tool(
+  "update_prepare_profile",
+  "Patch an existing prepare profile by profileId.",
+  {
+    profileId: z.string().min(1),
+    patch: looseObjectSchema,
+  },
+  async ({ profileId, patch }) => {
+    const data = await requestApi("PATCH", `/api/agent/prepare-profiles/${encodeURIComponent(profileId)}`, patch);
+    return formatResult("Updated prepare profile", data);
+  }
+);
+
+server.tool(
   "list_prepare_profiles",
   "List available prepare profiles that can run pre-operations after a session is opened.",
   {},
@@ -77,12 +229,81 @@ server.tool(
 );
 
 server.tool(
+  "get_command_policy",
+  "Get the current service-side command whitelist and fixed blocking rules.",
+  {},
+  async () => {
+    const data = await requestApi("GET", "/api/agent/command-policy");
+    return formatResult("Command policy", data);
+  }
+);
+
+server.tool(
+  "replace_command_policy",
+  "Replace the full command whitelist with the provided allowedBaseCommands array.",
+  {
+    allowedBaseCommands: z.array(z.string().min(1)).min(1),
+  },
+  async ({ allowedBaseCommands }) => {
+    const data = await requestApi("PUT", "/api/agent/command-policy", { allowedBaseCommands });
+    return formatResult("Replaced command policy", data);
+  }
+);
+
+server.tool(
+  "allow_command",
+  "Allow one additional base command in the service-side command whitelist.",
+  {
+    command: z.string().min(1),
+  },
+  async ({ command }) => {
+    const data = await requestApi("POST", "/api/agent/command-policy/allow", { command });
+    return formatResult("Allowed command", data);
+  }
+);
+
+server.tool(
+  "remove_allowed_command",
+  "Remove one base command from the service-side command whitelist.",
+  {
+    command: z.string().min(1),
+  },
+  async ({ command }) => {
+    const data = await requestApi("DELETE", `/api/agent/command-policy/allow/${encodeURIComponent(command)}`);
+    return formatResult("Removed command", data);
+  }
+);
+
+server.tool(
+  "reset_command_policy",
+  "Reset the command whitelist back to the service default.",
+  {},
+  async () => {
+    const data = await requestApi("POST", "/api/agent/command-policy/reset");
+    return formatResult("Reset command policy", data);
+  }
+);
+
+server.tool(
   "open_session",
-  "Open or reuse a diagnosis session. Use presetId for preset-based auto-login, otherwise use nodeId/direct connection.",
+  "Open or reuse a diagnosis session. Use presetId for preset-based auto-login, otherwise use nodeId, connection/auth, or direct host/username/password fields.",
   {
     presetId: z.string().min(1).optional(),
     sessionId: z.string().min(1).optional(),
     nodeId: z.string().optional(),
+    name: z.string().optional(),
+    host: z.string().optional(),
+    port: z.number().int().positive().optional(),
+    username: z.string().optional(),
+    authType: z.enum(["privateKey", "password", "agent"]).optional(),
+    password: z.string().optional(),
+    keyContent: z.string().optional(),
+    keyFilePath: z.string().optional(),
+    passphrase: z.string().optional(),
+    agent: z.string().optional(),
+    readyTimeout: z.number().int().positive().optional(),
+    jumpHostId: z.string().optional(),
+    jumpHost: z.record(z.string(), z.unknown()).optional(),
     reason: z.string().optional(),
     reuseIfExists: z.boolean().optional(),
     ttlSec: z.number().int().positive().optional(),
@@ -94,6 +315,131 @@ server.tool(
     const route = input.presetId ? "/api/agent/connect" : "/api/agent/sessions/open";
     const data = await requestApi("POST", route, input);
     return formatResult("Opened session", data);
+  }
+);
+
+server.tool(
+  "troubleshoot",
+  "Run the single-agent troubleshoot flow. It can reuse an existing session or auto-connect by presetId or direct connection fields.",
+  {
+    presetId: z.string().min(1).optional(),
+    sessionId: z.string().min(1).optional(),
+    keepSession: z.boolean().optional(),
+    autoDisconnect: z.boolean().optional(),
+    cols: z.number().int().positive().optional(),
+    rows: z.number().int().positive().optional(),
+    connection: z.record(z.string(), z.unknown()).optional(),
+    name: z.string().optional(),
+    host: z.string().optional(),
+    port: z.number().int().positive().optional(),
+    username: z.string().optional(),
+    authType: z.enum(["privateKey", "password", "agent"]).optional(),
+    password: z.string().optional(),
+    keyContent: z.string().optional(),
+    keyFilePath: z.string().optional(),
+    passphrase: z.string().optional(),
+    agent: z.string().optional(),
+    jumpHostId: z.string().optional(),
+    jumpHost: z.record(z.string(), z.unknown()).optional(),
+    title: z.string().min(1),
+    symptom: z.string().min(1),
+    notes: z.string().optional(),
+    collectionPlan: z.array(
+      z.object({
+        id: z.string().optional(),
+        name: z.string().optional(),
+        command: z.string().optional(),
+        cmd: z.string().optional(),
+        timeoutMs: z.number().int().positive().optional(),
+        timeout: z.number().int().positive().optional(),
+      })
+    ).optional(),
+    analysisRules: z.array(
+      z.object({
+        id: z.string().optional(),
+        name: z.string().optional(),
+        pattern: z.string().optional(),
+        summary: z.string().optional(),
+        severity: z.enum(["info", "warning", "critical"]).optional(),
+        source: z.enum(["all", "stdout", "stderr"]).optional(),
+      })
+    ).optional(),
+    businessActions: z.array(
+      z.object({
+        id: z.string().optional(),
+        name: z.string().optional(),
+        scriptPath: z.string().optional(),
+        args: z.union([z.string(), z.array(z.string())]).optional(),
+        stdinPayload: z.string().optional(),
+        payload: z.string().optional(),
+        runMode: z.enum(["before_collection", "after_collection"]).optional(),
+        timeoutMs: z.number().int().positive().optional(),
+        timeout: z.number().int().positive().optional(),
+      })
+    ).optional(),
+  },
+  async (input) => {
+    const requestBody: JsonRecord = { ...input };
+    if (requestBody.keepSession === undefined && requestBody.autoDisconnect === undefined) {
+      requestBody.keepSession = true;
+      requestBody.autoDisconnect = false;
+    }
+    const data = await requestApi("POST", "/api/agent/troubleshoot", requestBody);
+    return formatResult("Troubleshoot result", data);
+  }
+);
+
+server.tool(
+  "list_diagnostic_runs",
+  "List archived diagnostic runs from the local knowledge base for history review.",
+  {
+    limit: z.number().int().positive().max(200).optional(),
+  },
+  async ({ limit }) => {
+    const query = limit ? `?limit=${encodeURIComponent(String(limit))}` : "";
+    const data = await requestApi("GET", `/api/diagnostic/runs${query}`);
+    return formatResult("Diagnostic runs", data);
+  }
+);
+
+server.tool(
+  "get_diagnostic_run",
+  "Get one archived diagnostic run by run id, including findings and report.",
+  {
+    runId: z.string().min(1),
+  },
+  async ({ runId }) => {
+    const data = await requestApi("GET", `/api/diagnostic/runs/${encodeURIComponent(runId)}`);
+    return formatResult("Diagnostic run", data);
+  }
+);
+
+server.tool(
+  "recall_similar_runs",
+  "Recall similar historical runs from the diagnostic knowledge base based on title, symptom, and planned commands.",
+  {
+    title: z.string().optional(),
+    symptom: z.string().optional(),
+    notes: z.string().optional(),
+    limit: z.number().int().positive().max(10).optional(),
+    collectionPlan: z.array(
+      z.object({
+        name: z.string().optional(),
+        command: z.string().optional(),
+        cmd: z.string().optional(),
+      })
+    ).optional(),
+    businessActions: z.array(
+      z.object({
+        name: z.string().optional(),
+        scriptPath: z.string().optional(),
+        args: z.union([z.string(), z.array(z.string())]).optional(),
+      })
+    ).optional(),
+  },
+  async (input) => {
+    const data = await requestApi("POST", "/api/diagnostic/recall", input);
+    return formatResult("Similar diagnostic runs", data);
   }
 );
 
