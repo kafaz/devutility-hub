@@ -54,6 +54,7 @@ import {
     generateMultiNodeReport, renderTemplate,
 } from '../../utils';
 import { useSOPStore } from '../SOPBuilder/store/sopStore';
+import BackgroundJobMonitor from './components/BackgroundJobMonitor';
 import KeywordAnalyzer from './components/KeywordAnalyzer';
 import SessionJournal from './components/SessionJournal';
 import { useAnalyzerStore } from './store/analyzerStore';
@@ -480,7 +481,7 @@ const SSHManager: React.FC = () => {
   const [targetedMap, setTargetedMap]     = useState<Record<string, string>>({});
   const [varValues,   setVarValues]       = useState<Record<string, string>>({});
   const [executing,   setExecuting]       = useState(false);
-  const [activeView,  setActiveView]      = useState<'terminal' | 'progress' | 'journal' | 'analyzer'>('terminal');
+  const [activeView,  setActiveView]      = useState<'terminal' | 'progress' | 'journal' | 'analyzer' | 'bgjobs'>('terminal');
   const [activeTab, setActiveTab] = useState('connect'); // 'connect' | 'multi_node' | 'cron'
 
   // ── 终端写入函数 Map（每会话一个） ────────────────────────────────────────
@@ -1114,6 +1115,10 @@ const SSHManager: React.FC = () => {
                 label: analyzerLogCount > 0 ? `智能监控 (${analyzerLogCount})` : '智能监控',
                 value: 'analyzer',
               },
+              {
+                label: '后台任务',
+                value: 'bgjobs',
+              },
             ]}
           />
 
@@ -1272,6 +1277,18 @@ const SSHManager: React.FC = () => {
               overflow: 'hidden', height: sessions.length > 0 ? 'calc(100% - 34px)' : '100%'
             }}>
               <KeywordAnalyzer />
+            </div>
+          )}
+
+          {/* ── 后台任务监控视图 */}
+          {activeView === 'bgjobs' && (
+            <div style={{
+              border: `1px solid ${borderColor}`, borderRadius: 6,
+              minHeight: 400, display: 'flex', flexDirection: 'column',
+              overflow: 'auto', height: sessions.length > 0 ? 'calc(100% - 34px)' : '100%',
+              padding: 8,
+            }}>
+              <BackgroundJobMonitor />
             </div>
           )}
         </div>

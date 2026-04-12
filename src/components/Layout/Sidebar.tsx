@@ -6,6 +6,7 @@ import {
     BlockOutlined,
     BugOutlined,
     BulbOutlined,
+    CloudServerOutlined,
     CodeOutlined,
     ConsoleSqlOutlined,
     ControlOutlined,
@@ -44,6 +45,7 @@ const ICON_MAP: Record<string, React.ReactNode> = {
   ToolOutlined:       <ToolOutlined />,
   RadarChartOutlined: <RadarChartOutlined />,
   BulbOutlined:       <BulbOutlined />,
+  CloudServerOutlined:<CloudServerOutlined />,
 };
 
 const tools = [
@@ -142,6 +144,12 @@ const tools = [
     name: '源码上下文',
     icon: 'BulbOutlined',
     path: '/code-context-explorer',
+  },
+  {
+    id:   'block-benchmark',
+    name: 'Storage Benchmark',
+    icon: 'CloudServerOutlined',
+    path: '/block-benchmark',
   },
 ];
 

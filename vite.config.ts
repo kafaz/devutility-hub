@@ -1,6 +1,6 @@
-import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
+import { defineConfig } from 'vite';
 
 export default defineConfig({
   plugins: [react()],
@@ -12,6 +12,15 @@ export default defineConfig({
       '@components': path.resolve(__dirname, './src/components'),
       '@store': path.resolve(__dirname, './src/store'),
     },
+  },
+  server: {
+    proxy: {
+      '/benchmark-api': {
+        target: 'http://127.0.0.1:8080',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/benchmark-api/, '/api')
+      }
+    }
   },
   build: {
     rollupOptions: {
