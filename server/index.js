@@ -74,6 +74,11 @@ const {
   resetCommandPolicy,
   validateCommandPolicy,
 } = require('./commandPolicy');
+const {
+  openCodeContext,
+  renderSymbol,
+  searchSymbols,
+} = require('./codeContext');
 
 const app    = express();
 const server = http.createServer(app);
@@ -2004,6 +2009,42 @@ app.post('/api/sop/git-sync', async (req, res) => {
   collectFiles(targetDir);
 
   res.json({ ok: true, files, branch, count: files.length });
+});
+
+// ─── 代码上下文 / 函数渲染 ────────────────────────────────────────────────
+
+app.post('/api/code-context/open', async (req, res) => {
+  try {
+    const context = await openCodeContext(req.body || {});
+    res.json({ ok: true, data: context });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/api/code-context/:contextId/symbols', async (req, res) => {
+  try {
+    const data = await searchSymbols(
+      req.params.contextId,
+      req.query.q,
+      req.query.limit
+    );
+    res.json({ ok: true, data });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/api/code-context/:contextId/render', async (req, res) => {
+  try {
+    const data = await renderSymbol(req.params.contextId, req.body?.symbolId, {
+      beforeContext: req.body?.beforeContext,
+      afterContext: req.body?.afterContext,
+    });
+    res.json({ ok: true, data });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
 });
 
 // ─── WebSocket ─────────────────────────────────────────────────────────────

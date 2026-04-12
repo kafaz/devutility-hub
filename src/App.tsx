@@ -1,6 +1,6 @@
 import { Spin } from 'antd';
-import React, { Suspense, lazy } from 'react';
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import React, { Suspense, lazy, useEffect, useState } from 'react';
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import AppLayout from './components/Layout/AppLayout';
 
 const LogAnalyzer    = lazy(() => import('./modules/LogAnalyzer'));
@@ -18,6 +18,33 @@ const FaultBuilder      = lazy(() => import('./modules/FaultBuilder'));
 const IOAnalyzer        = lazy(() => import('./modules/IOAnalyzer'));
 const CodeProfiler      = lazy(() => import('./modules/CodeProfiler'));
 const DiagnosticWorkbench = lazy(() => import('./modules/DiagnosticWorkbench'));
+const CodeContextExplorer = lazy(() => import('./modules/CodeContextExplorer'));
+
+interface ToolRouteDefinition {
+  path: string;
+  Component: React.LazyExoticComponent<React.ComponentType>;
+}
+
+const TOOL_ROUTES: ToolRouteDefinition[] = [
+  { path: '/log-analyzer', Component: LogAnalyzer },
+  { path: '/command-builder', Component: CommandBuilder },
+  { path: '/sop-builder', Component: SOPBuilder },
+  { path: '/ssh-manager', Component: SSHManager },
+  { path: '/number-converter', Component: NumberConverter },
+  { path: '/file-hasher', Component: FileHasher },
+  { path: '/fio-visualizer', Component: FIOVisualizer },
+  { path: '/hex-lba-explorer', Component: HexLBAExplorer },
+  { path: '/crash-analyzer', Component: CrashAnalyzer },
+  { path: '/protocol-decoder', Component: ProtocolDecoder },
+  { path: '/timeline-correlator', Component: TimelineCorrelator },
+  { path: '/fault-builder', Component: FaultBuilder },
+  { path: '/io-analyzer', Component: IOAnalyzer },
+  { path: '/code-profiler', Component: CodeProfiler },
+  { path: '/diagnostic-workbench', Component: DiagnosticWorkbench },
+  { path: '/code-context-explorer', Component: CodeContextExplorer },
+];
+
+const TOOL_ROUTE_MAP = new Map(TOOL_ROUTES.map((route) => [route.path, route]));
 
 const Loading: React.FC = () => (
   <div
@@ -32,131 +59,57 @@ const Loading: React.FC = () => (
   </div>
 );
 
+const PersistentToolPages: React.FC = () => {
+  const location = useLocation();
+  const normalizedPath = location.pathname.replace(/\/+$/, '') || '/';
+  const activePath = normalizedPath === '/' ? '/log-analyzer' : normalizedPath;
+  const activeRoute = TOOL_ROUTE_MAP.get(activePath);
+  const [visitedPaths, setVisitedPaths] = useState<string[]>(activeRoute ? [activePath] : ['/log-analyzer']);
+
+  useEffect(() => {
+    if (!activeRoute) return;
+    setVisitedPaths((current) =>
+      current.includes(activePath) ? current : [...current, activePath]
+    );
+  }, [activePath, activeRoute]);
+
+  if (!activeRoute) {
+    return <Navigate to="/log-analyzer" replace />;
+  }
+
+  return (
+    <div style={{ minHeight: '100vh' }}>
+      {visitedPaths.map((path) => {
+        const route = TOOL_ROUTE_MAP.get(path);
+        if (!route) return null;
+        const RouteComponent = route.Component;
+        const isActive = path === activePath;
+
+        return (
+          <div
+            key={path}
+            aria-hidden={!isActive}
+            style={{
+              display: isActive ? 'block' : 'none',
+              minHeight: isActive ? '100vh' : undefined,
+            }}
+          >
+            <Suspense fallback={<Loading />}>
+              <RouteComponent />
+            </Suspense>
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
 const App: React.FC = () => (
   <BrowserRouter>
     <Routes>
       <Route path="/" element={<AppLayout />}>
         <Route index element={<Navigate to="/log-analyzer" replace />} />
-        <Route
-          path="log-analyzer"
-          element={
-            <Suspense fallback={<Loading />}>
-              <LogAnalyzer />
-            </Suspense>
-          }
-        />
-        <Route
-          path="command-builder"
-          element={
-            <Suspense fallback={<Loading />}>
-              <CommandBuilder />
-            </Suspense>
-          }
-        />
-        <Route
-          path="sop-builder"
-          element={
-            <Suspense fallback={<Loading />}>
-              <SOPBuilder />
-            </Suspense>
-          }
-        />
-        <Route
-          path="ssh-manager"
-          element={
-            <Suspense fallback={<Loading />}>
-              <SSHManager />
-            </Suspense>
-          }
-        />
-        <Route
-          path="number-converter"
-          element={
-            <Suspense fallback={<Loading />}>
-              <NumberConverter />
-            </Suspense>
-          }
-        />
-        <Route
-          path="file-hasher"
-          element={
-            <Suspense fallback={<Loading />}>
-              <FileHasher />
-            </Suspense>
-          }
-        />
-        <Route
-          path="fio-visualizer"
-          element={
-            <Suspense fallback={<Loading />}>
-              <FIOVisualizer />
-            </Suspense>
-          }
-        />
-        <Route
-          path="hex-lba-explorer"
-          element={
-            <Suspense fallback={<Loading />}>
-              <HexLBAExplorer />
-            </Suspense>
-          }
-        />
-        <Route
-          path="crash-analyzer"
-          element={
-            <Suspense fallback={<Loading />}>
-              <CrashAnalyzer />
-            </Suspense>
-          }
-        />
-        <Route
-          path="protocol-decoder"
-          element={
-            <Suspense fallback={<Loading />}>
-              <ProtocolDecoder />
-            </Suspense>
-          }
-        />
-        <Route
-          path="timeline-correlator"
-          element={
-            <Suspense fallback={<Loading />}>
-              <TimelineCorrelator />
-            </Suspense>
-          }
-        />
-        <Route
-          path="fault-builder"
-          element={
-            <Suspense fallback={<Loading />}>
-              <FaultBuilder />
-            </Suspense>
-          }
-        />
-        <Route
-          path="io-analyzer"
-          element={
-            <Suspense fallback={<Loading />}>
-              <IOAnalyzer />
-            </Suspense>
-          }
-        />
-        <Route
-          path="code-profiler"
-          element={
-            <Suspense fallback={<Loading />}>
-              <CodeProfiler />
-            </Suspense>
-          }
-        />
-        <Route
-          path="diagnostic-workbench"
-          element={
-            <Suspense fallback={<Loading />}>
-              <DiagnosticWorkbench />
-            </Suspense>
-          }
-        />
+        <Route path="*" element={<PersistentToolPages />} />
       </Route>
     </Routes>
   </BrowserRouter>

@@ -1,0 +1,1090 @@
+import {
+  Alert,
+  Button,
+  Card,
+  Empty,
+  Input,
+  InputNumber,
+  List,
+  Select,
+  Space,
+  Spin,
+  Tag,
+  Tooltip,
+  Typography,
+  message,
+} from 'antd';
+import {
+  BranchesOutlined,
+  CodeOutlined,
+  ReloadOutlined,
+  SearchOutlined,
+} from '@ant-design/icons';
+import React, { useEffect, useRef, useState } from 'react';
+import ResizableOutput from '../../components/shared/ResizableOutput';
+import { useLocalStorage } from '../../hooks/useLocalStorage';
+import { useGlobalStore } from '../../store/globalStore';
+
+const { Title, Text, Paragraph } = Typography;
+const { Password, Search, TextArea } = Input;
+
+const PROXY_HTTP = 'http://127.0.0.1:3001';
+const DEFAULT_BEFORE_CONTEXT = 12;
+const DEFAULT_AFTER_CONTEXT = 24;
+const MAX_BEFORE_CONTEXT = 240;
+const MAX_AFTER_CONTEXT = 360;
+const APPROX_LINE_HEIGHT = 20;
+const MAX_COMMAND_RUNS = 12;
+const DEFAULT_SPLIT_RATIO = 0.42;
+const SPLIT_HANDLE_WIDTH = 18;
+const MIN_LEFT_PANEL_WIDTH = 420;
+const MIN_RIGHT_PANEL_WIDTH = 560;
+const STACK_LAYOUT_BREAKPOINT = 1120;
+
+const FUNCTION_CANDIDATE_BLACKLIST = new Set([
+  'and',
+  'catch',
+  'else',
+  'for',
+  'func',
+  'function',
+  'if',
+  'map',
+  'new',
+  'return',
+  'switch',
+  'throw',
+  'try',
+  'while',
+]);
+
+interface CodeContextBindingDraft {
+  repo: string;
+  branch: string;
+  commit: string;
+}
+
+interface CodeContextBindingResult {
+  contextId: string;
+  repo: string;
+  repoDisplayName: string;
+  branch: string;
+  branchRef: string;
+  commit: string;
+  worktreePath: string;
+  symbolCount: number | null;
+  searchStrategy?: 'on-demand' | 'indexed';
+}
+
+interface SymbolCandidate {
+  id: string;
+  name: string;
+  path: string;
+  line: number;
+  language: string;
+  signature: string;
+  matchType: 'exact' | 'fuzzy';
+  score: number;
+}
+
+interface RenderedLine {
+  lineNumber: number;
+  text: string;
+  inFunction: boolean;
+  isDeclaration: boolean;
+}
+
+interface RenderedSymbolPayload {
+  symbol: SymbolCandidate;
+  signature: string;
+  functionStartLine: number;
+  functionEndLine: number;
+  snippetStartLine: number;
+  snippetEndLine: number;
+  beforeContext: number;
+  afterContext: number;
+  totalLines: number;
+  lines: RenderedLine[];
+}
+
+interface SessionOption {
+  sessionId: string;
+  host: string;
+  username: string;
+}
+
+interface FunctionCandidateToken {
+  token: string;
+  query: string;
+  hits: number;
+  sampleLine: string;
+}
+
+interface CommandRunRecord {
+  id: string;
+  ts: number;
+  sessionId: string;
+  sessionLabel: string;
+  mode: 'pty' | 'exec';
+  command: string;
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  durationMs: number;
+  functionCandidates: FunctionCandidateToken[];
+}
+
+function makeClientId(prefix = 'ctx') {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeFunctionQuery(rawToken: string) {
+  const cleaned = String(rawToken || '')
+    .trim()
+    .replace(/^[`'"[\](){}]+|[`'"[\](){}:,;]+$/g, '');
+  if (!cleaned) return '';
+
+  const segments = cleaned.split(/::|->|\./g).filter(Boolean);
+  return (segments[segments.length - 1] || cleaned).trim();
+}
+
+function isLikelyFunctionToken(rawToken: string) {
+  const normalized = normalizeFunctionQuery(rawToken);
+  if (normalized.length < 3) return false;
+  if (FUNCTION_CANDIDATE_BLACKLIST.has(normalized.toLowerCase())) return false;
+  if (/^\d+$/.test(normalized)) return false;
+
+  return (
+    rawToken.includes('::') ||
+    rawToken.includes('->') ||
+    rawToken.includes('.') ||
+    /[A-Z]/.test(normalized) ||
+    normalized.includes('_')
+  );
+}
+
+function extractFunctionCandidates(text: string) {
+  const patterns = [
+    /\b([A-Za-z_][A-Za-z0-9_$]*(?:(?:::|->|\.)[A-Za-z_][A-Za-z0-9_$]+)+)\b/g,
+    /\b([A-Za-z_][A-Za-z0-9_$]*)\s*(?=\()/g,
+    /\b([a-z]+(?:[A-Z][A-Za-z0-9_$]*)+)\b/g,
+    /\b([a-z]+_[a-z0-9_]+)\b/g,
+  ];
+
+  const candidateMap = new Map<string, FunctionCandidateToken>();
+  const lines = String(text || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 500);
+
+  lines.forEach((line) => {
+    patterns.forEach((pattern) => {
+      for (const match of line.matchAll(pattern)) {
+        const token = String(match[1] || '').trim();
+        if (!isLikelyFunctionToken(token)) continue;
+
+        const query = normalizeFunctionQuery(token);
+        if (!query) continue;
+
+        const existing = candidateMap.get(token);
+        if (existing) {
+          existing.hits += 1;
+        } else {
+          candidateMap.set(token, {
+            token,
+            query,
+            hits: 1,
+            sampleLine: line.slice(0, 220),
+          });
+        }
+      }
+    });
+  });
+
+  return Array.from(candidateMap.values())
+    .sort((left, right) =>
+      right.hits - left.hits ||
+      left.query.localeCompare(right.query)
+    )
+    .slice(0, 24);
+}
+
+function clampPaneRatio(rawRatio: number, containerWidth: number) {
+  if (!Number.isFinite(containerWidth) || containerWidth <= SPLIT_HANDLE_WIDTH) {
+    return DEFAULT_SPLIT_RATIO;
+  }
+
+  const usableWidth = Math.max(1, containerWidth - SPLIT_HANDLE_WIDTH);
+  const minRatio = Math.min(0.8, MIN_LEFT_PANEL_WIDTH / usableWidth);
+  const maxRatio = Math.max(0.2, 1 - (MIN_RIGHT_PANEL_WIDTH / usableWidth));
+
+  if (minRatio >= maxRatio) {
+    return 0.5;
+  }
+
+  const safeRatio = Number.isFinite(rawRatio) ? rawRatio : DEFAULT_SPLIT_RATIO;
+  return Math.min(maxRatio, Math.max(minRatio, safeRatio));
+}
+
+const CodeContextExplorer: React.FC = () => {
+  const isDark = useGlobalStore((state) => state.theme === 'dark');
+  const [messageApi, contextHolder] = message.useMessage();
+  const [savedBinding, setSavedBinding] = useLocalStorage<CodeContextBindingDraft>('devutility-code-context-binding', {
+    repo: '',
+    branch: '',
+    commit: '',
+  });
+  const [savedSplitRatio, setSavedSplitRatio] = useLocalStorage<number>('devutility-code-context-split-ratio', DEFAULT_SPLIT_RATIO);
+
+  const [repo, setRepo] = useState(savedBinding.repo);
+  const [branch, setBranch] = useState(savedBinding.branch);
+  const [commit, setCommit] = useState(savedBinding.commit);
+  const [token, setToken] = useState('');
+  const [activeContext, setActiveContext] = useState<CodeContextBindingResult | null>(null);
+  const [openingContext, setOpeningContext] = useState(false);
+
+  const [sessions, setSessions] = useState<SessionOption[]>([]);
+  const [loadingSessions, setLoadingSessions] = useState(false);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | undefined>(undefined);
+  const [commandText, setCommandText] = useState('');
+  const [commandMode, setCommandMode] = useState<'pty' | 'exec'>('pty');
+  const [commandTimeoutMs, setCommandTimeoutMs] = useState(20000);
+  const [executingCommand, setExecutingCommand] = useState(false);
+  const [commandRuns, setCommandRuns] = useState<CommandRunRecord[]>([]);
+  const [activeFunctionToken, setActiveFunctionToken] = useState<FunctionCandidateToken | null>(null);
+
+  const [query, setQuery] = useState('');
+  const [searching, setSearching] = useState(false);
+  const [results, setResults] = useState<SymbolCandidate[]>([]);
+  const [selectedSymbol, setSelectedSymbol] = useState<SymbolCandidate | null>(null);
+  const [rendered, setRendered] = useState<RenderedSymbolPayload | null>(null);
+  const [rendering, setRendering] = useState(false);
+  const [beforeContext, setBeforeContext] = useState(DEFAULT_BEFORE_CONTEXT);
+  const [afterContext, setAfterContext] = useState(DEFAULT_AFTER_CONTEXT);
+  const [contentWidth, setContentWidth] = useState(0);
+  const [isDraggingSplit, setIsDraggingSplit] = useState(false);
+  const [splitRatio, setSplitRatio] = useState(savedSplitRatio);
+
+  const codePanelRef = useRef<HTMLDivElement>(null);
+  const splitContainerRef = useRef<HTMLDivElement>(null);
+  const splitDragRef = useRef<{ left: number; width: number } | null>(null);
+  const splitRatioRef = useRef(splitRatio);
+  const pendingWheelExpandRef = useRef<'up' | 'down' | null>(null);
+  const previousSnippetStartRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    void fetchSessions();
+  }, []);
+
+  useEffect(() => {
+    if (!activeContext || !selectedSymbol) return;
+    void renderSelectedSymbol(activeContext.contextId, selectedSymbol.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeContext?.contextId, selectedSymbol?.id, beforeContext, afterContext]);
+
+  useEffect(() => {
+    splitRatioRef.current = splitRatio;
+  }, [splitRatio]);
+
+  useEffect(() => {
+    const element = splitContainerRef.current;
+    if (!element) return;
+
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      setContentWidth(entry.contentRect.width);
+    });
+
+    observer.observe(element);
+    setContentWidth(element.getBoundingClientRect().width);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const onPointerMove = (event: PointerEvent) => {
+      const dragState = splitDragRef.current;
+      if (!dragState) return;
+
+      const nextRatio = clampPaneRatio(
+        (event.clientX - dragState.left - (SPLIT_HANDLE_WIDTH / 2)) / Math.max(1, dragState.width - SPLIT_HANDLE_WIDTH),
+        dragState.width
+      );
+      splitRatioRef.current = nextRatio;
+      setSplitRatio(nextRatio);
+    };
+
+    const stopDragging = () => {
+      if (!splitDragRef.current) return;
+      splitDragRef.current = null;
+      setIsDraggingSplit(false);
+      setSavedSplitRatio(splitRatioRef.current);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    document.addEventListener('pointermove', onPointerMove);
+    document.addEventListener('pointerup', stopDragging);
+    return () => {
+      document.removeEventListener('pointermove', onPointerMove);
+      document.removeEventListener('pointerup', stopDragging);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+  }, [setSavedSplitRatio]);
+
+  async function fetchSessions() {
+    setLoadingSessions(true);
+    try {
+      const response = await fetch(`${PROXY_HTTP}/api/agent/sessions`);
+      const data = await response.json();
+      const nextSessions = Array.isArray(data.sessions) ? (data.sessions as SessionOption[]) : [];
+      setSessions(nextSessions);
+      if (!selectedSessionId && nextSessions[0]?.sessionId) {
+        setSelectedSessionId(nextSessions[0].sessionId);
+      }
+    } catch {
+      messageApi.warning('未获取到可用节点，请先在 SSH Manager 中建立会话');
+    } finally {
+      setLoadingSessions(false);
+    }
+  }
+
+  async function openContext() {
+    const trimmedRepo = repo.trim();
+    const trimmedBranch = branch.trim();
+    const trimmedCommit = commit.trim();
+
+    if (!trimmedRepo || !trimmedBranch || !trimmedCommit) {
+      messageApi.warning('请填写 repo、branch 和 commit');
+      return;
+    }
+
+    setOpeningContext(true);
+    try {
+      const response = await fetch(`${PROXY_HTTP}/api/code-context/open`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          repo: trimmedRepo,
+          branch: trimmedBranch,
+          commit: trimmedCommit,
+          token: token.trim(),
+        }),
+      });
+      const data = await response.json();
+
+      if (!data.ok) {
+        messageApi.error(data.error || '代码上下文绑定失败');
+        return;
+      }
+
+      const nextContext = data.data as CodeContextBindingResult;
+      setActiveContext(nextContext);
+      setSavedBinding({
+        repo: trimmedRepo,
+        branch: trimmedBranch,
+        commit: trimmedCommit,
+      });
+      setResults([]);
+      setSelectedSymbol(null);
+      setRendered(null);
+      setActiveFunctionToken(null);
+      setBeforeContext(DEFAULT_BEFORE_CONTEXT);
+      setAfterContext(DEFAULT_AFTER_CONTEXT);
+      if (typeof nextContext.symbolCount === 'number') {
+        messageApi.success(`已绑定代码版本，索引函数 ${nextContext.symbolCount} 个`);
+      } else {
+        messageApi.success('已绑定代码版本，大仓库将按需检索函数定义');
+      }
+    } catch {
+      messageApi.error('代码上下文绑定失败');
+    } finally {
+      setOpeningContext(false);
+    }
+  }
+
+  async function searchFunctions(nextQuery?: string) {
+    const effectiveQuery = String(nextQuery ?? query).trim();
+    if (!activeContext) {
+      messageApi.warning('请先绑定 repo / branch / commit');
+      return;
+    }
+
+    if (!effectiveQuery) {
+      messageApi.warning('请输入函数名');
+      return;
+    }
+
+    setSelectedSymbol(null);
+    setRendered(null);
+    setSearching(true);
+    try {
+      const response = await fetch(
+        `${PROXY_HTTP}/api/code-context/${encodeURIComponent(activeContext.contextId)}/symbols?q=${encodeURIComponent(effectiveQuery)}&limit=80`
+      );
+      const data = await response.json();
+
+      if (!data.ok) {
+        messageApi.error(data.error || '函数搜索失败');
+        return;
+      }
+
+      const nextResults = Array.isArray(data.data) ? (data.data as SymbolCandidate[]) : [];
+      setResults(nextResults);
+
+      if (nextResults.length === 0) {
+        messageApi.info(`没有找到匹配函数：${effectiveQuery}`);
+        return;
+      }
+
+      if (nextResults.length === 1) {
+        setBeforeContext(DEFAULT_BEFORE_CONTEXT);
+        setAfterContext(DEFAULT_AFTER_CONTEXT);
+        setSelectedSymbol(nextResults[0]);
+      }
+    } catch {
+      messageApi.error('函数搜索失败');
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  async function renderSelectedSymbol(contextId: string, symbolId: string) {
+    setRendering(true);
+    previousSnippetStartRef.current = rendered?.snippetStartLine ?? null;
+
+    try {
+      const response = await fetch(`${PROXY_HTTP}/api/code-context/${encodeURIComponent(contextId)}/render`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          symbolId,
+          beforeContext,
+          afterContext,
+        }),
+      });
+      const data = await response.json();
+
+      if (!data.ok) {
+        messageApi.error(data.error || '函数源码渲染失败');
+        return;
+      }
+
+      const payload = data.data as RenderedSymbolPayload;
+      setRendered(payload);
+
+      const panel = codePanelRef.current;
+      if (!panel) return;
+
+      const expandDirection = pendingWheelExpandRef.current;
+      if (expandDirection === 'up' && previousSnippetStartRef.current) {
+        const addedLines = previousSnippetStartRef.current - payload.snippetStartLine;
+        requestAnimationFrame(() => {
+          panel.scrollTop += Math.max(0, addedLines) * APPROX_LINE_HEIGHT;
+        });
+      } else if (!expandDirection) {
+        requestAnimationFrame(() => {
+          panel.scrollTop = 0;
+        });
+      }
+      pendingWheelExpandRef.current = null;
+    } catch {
+      messageApi.error('函数源码渲染失败');
+    } finally {
+      setRendering(false);
+    }
+  }
+
+  async function executeCommand() {
+    const trimmedCommand = commandText.trim();
+    if (!selectedSessionId) {
+      messageApi.warning('请先选择一个节点');
+      return;
+    }
+    if (!trimmedCommand) {
+      messageApi.warning('请输入要执行的命令');
+      return;
+    }
+
+    const session = sessions.find((item) => item.sessionId === selectedSessionId);
+    setExecutingCommand(true);
+    try {
+      const response = await fetch(`${PROXY_HTTP}/api/agent/sessions/${encodeURIComponent(selectedSessionId)}/commands`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cmd: trimmedCommand,
+          mode: commandMode,
+          timeoutMs: commandTimeoutMs,
+        }),
+      });
+      const data = await response.json();
+
+      if (!data.ok) {
+        messageApi.error(data.error || '节点命令执行失败');
+        return;
+      }
+
+      const result = data.data || {};
+      const combinedOutput = [result.stdout, result.stderr].filter(Boolean).join('\n');
+      const runRecord: CommandRunRecord = {
+        id: makeClientId('cmd'),
+        ts: Date.now(),
+        sessionId: selectedSessionId,
+        sessionLabel: session ? `${session.username}@${session.host}` : selectedSessionId,
+        mode: commandMode,
+        command: trimmedCommand,
+        stdout: String(result.stdout || ''),
+        stderr: String(result.stderr || ''),
+        exitCode: Number(result.exitCode ?? 0),
+        durationMs: Number(result.durationMs ?? 0),
+        functionCandidates: extractFunctionCandidates(combinedOutput),
+      };
+
+      setCommandRuns((items) => [runRecord, ...items].slice(0, MAX_COMMAND_RUNS));
+      messageApi.success(`命令执行完成，exit=${runRecord.exitCode}`);
+
+      if (activeContext && runRecord.functionCandidates.length === 1) {
+        void handleFunctionCandidateClick(runRecord.functionCandidates[0]);
+      }
+    } catch {
+      messageApi.error('节点命令执行失败');
+    } finally {
+      setExecutingCommand(false);
+    }
+  }
+
+  async function handleFunctionCandidateClick(candidate: FunctionCandidateToken) {
+    setActiveFunctionToken(candidate);
+    setQuery(candidate.query);
+    await searchFunctions(candidate.query);
+  }
+
+  function handleSelectSymbol(item: SymbolCandidate) {
+    setSelectedSymbol(item);
+    setBeforeContext(DEFAULT_BEFORE_CONTEXT);
+    setAfterContext(DEFAULT_AFTER_CONTEXT);
+    pendingWheelExpandRef.current = null;
+  }
+
+  function expandContext(direction: 'up' | 'down') {
+    if (!selectedSymbol || rendering) return;
+
+    if (direction === 'up') {
+      if (beforeContext >= MAX_BEFORE_CONTEXT) return;
+      pendingWheelExpandRef.current = 'up';
+      setBeforeContext((value) => Math.min(value + 20, MAX_BEFORE_CONTEXT));
+      return;
+    }
+
+    if (afterContext >= MAX_AFTER_CONTEXT) return;
+    pendingWheelExpandRef.current = 'down';
+    setAfterContext((value) => Math.min(value + 40, MAX_AFTER_CONTEXT));
+  }
+
+  function handleCodeWheel(event: React.WheelEvent<HTMLDivElement>) {
+    const panel = codePanelRef.current;
+    if (!panel || !selectedSymbol || rendering) return;
+
+    const nearTop = panel.scrollTop <= 0;
+    const nearBottom = panel.scrollHeight - (panel.scrollTop + panel.clientHeight) <= 0;
+
+    if (event.deltaY < 0 && nearTop && beforeContext < MAX_BEFORE_CONTEXT) {
+      event.preventDefault();
+      expandContext('up');
+      return;
+    }
+
+    if (event.deltaY > 0 && nearBottom && afterContext < MAX_AFTER_CONTEXT) {
+      event.preventDefault();
+      expandContext('down');
+    }
+  }
+
+  function handleSplitPointerDown(event: React.PointerEvent<HTMLDivElement>) {
+    if (contentWidth < STACK_LAYOUT_BREAKPOINT || !splitContainerRef.current) {
+      return;
+    }
+
+    event.preventDefault();
+    const bounds = splitContainerRef.current.getBoundingClientRect();
+    splitDragRef.current = { left: bounds.left, width: bounds.width };
+    setIsDraggingSplit(true);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function resetSplitWidth() {
+    splitRatioRef.current = DEFAULT_SPLIT_RATIO;
+    setSplitRatio(DEFAULT_SPLIT_RATIO);
+    setSavedSplitRatio(DEFAULT_SPLIT_RATIO);
+  }
+
+  const cardBg = isDark ? '#252526' : '#ffffff';
+  const borderColor = isDark ? '#3e3e42' : '#e4e4e7';
+  const mutedBg = isDark ? '#1f1f1f' : '#fafafa';
+  const codeBg = isDark ? '#111827' : '#f8fafc';
+  const currentSession = sessions.find((item) => item.sessionId === selectedSessionId);
+  const isStackedLayout = contentWidth > 0 && contentWidth < STACK_LAYOUT_BREAKPOINT;
+  const effectiveSplitRatio = clampPaneRatio(splitRatio, contentWidth || (MIN_LEFT_PANEL_WIDTH + MIN_RIGHT_PANEL_WIDTH + SPLIT_HANDLE_WIDTH));
+  const leftPaneWidth = !contentWidth || isStackedLayout
+    ? null
+    : Math.round(Math.max(MIN_LEFT_PANEL_WIDTH, (contentWidth - SPLIT_HANDLE_WIDTH) * effectiveSplitRatio));
+  const leftPaneContentWidth = leftPaneWidth ?? contentWidth;
+  const isCompactBindingLayout = contentWidth > 0 && contentWidth < 1240;
+  const isStackedBindingLayout = contentWidth > 0 && contentWidth < 860;
+  const isCompactCommandLayout = leftPaneContentWidth > 0 && leftPaneContentWidth < 720;
+  const isStackedCommandLayout = leftPaneContentWidth > 0 && leftPaneContentWidth < 560;
+  const compactSearchButton = leftPaneContentWidth > 0 && leftPaneContentWidth < 620;
+
+  return (
+    <div style={{ padding: 24 }}>
+      {contextHolder}
+
+      <div style={{ marginBottom: 20 }}>
+        <Title level={2} style={{ margin: 0 }}>源码上下文</Title>
+        <Paragraph type="secondary" style={{ margin: '8px 0 0' }}>
+          同一个页面里完成节点定位和源码渲染。先绑定本次问题的 repo / branch / commit，左侧执行节点命令并点击抽取出的函数候选，右侧实时渲染对应函数代码。
+        </Paragraph>
+      </div>
+
+      <Card
+        title="代码版本绑定"
+        style={{ background: cardBg, border: `1px solid ${borderColor}`, marginBottom: 16 }}
+      >
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: isStackedBindingLayout
+              ? 'minmax(0, 1fr)'
+              : isCompactBindingLayout
+              ? 'repeat(2, minmax(0, 1fr))'
+              : 'minmax(220px, 1.4fr) minmax(180px, 0.7fr) minmax(180px, 0.9fr) minmax(180px, 0.9fr) auto',
+            gap: 12,
+            alignItems: 'start',
+          }}
+        >
+          <Input
+            prefix={<CodeOutlined />}
+            placeholder="仓库 URL 或本地 repo 路径"
+            value={repo}
+            onChange={(event) => setRepo(event.target.value)}
+          />
+          <Input
+            prefix={<BranchesOutlined />}
+            placeholder="branch name"
+            value={branch}
+            onChange={(event) => setBranch(event.target.value)}
+          />
+          <Input
+            prefix={<CodeOutlined />}
+            placeholder="commit id"
+            value={commit}
+            onChange={(event) => setCommit(event.target.value)}
+          />
+          <Password
+            placeholder="访问 token（可选）"
+            value={token}
+            onChange={(event) => setToken(event.target.value)}
+          />
+          <div style={{ gridColumn: isCompactBindingLayout ? '1 / -1' : undefined }}>
+            <Button
+              type="primary"
+              icon={<ReloadOutlined />}
+              loading={openingContext}
+              onClick={() => void openContext()}
+              style={{ width: '100%' }}
+            >
+              绑定并准备代码
+            </Button>
+          </div>
+        </div>
+
+        {activeContext && (
+          <div style={{ marginTop: 12 }}>
+            <Space wrap>
+              <Tag color="processing">{activeContext.repoDisplayName}</Tag>
+              <Tag>{activeContext.branch}</Tag>
+              <Tag>{activeContext.commit.slice(0, 12)}</Tag>
+              <Tag color="blue">
+                {typeof activeContext.symbolCount === 'number'
+                  ? `函数索引 ${activeContext.symbolCount}`
+                  : '按需检索'}
+              </Tag>
+            </Space>
+          </div>
+        )}
+      </Card>
+
+      <div
+        ref={splitContainerRef}
+        style={{
+          display: 'grid',
+          gridTemplateColumns: !leftPaneWidth
+            ? 'minmax(0, 1fr)'
+            : `${leftPaneWidth}px ${SPLIT_HANDLE_WIDTH}px minmax(0, 1fr)`,
+          alignItems: 'start',
+          width: '100%',
+        }}
+      >
+        <div style={{ minWidth: 0, paddingRight: leftPaneWidth ? 8 : 0 }}>
+          <Space direction="vertical" size={16} style={{ width: '100%' }}>
+          <Card title="节点执行与函数提取" style={{ background: cardBg, border: `1px solid ${borderColor}` }}>
+            <Space direction="vertical" size={12} style={{ width: '100%' }}>
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: isStackedCommandLayout
+                    ? 'minmax(0, 1fr)'
+                    : isCompactCommandLayout
+                    ? 'repeat(2, minmax(0, 1fr))'
+                    : 'minmax(220px, 1fr) 110px 120px auto',
+                  gap: 8,
+                  alignItems: 'stretch',
+                }}
+              >
+                <div style={{ gridColumn: isCompactCommandLayout ? '1 / -1' : undefined }}>
+                  <Select
+                    loading={loadingSessions}
+                    value={selectedSessionId}
+                    placeholder="选择已连接节点"
+                    style={{ width: '100%' }}
+                    options={sessions.map((item) => ({
+                      value: item.sessionId,
+                      label: `${item.username}@${item.host}`,
+                    }))}
+                    onChange={(value) => setSelectedSessionId(String(value))}
+                  />
+                </div>
+                <Select
+                  value={commandMode}
+                  style={{ width: '100%' }}
+                  options={[
+                    { label: 'PTY', value: 'pty' },
+                    { label: 'Exec', value: 'exec' },
+                  ]}
+                  onChange={(value) => setCommandMode(value as 'pty' | 'exec')}
+                />
+                <InputNumber
+                  min={1000}
+                  max={120000}
+                  step={1000}
+                  value={commandTimeoutMs}
+                  onChange={(value) => setCommandTimeoutMs(Number(value || 20000))}
+                  style={{ width: '100%' }}
+                  addonAfter="ms"
+                />
+                <Button
+                  icon={<ReloadOutlined />}
+                  onClick={() => void fetchSessions()}
+                  loading={loadingSessions}
+                  style={{ width: '100%' }}
+                >
+                  刷新节点
+                </Button>
+              </div>
+
+              {currentSession ? (
+                <Text type="secondary">当前节点：{currentSession.username}@{currentSession.host}</Text>
+              ) : (
+                <Alert type="warning" showIcon message="请先在 SSH Manager 中建立节点会话" />
+              )}
+
+              <TextArea
+                value={commandText}
+                onChange={(event) => setCommandText(event.target.value)}
+                autoSize={{ minRows: 3, maxRows: 6 }}
+                placeholder="输入排障命令，例如 tail -200 /path/to/log | grep -E 'panic|Exception|CreateOrder'"
+              />
+
+              <Space wrap>
+                <Button
+                  type="primary"
+                  icon={<CodeOutlined />}
+                  loading={executingCommand}
+                  onClick={() => void executeCommand()}
+                >
+                  在节点执行
+                </Button>
+                {activeFunctionToken && (
+                  <Tag color="magenta">当前选中函数：{activeFunctionToken.token}</Tag>
+                )}
+              </Space>
+
+              {commandRuns.length === 0 ? (
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="节点执行结果会出现在这里，并自动抽取函数候选" />
+              ) : (
+                <List
+                  size="small"
+                  dataSource={commandRuns}
+                  renderItem={(item) => (
+                    <List.Item style={{ display: 'block', paddingInline: 0 }}>
+                      <Card
+                        size="small"
+                        style={{ background: mutedBg, border: `1px solid ${borderColor}` }}
+                        title={
+                          <Space wrap>
+                            <Text strong>{item.sessionLabel}</Text>
+                            <Tag>{item.mode}</Tag>
+                            <Tag color={item.exitCode === 0 ? 'success' : 'error'}>exit {item.exitCode}</Tag>
+                            <Tag>{item.durationMs}ms</Tag>
+                          </Space>
+                        }
+                      >
+                        <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                          <Text code>{item.command}</Text>
+
+                          <div>
+                            <Text type="secondary">函数候选</Text>
+                            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
+                              {item.functionCandidates.length === 0 ? (
+                                <Text type="secondary">未从本次输出里识别到明显函数名</Text>
+                              ) : (
+                                item.functionCandidates.map((candidate) => (
+                                  <Tooltip key={`${item.id}-${candidate.token}`} title={candidate.sampleLine}>
+                                    <Tag
+                                      color={activeFunctionToken?.token === candidate.token ? 'magenta' : 'blue'}
+                                      style={{ cursor: 'pointer', paddingInline: 10 }}
+                                      onClick={() => void handleFunctionCandidateClick(candidate)}
+                                    >
+                                      {candidate.token} · {candidate.hits}
+                                    </Tag>
+                                  </Tooltip>
+                                ))
+                              )}
+                            </div>
+                          </div>
+
+                          {item.stdout && (
+                            <div>
+                              <Text strong>stdout</Text>
+                              <ResizableOutput content={item.stdout} isDark={isDark} minHeight={56} maxHeight={220} />
+                            </div>
+                          )}
+
+                          {item.stderr && (
+                            <div>
+                              <Text strong>stderr</Text>
+                              <ResizableOutput content={item.stderr} isDark={isDark} minHeight={56} maxHeight={220} />
+                            </div>
+                          )}
+                        </Space>
+                      </Card>
+                    </List.Item>
+                  )}
+                />
+              )}
+            </Space>
+          </Card>
+
+          <Card title="函数候选与补充检索" style={{ background: cardBg, border: `1px solid ${borderColor}` }}>
+            <Space direction="vertical" size={12} style={{ width: '100%' }}>
+              <Search
+                placeholder="可手动补充函数名搜索，例如 CreateOrder"
+                value={query}
+                enterButton={compactSearchButton ? <SearchOutlined /> : <><SearchOutlined /> 搜索</>}
+                onChange={(event) => setQuery(event.target.value)}
+                onSearch={(value) => void searchFunctions(value)}
+                loading={searching}
+                disabled={!activeContext}
+              />
+
+              {!activeContext ? (
+                <Alert type="warning" showIcon message="请先绑定代码版本，再执行节点命令或搜索函数" />
+              ) : results.length === 0 ? (
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="点击左侧抽取出的函数候选后，匹配结果会列在这里" />
+              ) : (
+                <List
+                  size="small"
+                  dataSource={results}
+                  renderItem={(item) => (
+                    <List.Item
+                      onClick={() => handleSelectSymbol(item)}
+                      style={{
+                        cursor: 'pointer',
+                        borderRadius: 8,
+                        paddingInline: 10,
+                        background: selectedSymbol?.id === item.id
+                          ? (isDark ? '#1e3a5f' : '#eff6ff')
+                          : 'transparent',
+                      }}
+                    >
+                      <List.Item.Meta
+                        title={
+                          <Space wrap>
+                            <Text strong>{item.name}</Text>
+                            <Tag color={item.matchType === 'exact' ? 'success' : 'default'}>{item.matchType}</Tag>
+                            <Tag>{item.language}</Tag>
+                          </Space>
+                        }
+                        description={
+                          <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                            <Text code>{item.path}:{item.line}</Text>
+                            <Text type="secondary">{item.signature}</Text>
+                          </Space>
+                        }
+                      />
+                    </List.Item>
+                  )}
+                />
+              )}
+            </Space>
+          </Card>
+          </Space>
+        </div>
+
+        {leftPaneWidth && (
+          <div
+            onPointerDown={handleSplitPointerDown}
+            onDoubleClick={resetSplitWidth}
+            title="拖拽调整左右宽度，双击恢复默认布局"
+            style={{
+              minHeight: 640,
+              display: 'flex',
+              alignItems: 'stretch',
+              justifyContent: 'center',
+              cursor: 'col-resize',
+              userSelect: 'none',
+              touchAction: 'none',
+              padding: '0 2px',
+            }}
+          >
+            <div
+              style={{
+                width: 2,
+                borderRadius: 999,
+                background: isDraggingSplit
+                  ? (isDark ? '#60a5fa' : '#2563eb')
+                  : (isDark ? '#4b5563' : '#cbd5e1'),
+                boxShadow: isDraggingSplit
+                  ? `0 0 0 4px ${isDark ? 'rgba(96, 165, 250, 0.18)' : 'rgba(37, 99, 235, 0.12)'}`
+                  : 'none',
+                transition: isDraggingSplit ? 'none' : 'background 0.2s ease, box-shadow 0.2s ease',
+              }}
+            />
+          </div>
+        )}
+
+        <div style={{ minWidth: 0, paddingLeft: leftPaneWidth ? 8 : 0, marginTop: leftPaneWidth ? 0 : 16 }}>
+          <Card
+          title="函数源码"
+          style={{ background: cardBg, border: `1px solid ${borderColor}` }}
+          extra={
+            rendered && (
+              <Space wrap>
+                <Button size="small" onClick={() => expandContext('up')} disabled={rendering || beforeContext >= MAX_BEFORE_CONTEXT}>
+                  上文 +20
+                </Button>
+                <Button size="small" onClick={() => expandContext('down')} disabled={rendering || afterContext >= MAX_AFTER_CONTEXT}>
+                  下文 +40
+                </Button>
+              </Space>
+            )
+          }
+        >
+          {!selectedSymbol ? (
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="左侧执行节点命令后点击函数候选，右侧会实时渲染对应源码" />
+          ) : rendering && !rendered ? (
+            <div style={{ textAlign: 'center', padding: '80px 0' }}>
+              <Spin />
+            </div>
+          ) : !rendered ? (
+            <Alert type="warning" showIcon message="暂未加载到函数源码" />
+          ) : (
+            <Space direction="vertical" size={12} style={{ width: '100%' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10 }}>
+                <div style={{ background: mutedBg, borderRadius: 8, padding: 10 }}>
+                  <Text type="secondary">函数</Text>
+                  <div><Text strong>{rendered.symbol.name}</Text></div>
+                </div>
+                <div style={{ background: mutedBg, borderRadius: 8, padding: 10 }}>
+                  <Text type="secondary">文件</Text>
+                  <div><Text code>{rendered.symbol.path}:{rendered.symbol.line}</Text></div>
+                </div>
+                <div style={{ background: mutedBg, borderRadius: 8, padding: 10 }}>
+                  <Text type="secondary">函数范围</Text>
+                  <div><Text strong>{rendered.functionStartLine} - {rendered.functionEndLine}</Text></div>
+                </div>
+              </div>
+
+              <Alert
+                type="info"
+                showIcon
+                message={rendered.signature}
+                description="在代码面板顶部或底部继续滚轮，可以自动补更多上下文。"
+              />
+
+              <div
+                ref={codePanelRef}
+                onWheel={handleCodeWheel}
+                style={{
+                  height: 820,
+                  overflow: 'auto',
+                  borderRadius: 8,
+                  border: `1px solid ${borderColor}`,
+                  background: codeBg,
+                  padding: '10px 0',
+                }}
+              >
+                {rendering && (
+                  <div style={{ position: 'sticky', top: 0, zIndex: 1, padding: '0 12px 8px' }}>
+                    <Tag color="processing">更新上下文中...</Tag>
+                  </div>
+                )}
+
+                {rendered.lines.map((line) => (
+                  <div
+                    key={`${line.lineNumber}-${line.text}`}
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: '72px 1fr',
+                      gap: 12,
+                      padding: '0 16px',
+                      minHeight: APPROX_LINE_HEIGHT,
+                      lineHeight: `${APPROX_LINE_HEIGHT}px`,
+                      background: line.isDeclaration
+                        ? (isDark ? 'rgba(59, 130, 246, 0.22)' : 'rgba(59, 130, 246, 0.12)')
+                        : line.inFunction
+                        ? (isDark ? 'rgba(15, 23, 42, 0.38)' : 'rgba(241, 245, 249, 0.92)')
+                        : 'transparent',
+                    }}
+                  >
+                    <Text
+                      type="secondary"
+                      style={{
+                        userSelect: 'none',
+                        textAlign: 'right',
+                        fontFamily: 'JetBrains Mono, Fira Code, monospace',
+                        fontSize: 12,
+                      }}
+                    >
+                      {line.lineNumber}
+                    </Text>
+                    <pre
+                      style={{
+                        margin: 0,
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-word',
+                        fontFamily: 'JetBrains Mono, Fira Code, monospace',
+                        fontSize: 12,
+                        color: isDark ? '#e5e7eb' : '#111827',
+                      }}
+                    >
+                      {line.text || ' '}
+                    </pre>
+                  </div>
+                ))}
+              </div>
+            </Space>
+          )}
+          </Card>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default CodeContextExplorer;

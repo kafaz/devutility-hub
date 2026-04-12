@@ -9,37 +9,38 @@
  *   5. 多工具关联分析 - 结合多种数据源定位问题
  */
 import {
-  AreaChartOutlined,
-  BarChartOutlined,
-  ClearOutlined,
-  CopyOutlined,
-  DashboardOutlined,
-  FireOutlined,
-  PlayCircleOutlined,
-  SearchOutlined,
-  ThunderboltOutlined,
+    AreaChartOutlined,
+    BarChartOutlined,
+    ClearOutlined,
+    CopyOutlined,
+    DashboardOutlined,
+    FireOutlined,
+    PlayCircleOutlined,
+    SearchOutlined,
+    ThunderboltOutlined,
 } from '@ant-design/icons';
-import {
-  Alert,
-  Button,
-  Card,
-  Col,
-  Input,
-  Progress,
-  Row,
-  Select,
-  Space,
-  Statistic,
-  Table,
-  Tabs,
-  Tag,
-  Timeline,
-  Typography,
-} from 'antd';
-import React, { useCallback, useMemo, useState } from 'react';
-import { useGlobalStore } from '../../store/globalStore';
-import { useClipboard } from '../../hooks/useClipboard';
 import type { TabsProps } from 'antd';
+import {
+    Alert,
+    Button,
+    Card,
+    Col,
+    Input,
+    Progress,
+    Row,
+    Select,
+    Space,
+    Statistic,
+    Table,
+    Tabs,
+    Tag,
+    Timeline,
+    Typography,
+} from 'antd';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { useClipboard } from '../../hooks/useClipboard';
+import { useGlobalStore } from '../../store/globalStore';
+import { useSSHStore } from '../SSHManager/store/sshStore';
 
 const { Title, Text } = Typography;
 const { TextArea } = Input;
@@ -276,11 +277,30 @@ const IOStatAnalyzer: React.FC = () => {
   const isDark = theme === 'dark';
   const [input, setInput] = useState('');
   const [entries, setEntries] = useState<IOStatEntry[]>([]);
-  
-  const analyze = useCallback(() => {
-    const parsed = parseIOStat(input);
+  const { sessions, subscribeToSessionLines } = useSSHStore();
+  const [liveSessionId, setLiveSessionId] = useState<string | null>(null);
+
+  const analyze = useCallback((textToAnalyze: string = input) => {
+    const parsed = parseIOStat(textToAnalyze);
     setEntries(parsed);
   }, [input]);
+
+  useEffect(() => {
+    if (!liveSessionId) return;
+    const unsub = subscribeToSessionLines(liveSessionId, (line) => {
+      setInput((prev) => {
+        const newVal = prev + line + '\n';
+        // Auto parse new lines
+        const parsed = parseIOStat(newVal);
+        // Only update if there's actually a valid iostat line that we found
+        if (parsed.length > 0) setEntries(parsed);
+        // keep input bounded to avoid memory explosion
+        if (newVal.length > 50000) return newVal.slice(-50000);
+        return newVal;
+      });
+    });
+    return unsub;
+  }, [liveSessionId, subscribeToSessionLines]);
   
   const hotspots = useMemo(() => analyzeIOHotspots(entries), [entries]);
   
@@ -317,18 +337,34 @@ const IOStatAnalyzer: React.FC = () => {
         }
       />
       
+      <Space style={{ marginBottom: 8 }}>
+        <Text strong>实时 SSH 数据源：</Text>
+        <Select 
+          allowClear 
+          placeholder="选择活动的 SSH 会话以实时捕获" 
+          style={{ width: 250 }}
+          value={liveSessionId}
+          onChange={setLiveSessionId}
+          options={sessions.map(s => ({ label: s.name, value: s.id }))}
+        />
+        {liveSessionId && <Tag color="green" style={{ marginLeft: 8 }}><PlayCircleOutlined /> 正在监听...</Tag>}
+      </Space>
+
       <TextArea
         rows={8}
         placeholder={`示例：
 Device            r/s     w/s     rMB/s     wMB/s   rrqm/s   wrqm/s  %rrqm  %wrqm r_await w_await aqu-sz rareq-sz wareq-sz  svctm  %util
 nvme0n1       1000.00  500.00    250.00    125.00     0.00     0.00   0.00   0.00    2.50    5.00   3.50     256.00     256.00   0.50  75.00`}
         value={input}
-        onChange={e => setInput(e.target.value)}
+        onChange={e => {
+          setInput(e.target.value);
+          if (!liveSessionId) analyze(e.target.value); // static auto-parse
+        }}
         style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12 }}
       />
       
       <Space>
-        <Button type="primary" icon={<SearchOutlined />} onClick={analyze}>分析</Button>
+        <Button type="primary" icon={<SearchOutlined />} onClick={() => analyze(input)}>分析</Button>
         <Button icon={<ClearOutlined />} onClick={() => { setInput(''); setEntries([]); }}>清空</Button>
       </Space>
       
@@ -371,11 +407,27 @@ const DDAnalyzer: React.FC = () => {
   const isDark = theme === 'dark';
   const [input, setInput] = useState('');
   const [result, setResult] = useState<DDResult | null>(null);
+  const { sessions, subscribeToSessionLines } = useSSHStore();
+  const [liveSessionId, setLiveSessionId] = useState<string | null>(null);
   
-  const analyze = useCallback(() => {
-    const parsed = parseDD(input);
-    setResult(parsed);
+  const analyze = useCallback((textToAnalyze: string = input) => {
+    const parsed = parseDD(textToAnalyze);
+    if (parsed) setResult(parsed);
   }, [input]);
+
+  useEffect(() => {
+    if (!liveSessionId) return;
+    const unsub = subscribeToSessionLines(liveSessionId, (line) => {
+      setInput((prev) => {
+        const newVal = prev + line + '\n';
+        const parsed = parseDD(newVal);
+        if (parsed) setResult(parsed);
+        if (newVal.length > 10000) return newVal.slice(-10000);
+        return newVal;
+      });
+    });
+    return unsub;
+  }, [liveSessionId, subscribeToSessionLines]);
   
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -390,6 +442,19 @@ const DDAnalyzer: React.FC = () => {
         }
       />
       
+      <Space style={{ marginBottom: 8 }}>
+        <Text strong>实时 SSH 数据源：</Text>
+        <Select 
+          allowClear 
+          placeholder="选择活动的 SSH 会话以实时捕获" 
+          style={{ width: 250 }}
+          value={liveSessionId}
+          onChange={setLiveSessionId}
+          options={sessions.map(s => ({ label: s.name, value: s.id }))}
+        />
+        {liveSessionId && <Tag color="green" style={{ marginLeft: 8 }}><PlayCircleOutlined /> 正在监听...</Tag>}
+      </Space>
+
       <TextArea
         rows={6}
         placeholder={`示例：
@@ -398,12 +463,15 @@ $ dd if=/dev/zero of=/mnt/test bs=1M count=1024 oflag=direct
 1024+0 records out
 1073741824 bytes (1.1 GB, 1.0 GiB) copied, 2.34567 s, 458 MB/s`}
         value={input}
-        onChange={e => setInput(e.target.value)}
+        onChange={e => {
+            setInput(e.target.value);
+            if (!liveSessionId) analyze(e.target.value);
+        }}
         style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: 12 }}
       />
       
       <Space>
-        <Button type="primary" icon={<PlayCircleOutlined />} onClick={analyze}>分析性能</Button>
+        <Button type="primary" icon={<PlayCircleOutlined />} onClick={() => analyze(input)}>分析性能</Button>
         <Button icon={<ClearOutlined />} onClick={() => { setInput(''); setResult(null); }}>清空</Button>
       </Space>
       
@@ -458,11 +526,27 @@ const BlktraceVisualizer: React.FC = () => {
   const isDark = theme === 'dark';
   const [input, setInput] = useState('');
   const [events, setEvents] = useState<BlktraceEvent[]>([]);
+  const { sessions, subscribeToSessionLines } = useSSHStore();
+  const [liveSessionId, setLiveSessionId] = useState<string | null>(null);
   
-  const analyze = useCallback(() => {
-    const parsed = parseBlktrace(input);
+  const analyze = useCallback((textToAnalyze: string = input) => {
+    const parsed = parseBlktrace(textToAnalyze);
     setEvents(parsed);
   }, [input]);
+
+  useEffect(() => {
+    if (!liveSessionId) return;
+    const unsub = subscribeToSessionLines(liveSessionId, (line) => {
+      setInput((prev) => {
+        const newVal = prev + line + '\n';
+        const parsed = parseBlktrace(newVal);
+        if (parsed.length > 0) setEvents(parsed);
+        if (newVal.length > 100000) return newVal.slice(-100000);
+        return newVal;
+      });
+    });
+    return unsub;
+  }, [liveSessionId, subscribeToSessionLines]);
   
   // 简化的瀑布图数据准备
   const timelineData = useMemo(() => {
@@ -487,6 +571,19 @@ const BlktraceVisualizer: React.FC = () => {
         }
       />
       
+      <Space style={{ marginBottom: 8 }}>
+        <Text strong>实时 SSH 数据源：</Text>
+        <Select 
+          allowClear 
+          placeholder="选择活动的 SSH 会话以实时捕获" 
+          style={{ width: 250 }}
+          value={liveSessionId}
+          onChange={setLiveSessionId}
+          options={sessions.map(s => ({ label: s.name, value: s.id }))}
+        />
+        {liveSessionId && <Tag color="green" style={{ marginLeft: 8 }}><PlayCircleOutlined /> 正在监听...</Tag>}
+      </Space>
+
       <TextArea
         rows={8}
         placeholder="粘贴 blkparse 输出..."
@@ -496,7 +593,7 @@ const BlktraceVisualizer: React.FC = () => {
       />
       
       <Space>
-        <Button type="primary" icon={<AreaChartOutlined />} onClick={analyze}>生成瀑布图</Button>
+        <Button type="primary" icon={<AreaChartOutlined />} onClick={() => analyze(input)}>生成瀑布图</Button>
         <Button icon={<ClearOutlined />} onClick={() => { setInput(''); setEvents([]); }}>清空</Button>
       </Space>
       

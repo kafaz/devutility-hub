@@ -54,7 +54,9 @@ import {
     generateMultiNodeReport, renderTemplate,
 } from '../../utils';
 import { useSOPStore } from '../SOPBuilder/store/sopStore';
+import KeywordAnalyzer from './components/KeywordAnalyzer';
 import SessionJournal from './components/SessionJournal';
+import { useAnalyzerStore } from './store/analyzerStore';
 import { useCronStore } from './store/cronStore';
 import { useJournalStore } from './store/journalStore';
 import type { NodeExecution, PlanStepResult, SSHProfile, SSHSession } from './store/sshStore';
@@ -448,6 +450,7 @@ const CronJobList = React.lazy(() => import('./components/CronJobList'));
 const SSHManager: React.FC = () => {
   const { theme } = useGlobalStore();
   const isDark    = theme === 'dark';
+  const analyzerLogCount = useAnalyzerStore(s => s.logs.length);
 
   const {
     profiles, sessions, activeSessionId, proxyOnline, multiNodeRun,
@@ -477,7 +480,7 @@ const SSHManager: React.FC = () => {
   const [targetedMap, setTargetedMap]     = useState<Record<string, string>>({});
   const [varValues,   setVarValues]       = useState<Record<string, string>>({});
   const [executing,   setExecuting]       = useState(false);
-  const [activeView,  setActiveView]      = useState<'terminal' | 'progress' | 'journal'>('terminal');
+  const [activeView,  setActiveView]      = useState<'terminal' | 'progress' | 'journal' | 'analyzer'>('terminal');
   const [activeTab, setActiveTab] = useState('connect'); // 'connect' | 'multi_node' | 'cron'
 
   // ── 终端写入函数 Map（每会话一个） ────────────────────────────────────────
@@ -1107,6 +1110,10 @@ const SSHManager: React.FC = () => {
                   : '会话日志',
                 value: 'journal',
               },
+              {
+                label: analyzerLogCount > 0 ? `智能监控 (${analyzerLogCount})` : '智能监控',
+                value: 'analyzer',
+              },
             ]}
           />
 
@@ -1254,6 +1261,17 @@ const SSHManager: React.FC = () => {
                   请先从左侧选择一个会话
                 </div>
               )}
+            </div>
+          )}
+
+          {/* ── 智能监控视图 */}
+          {activeView === 'analyzer' && (
+            <div style={{
+              border: `1px solid ${borderColor}`, borderRadius: 6,
+              minHeight: 400, display: 'flex', flexDirection: 'column',
+              overflow: 'hidden', height: sessions.length > 0 ? 'calc(100% - 34px)' : '100%'
+            }}>
+              <KeywordAnalyzer />
             </div>
           )}
         </div>

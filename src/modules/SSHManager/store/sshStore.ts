@@ -15,6 +15,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { generateId } from '../../../utils';
+import { useAnalyzerStore } from './analyzerStore';
 import { useJournalStore } from './journalStore';
 
 // ─── 类型定义 ──────────────────────────────────────────────────────────────
@@ -117,6 +118,8 @@ interface SessionRuntime {
   // 14-E: asciinema 录像数据
   recordingFrames:    { t: number; data: string }[];
   recordingStartedAt: number | null;
+  // 智能抓取日志使用
+  lineBuffer: string;
 }
 
 const runtimes = new Map<string, SessionRuntime>();
@@ -129,6 +132,7 @@ function getRT(sessionId: string): SessionRuntime {
       planNodeResolve: null, planAborted: false,
       pendingManualCmd: null,
       recordingFrames: [], recordingStartedAt: null,
+      lineBuffer: '',
     });
   }
   return runtimes.get(sessionId)!;
@@ -205,6 +209,10 @@ interface SSHStore {
   cancelMultiNodeRun: () => void;
   clearMultiNodeRun:  () => void;
 
+  // 监听独立会话的实时行数据（去除 ANSI）
+  termLineListeners: Record<string, ((line: string) => void)[]>;
+  subscribeToSessionLines: (sessionId: string, cb: (line: string) => void) => () => void;
+
   // 私钥路径验证
   checkKeyFile: (path: string) => Promise<{ ok: boolean; resolved?: string; msg?: string }>;
 }
@@ -240,6 +248,7 @@ function makeWSHandler(
 
       case 'data': {
         const payload = msg.data as string;
+        let finalPayload = payload;
         try {
           const bin = atob(payload);
           rt.terminalBuffer += bin;
@@ -250,8 +259,86 @@ function makeWSHandler(
               rt.pendingManualCmd.startIndex = Math.max(0, rt.pendingManualCmd.startIndex - drop);
             }
           }
+
+          // ---- 智能日志抽取逻辑 ----
+          const bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          const chunkUtf8 = new TextDecoder('utf-8', { fatal: false }).decode(bytes); // For simple analytics
+          
+          rt.lineBuffer += chunkUtf8;
+          const lines = rt.lineBuffer.split('\n');
+          rt.lineBuffer = lines.pop() ?? '';
+
+          const analyzerStore = useAnalyzerStore.getState();
+          const highlightRules = analyzerStore.highlightRules;
+          
+          // Apply ANSI highlighting dynamically if user defined rules
+          if (highlightRules && highlightRules.length > 0) {
+            let colorizedUtf8 = chunkUtf8;
+            highlightRules.forEach(rule => {
+                if (!rule.keyword) return;
+                const hex = rule.color.replace('#', '');
+                const r = parseInt(hex.substring(0, 2), 16) || 255;
+                const g = parseInt(hex.substring(2, 4), 16) || 255;
+                const b = parseInt(hex.substring(4, 6), 16) || 255;
+                
+                // Extremely basic replacement (might misfire inside ANSI codes but works for pure text words)
+                try {
+                  const regex = new RegExp(`(${rule.keyword})`, 'gi');
+                  colorizedUtf8 = colorizedUtf8.replace(regex, `\x1b[38;2;${r};${g};${b}m$1\x1b[0m`);
+                } catch { /* ignore bad regex */ }
+            });
+
+            if (colorizedUtf8 !== chunkUtf8) {
+              const newBytes = new TextEncoder().encode(colorizedUtf8);
+              let binary = '';
+              for (let i = 0; i < newBytes.byteLength; i++) binary += String.fromCharCode(newBytes[i]);
+              finalPayload = btoa(binary);
+            }
+          }
+
+          if (lines.length > 0) {
+            const keywords = analyzerStore.keywords;
+            const sess = get().sessions.find(s => s.id === sessionId);
+            const lineListeners = get().termLineListeners[sessionId] || [];
+
+            for (const line of lines) {
+              /* eslint-disable no-control-regex */
+              const cleanLine = line
+                .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+                .replace(/\x1b\][^\x07]*\x07/g, '')
+                .replace(/\x1b[()][0-9A-Za-z]/g, '')
+                .replace(/\x1b[=>]/g, '')
+                .trim();
+              /* eslint-enable no-control-regex */
+              
+              if (lineListeners.length > 0) {
+                lineListeners.forEach(cb => cb(cleanLine));
+              }
+
+              if (!cleanLine) continue;
+
+              const cleanLower = cleanLine.toLowerCase();
+              const matched = keywords.filter(k => cleanLower.includes(k));
+              
+              if (matched.length > 0) {
+                let type: 'error' | 'data' | 'keyword' = 'keyword';
+                if (matched.some(k => ['error', 'exception', 'fail', 'failed', 'panic', 'fatal'].includes(k))) type = 'error';
+                else if (matched.some(k => ['data'].includes(k))) type = 'data';
+
+                analyzerStore.addLog({
+                  sessionId,
+                  sessionName: sess?.name || sessionId,
+                  timestamp: Date.now(),
+                  type,
+                  text: cleanLine,
+                  matchedKeywords: matched,
+                });
+              }
+            }
+          }
         } catch { /* ignore base64 parse error */ }
-        rt.onTermData?.(payload);
+        rt.onTermData?.(finalPayload);
 
         // 14-E: asciinema \u5f55\u50cf — \u8ffd\u52a0\u5e27\u6570\u636e
         if (rt.recordingStartedAt !== null) {
@@ -391,6 +478,7 @@ export const useSSHStore = create<SSHStore>()(
       activeSessionId: null,
       proxyOnline:     false,
       multiNodeRun:    null,
+      termLineListeners: {},
 
       // ── 档案管理 ──────────────────────────────────────────────────────────
 
@@ -433,6 +521,19 @@ export const useSSHStore = create<SSHStore>()(
         })),
 
       setActiveSession: (id) => set({ activeSessionId: id }),
+
+      subscribeToSessionLines: (sessionId, cb) => {
+        set((s) => {
+          const arr = s.termLineListeners[sessionId] || [];
+          return { termLineListeners: { ...s.termLineListeners, [sessionId]: [...arr, cb] } };
+        });
+        return () => {
+          set((s) => {
+            const arr = s.termLineListeners[sessionId] || [];
+            return { termLineListeners: { ...s.termLineListeners, [sessionId]: arr.filter(x => x !== cb) } };
+          });
+        };
+      },
 
       // ── 代理健康检查 ──────────────────────────────────────────────────────
 

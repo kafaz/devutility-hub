@@ -57,6 +57,14 @@ const toolsConfig: ToolConfig[] = [
     category: 'utility',
     version: '1.0.0',
   },
+  {
+    id: 'code-context-explorer',
+    name: '源码上下文',
+    icon: 'BulbOutlined',
+    description: '绑定 repo / branch / commit 后检索函数并渲染源码上下文',
+    category: 'utility',
+    version: '1.0.0',
+  },
 ];
 
 export default toolsConfig;

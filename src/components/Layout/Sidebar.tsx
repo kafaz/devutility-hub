@@ -43,6 +43,7 @@ const ICON_MAP: Record<string, React.ReactNode> = {
   BarChartOutlined:   <BarChartOutlined />,
   ToolOutlined:       <ToolOutlined />,
   RadarChartOutlined: <RadarChartOutlined />,
+  BulbOutlined:       <BulbOutlined />,
 };
 
 const tools = [
@@ -135,6 +136,12 @@ const tools = [
     name: '诊断工作台',
     icon: 'RadarChartOutlined',
     path: '/diagnostic-workbench',
+  },
+  {
+    id:   'code-context-explorer',
+    name: '源码上下文',
+    icon: 'BulbOutlined',
+    path: '/code-context-explorer',
   },
 ];
 
