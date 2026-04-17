@@ -16,19 +16,8 @@ const SOURCE_EXTENSIONS = new Set([
   '.cc',
   '.cpp',
   '.cxx',
-  '.go',
   '.h',
   '.hpp',
-  '.java',
-  '.js',
-  '.jsx',
-  '.kt',
-  '.mjs',
-  '.php',
-  '.py',
-  '.rs',
-  '.ts',
-  '.tsx',
 ]);
 
 const IGNORED_PATH_SEGMENTS = new Set([
@@ -401,7 +390,7 @@ function extractSymbolsFromLines(lines, relativePath) {
       /^\s*(?:public|protected|private)?\s*(?:static\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/,
     ],
     'c-family': [
-      /^\s*(?:template\s*<[^>]+>\s*)?(?:[\w:*<>\[\]&~]+\s+)+([A-Za-z_][A-Za-z0-9_:~]*)\s*\([^;]*\)\s*(?:const)?\s*\{/,
+      /^\s*(?:template\s*<[^>]+>\s*)?(?:[\w:*<>\[\]&~]+\s+)+([A-Za-z_][A-Za-z0-9_:~]*)\s*\([^;]*\)\s*(?:const|override|final|noexcept|volatile)?\s*(?:\{|$)/,
     ],
   };
 

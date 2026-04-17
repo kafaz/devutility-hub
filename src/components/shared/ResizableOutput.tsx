@@ -26,6 +26,7 @@ interface ResizableOutputProps {
   /** 可编辑模式：提供此回调则切换为 textarea */
   onChange?:    (value: string) => void;
   placeholder?: string;
+  onTextSelect?: (text: string) => void;
 }
 
 const ResizableOutput: React.FC<ResizableOutputProps> = ({
@@ -38,6 +39,7 @@ const ResizableOutput: React.FC<ResizableOutputProps> = ({
   highlights  = [],
   onChange,
   placeholder = '粘贴输出结果...',
+  onTextSelect,
 }) => {
   const [height, setHeight] = useState(minHeight);
   const dragRef             = useRef<{ startY: number; startH: number } | null>(null);
@@ -147,6 +149,16 @@ const ResizableOutput: React.FC<ResizableOutputProps> = ({
         />
       ) : (
         <pre
+          onMouseUp={() => {
+            if (!onTextSelect) return;
+            const selection = window.getSelection();
+            if (selection) {
+              const text = selection.toString().trim();
+              if (text && /^[A-Za-z_][A-Za-z0-9_:]*$/.test(text)) {
+                onTextSelect(text);
+              }
+            }
+          }}
           style={{
             ...sharedStyle,
             whiteSpace: 'pre-wrap',

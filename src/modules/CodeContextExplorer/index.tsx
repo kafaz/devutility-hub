@@ -164,9 +164,12 @@ function isLikelyFunctionToken(rawToken: string) {
 }
 
 function extractFunctionCandidates(text: string) {
-  const patterns = [
-    // 匹配类似 ****[func_name:123]**** 日志格式
+  const exactPatterns = [
+    // 匹配明确的日志格式 ***[func_name:123] ***
     /\[([A-Za-z_][A-Za-z0-9_:]*):\d+\]/g,
+  ];
+
+  const fuzzyPatterns = [
     /\b([A-Za-z_][A-Za-z0-9_$]*(?:(?:::|->|\.)[A-Za-z_][A-Za-z0-9_$]+)+)\b/g,
     /\b([A-Za-z_][A-Za-z0-9_$]*)\s*(?=\()/g,
     /\b([a-z]+(?:[A-Z][A-Za-z0-9_$]*)+)\b/g,
@@ -180,27 +183,34 @@ function extractFunctionCandidates(text: string) {
     .filter(Boolean)
     .slice(0, 500);
 
+  const processToken = (match: RegExpMatchArray, line: string, isExact: boolean) => {
+    const token = String(match[1] || '').trim();
+    if (!token) return;
+
+    if (!isExact && !isLikelyFunctionToken(token)) return;
+
+    const query = normalizeFunctionQuery(token);
+    if (!query || query.length < 2 || FUNCTION_CANDIDATE_BLACKLIST.has(query.toLowerCase())) return;
+
+    const existing = candidateMap.get(token);
+    if (existing) {
+      existing.hits += 1;
+    } else {
+      candidateMap.set(token, {
+        token,
+        query,
+        hits: 1,
+        sampleLine: line.slice(0, 220),
+      });
+    }
+  };
+
   lines.forEach((line) => {
-    patterns.forEach((pattern) => {
-      for (const match of line.matchAll(pattern)) {
-        const token = String(match[1] || '').trim();
-        if (!isLikelyFunctionToken(token)) continue;
-
-        const query = normalizeFunctionQuery(token);
-        if (!query) continue;
-
-        const existing = candidateMap.get(token);
-        if (existing) {
-          existing.hits += 1;
-        } else {
-          candidateMap.set(token, {
-            token,
-            query,
-            hits: 1,
-            sampleLine: line.slice(0, 220),
-          });
-        }
-      }
+    exactPatterns.forEach((pattern) => {
+      for (const match of line.matchAll(pattern)) processToken(match, line, true);
+    });
+    fuzzyPatterns.forEach((pattern) => {
+      for (const match of line.matchAll(pattern)) processToken(match, line, false);
     });
   });
 
@@ -563,6 +573,13 @@ const CodeContextExplorer: React.FC = () => {
     await searchFunctions(candidate.query);
   }
 
+  async function handleTextSelect(text: string) {
+    if (!text || text.length < 2) return;
+    setQuery(text);
+    setActiveFunctionToken({ token: text, query: text, hits: 1, sampleLine: `手动选取: ${text}` });
+    await searchFunctions(text);
+  }
+
   function handleSelectSymbol(item: SymbolCandidate) {
     setSelectedSymbol(item);
     setBeforeContext(DEFAULT_BEFORE_CONTEXT);
@@ -862,14 +879,22 @@ const CodeContextExplorer: React.FC = () => {
                           {item.stdout && (
                             <div>
                               <Text strong>stdout</Text>
-                              <ResizableOutput content={item.stdout} isDark={isDark} minHeight={56} maxHeight={220} />
+                              <ResizableOutput 
+                                content={item.stdout} 
+                                isDark={isDark} minHeight={56} maxHeight={220} 
+                                onTextSelect={(text) => void handleTextSelect(text)}
+                              />
                             </div>
                           )}
 
                           {item.stderr && (
                             <div>
                               <Text strong>stderr</Text>
-                              <ResizableOutput content={item.stderr} isDark={isDark} minHeight={56} maxHeight={220} />
+                              <ResizableOutput 
+                                content={item.stderr} 
+                                isDark={isDark} minHeight={56} maxHeight={220} 
+                                onTextSelect={(text) => void handleTextSelect(text)}
+                              />
                             </div>
                           )}
                         </Space>
