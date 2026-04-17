@@ -282,7 +282,7 @@ export const useBenchmarkStore = create<BenchmarkStore>()(
           if (!res.ok) return;
           const data = await res.json();
           set({ agents: Array.isArray(data) ? data : [] });
-        } catch (e) {
+        } catch {
           // controller not reachable
         }
       },
@@ -294,7 +294,9 @@ export const useBenchmarkStore = create<BenchmarkStore>()(
           if (!res.ok) return;
           const data = await res.json();
           set({ tasks: data.recent_tasks || [] });
-        } catch (e) {}
+        } catch {
+          // ignore fetch errors
+        }
       },
 
       startTask: async (payload) => {

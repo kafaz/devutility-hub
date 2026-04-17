@@ -4,22 +4,15 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSSHStore } from '../../SSHManager/store/sshStore';
 import { useDiskDiscovery } from '../hooks/useDiskDiscovery';
 import { useBenchmarkStore } from '../store/benchmarkStore';
+import type { IostatMetrics } from '../types';
 import IOMonitorGrid from './IOMonitorGrid';
 import IOMonitorDetail from './IOMonitorDetail';
 
 const { Title, Text } = Typography;
 
-export interface IostatMetrics {
-  timestamp: string;
-  r_await: number;
-  w_await: number;
-  util: number;
-  bw_mbps: number;
-}
-
 // Parse a single line of `iostat -xd` output for a given device basename (e.g. "sdb")
 // Column order (iostat -xd): Device r/s rkB/s rrqm/s %rrqm r_await rareq-sz w/s wkB/s wrqm/s %wrqm w_await wareq-sz ... %util
-export function parseIostatLine(line: string, deviceBase: string): IostatMetrics | null {
+function parseIostatLine(line: string, deviceBase: string): IostatMetrics | null {
   const trimmed = line.trim();
   if (!trimmed.startsWith(deviceBase)) return null;
   const parts = trimmed.split(/\s+/);
@@ -105,10 +98,14 @@ export const DiskMetricsDashboard: React.FC = () => {
     });
   }, [ioSnapshots, flatDisks, activeIOModelMap]);
 
-  // Auto-select first disk if none selected
+  // Auto-select first disk if none selected (deferred to avoid synchronous setState in effect)
+  const hasAutoSelectedRef = useRef(false);
   useEffect(() => {
-    if (flatDisks.length > 0 && !selectedDiskKey) {
-      setSelectedDiskKey(flatDisks[0].key);
+    if (flatDisks.length > 0 && !selectedDiskKey && !hasAutoSelectedRef.current) {
+      hasAutoSelectedRef.current = true;
+      const key = flatDisks[0].key;
+      const timer = setTimeout(() => setSelectedDiskKey(key), 0);
+      return () => clearTimeout(timer);
     }
   }, [flatDisks, selectedDiskKey]);
 

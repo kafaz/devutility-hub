@@ -1,5 +1,5 @@
 import { generateId } from '../../../utils';
-import type { BusinessExecution, BusinessTemplate, StepResult } from '../types';
+import type { BusinessExecution, BusinessTemplate } from '../types';
 
 export function replaceTemplateVars(
   cmd: string,

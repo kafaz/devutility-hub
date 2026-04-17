@@ -21,7 +21,7 @@ export const ArtifactDistributor: React.FC = () => {
   const [isExecuting, setIsExecuting] = useState(false);
   const [executionLogs, setExecutionLogs] = useState<Record<string, { status: 'running'|'success'|'error', log: string }>>({});
 
-  const handleFileChange = (info: any) => {
+  const handleFileChange = (info: { file: File }) => {
     const file = info.file;
     if (!file) return;
     const isLt10M = file.size / 1024 / 1024 < 10;
@@ -57,7 +57,7 @@ export const ArtifactDistributor: React.FC = () => {
     }
 
     setIsExecuting(true);
-    let initLogs: any = {};
+    const initLogs: Record<string, { status: 'running'|'success'|'error', log: string }> = {};
     selectedNodes.forEach(id => {
       initLogs[id] = { status: 'running', log: '初始化分发流...\n' };
     });
@@ -134,8 +134,9 @@ export const ArtifactDistributor: React.FC = () => {
            updateLog(sessionId, `\n✅ 未提供自定义脚本，当前流水线结束。\n`, 'success');
         }
 
-      } catch (err: any) {
-        updateLog(sessionId, `\n❌ 未知异常中断: ${err.message || String(err)}\n`, 'error');
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        updateLog(sessionId, `\n❌ 未知异常中断: ${msg}\n`, 'error');
       }
     });
 

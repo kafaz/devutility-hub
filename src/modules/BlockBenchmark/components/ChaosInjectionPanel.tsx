@@ -129,9 +129,11 @@ const ChaosInjectionPanel: React.FC = () => {
       })
     );
 
+    // eslint-disable-next-line react-hooks/purity -- timestamp for event handler side-effect
+    const recoveredAt = Date.now();
     updateChaosInjection(injection.id, {
       status: 'recovered',
-      recoveredAt: Date.now(),
+      recoveredAt,
     });
 
     setRecoveringIds((prev) => {

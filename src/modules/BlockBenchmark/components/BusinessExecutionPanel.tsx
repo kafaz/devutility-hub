@@ -69,7 +69,7 @@ const BusinessExecutionPanel: React.FC<Props> = ({ template }) => {
     });
 
     const { execCommandOnSession } = useSSHStore.getState();
-    let sharedVars: Record<string, string> = {};
+    const sharedVars: Record<string, string> = {};
 
     for (const step of template.steps) {
       const targetNodes = step.target === 'all' ? selectedNodeIds : step.target;

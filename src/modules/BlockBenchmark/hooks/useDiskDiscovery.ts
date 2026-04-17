@@ -40,11 +40,21 @@ export function useDiskDiscovery() {
 
           const disks: DiscoveredDisk[] = [];
 
-          const traverse = (devices: any[]) => {
+          interface LsblkDevice {
+            name: string;
+            type: string;
+            mountpoint?: string | null;
+            size?: string;
+            pkname?: string | null;
+            model?: string | null;
+            children?: LsblkDevice[];
+          }
+
+          const traverse = (devices: LsblkDevice[]) => {
             for (const d of devices) {
               if (d.type === 'disk') {
                 let hasSystemMount = false;
-                const checkSystem = (children: any[]) => {
+                const checkSystem = (children: LsblkDevice[]) => {
                   for (const c of children) {
                     const mp = c.mountpoint || '';
                     if (mp === '/' || mp.startsWith('/boot')) hasSystemMount = true;
@@ -67,14 +77,14 @@ export function useDiskDiscovery() {
             }
           };
 
-          traverse(data.blockdevices);
+          traverse(data.blockdevices as LsblkDevice[]);
 
           newResults[sess.id] = {
             sessionId: sess.id,
             disks,
             lastScan: Date.now(),
           };
-        } catch (e: any) {
+        } catch (e: unknown) {
           console.error(`Scan error on node ${sess.name} (${sess.id}):`, e);
         }
       });

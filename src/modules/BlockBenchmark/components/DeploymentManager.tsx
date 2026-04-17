@@ -17,8 +17,9 @@ const DeploymentManager: React.FC = () => {
       const cmd = `nohup ${agentPath} --id ${nodeName} --controller ${controllerIp} > /tmp/agent.log 2>&1 &`;
       await execCommandOnSession(sessionId, cmd);
       message.success(`Start command sent to ${nodeName}`);
-    } catch (e: any) {
-      message.error(`Failed to start agent on ${nodeName}: ${e.message}`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      message.error(`Failed to start agent on ${nodeName}: ${msg}`);
     }
   };
 
@@ -36,19 +37,28 @@ const DeploymentManager: React.FC = () => {
     };
   });
 
+  interface TableRow {
+    key: string;
+    sessionId: string;
+    name: string;
+    status: string;
+    agentStatus: string;
+    agentIp: string;
+  }
+
   const columns = [
     { title: '节点名称', dataIndex: 'name', key: 'name' },
-    { 
-      title: 'SSH 连接状态', 
-      dataIndex: 'status', 
+    {
+      title: 'SSH 连接状态',
+      dataIndex: 'status',
       key: 'status',
       render: (val: string) => (
         <Tag color={val === 'connected' ? 'green' : 'red'}>{val}</Tag>
       )
     },
-    { 
-      title: 'Agent 注册状态', 
-      dataIndex: 'agentStatus', 
+    {
+      title: 'Agent 注册状态',
+      dataIndex: 'agentStatus',
       key: 'agentStatus',
       render: (val: string) => (
         <Tag color={val === 'online' ? 'blue' : 'default'} style={{ fontWeight: 'bold' }}>
@@ -60,11 +70,11 @@ const DeploymentManager: React.FC = () => {
     {
       title: '操作',
       key: 'action',
-      render: (_: any, record: any) => (
+      render: (_: unknown, record: TableRow) => (
         <Space>
-          <Button 
-            size="small" 
-            type="primary" 
+          <Button
+            size="small"
+            type="primary"
             disabled={record.status !== 'connected'}
             onClick={() => handleStartAgent(record.sessionId, record.name)}
           >

@@ -40,8 +40,9 @@ const IOModelManager: React.FC = () => {
         } else {
           message.error('导入文件格式不正确，不是有效的 IO 模型数组。');
         }
-      } catch (err: any) {
-        message.error('解析 JSON 失败: ' + err.message);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        message.error('解析 JSON 失败: ' + msg);
       }
       if (fileInputRef.current) fileInputRef.current.value = '';
     };
@@ -55,8 +56,8 @@ const IOModelManager: React.FC = () => {
     { 
       title: '其他参数', 
       key: 'others',
-      render: (_: any, r: IOModelConfig) => {
-        let details = [];
+      render: (_: unknown, r: IOModelConfig) => {
+        const details = [];
         if (r.concurrency) details.push(`并发: ${r.concurrency}`);
         if (r.fio_engine) details.push(`Fio引擎: ${r.fio_engine}`);
         if (r.workload_profile) details.push(`RW: ${r.workload_profile}`);
@@ -66,7 +67,7 @@ const IOModelManager: React.FC = () => {
     {
       title: '操作',
       key: 'action',
-      render: (_: any, record: IOModelConfig) => (
+      render: (_: unknown, record: IOModelConfig) => (
         <Button danger type="text" icon={<DeleteOutlined />} onClick={() => removeModel(record.id)}>删除</Button>
       )
     }

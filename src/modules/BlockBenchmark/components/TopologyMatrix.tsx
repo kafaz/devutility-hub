@@ -43,7 +43,17 @@ export const TopologyMatrix: React.FC = () => {
     setMappingModalOpen(false);
   };
 
-  const flatDisks = Object.values(discoveredNodes).flatMap(node =>
+  interface DiskRow {
+    sessionId: string;
+    sessionName: string;
+    bbAgentId: string | null;
+    diskName: string;
+    size: number;
+    model: string;
+    key: string;
+  }
+
+  const flatDisks: DiskRow[] = Object.values(discoveredNodes).flatMap(node =>
     node.disks.map(d => ({
       sessionId: node.sessionId,
       // FIX-5: use sessionName, not sessionId
@@ -57,7 +67,7 @@ export const TopologyMatrix: React.FC = () => {
   );
 
   const handleStartMatrix = async () => {
-    const selectedKeys = Object.entries(matrixConfig).filter(([_, modelId]) => !!modelId);
+    const selectedKeys = Object.entries(matrixConfig).filter(([, modelId]) => !!modelId);
     if (selectedKeys.length === 0) {
       message.warning('请至少为一块盘指定测试模型！');
       return;
@@ -146,7 +156,7 @@ export const TopologyMatrix: React.FC = () => {
       title: '节点',
       dataIndex: 'sessionName',
       key: 'sessionName',
-      render: (val: string, r: any) => {
+      render: (val: string, r: DiskRow) => {
         const mapped = agentMappings.find(m => m.sshSessionId === r.sessionId);
         return (
           <Space direction="vertical" size={0}>
@@ -162,7 +172,7 @@ export const TopologyMatrix: React.FC = () => {
       title: '目标裸盘',
       dataIndex: 'diskName',
       key: 'diskName',
-      render: (val: string, r: any) => (
+      render: (val: string, r: DiskRow) => (
         <Space>
           <Text strong>{val}</Text>
           <Text type="secondary" style={{ fontSize: 11 }}>({r.model})</Text>
@@ -173,7 +183,7 @@ export const TopologyMatrix: React.FC = () => {
     {
       title: '指派 IO 模型',
       key: 'config',
-      render: (_: any, r: any) => {
+      render: (_: unknown, r: DiskRow) => {
         const currentId = matrixConfig[r.key];
         return (
           <Select
