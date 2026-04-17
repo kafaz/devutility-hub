@@ -5,7 +5,6 @@ import {
     CloudServerOutlined,
     CodeOutlined,
     ConsoleSqlOutlined,
-    ControlOutlined,
     FileSearchOutlined,
     MenuFoldOutlined,
     MenuUnfoldOutlined,
@@ -28,7 +27,6 @@ const ICON_MAP: Record<string, React.ReactNode> = {
   ApartmentOutlined:  <ApartmentOutlined />,
   ConsoleSqlOutlined: <ConsoleSqlOutlined />,
   NumberOutlined:     <NumberOutlined />,
-  ControlOutlined:    <ControlOutlined />,
   ThunderboltOutlined:<ThunderboltOutlined />,
   BarChartOutlined:   <BarChartOutlined />,
   RadarChartOutlined: <RadarChartOutlined />,
@@ -66,12 +64,6 @@ const tools = [
     name: '进制转换',
     icon: 'NumberOutlined',
     path: '/number-converter',
-  },
-  {
-    id:   'protocol-decoder',
-    name: '协议裸码解码器',
-    icon: 'ControlOutlined',
-    path: '/protocol-decoder',
   },
   {
     id:   'io-analyzer',
