@@ -145,6 +145,7 @@ const TerminalInstance: React.FC<{
         : { background: '#fafafa', foreground: '#18181b', cursor: '#3b82f6' },
       fontFamily: 'JetBrains Mono, Fira Code, Consolas, monospace',
       fontSize: 13, lineHeight: 1.4, cursorBlink: true, scrollback: 5000,
+      convertEol: true,
     });
     termRef.current = term;
     const fit = new FitAddon();
@@ -182,9 +183,9 @@ const TerminalInstance: React.FC<{
     registerWrite((b64: string) => {
       const bin = atob(b64);
       const highlighted = applyHighlights(bin, highlightRulesRef.current);
-      const buf = new Uint8Array(highlighted.length);
-      for (let i = 0; i < highlighted.length; i++) buf[i] = highlighted.charCodeAt(i);
-      term.write(buf);
+      const bytes = new Uint8Array(highlighted.length);
+      for (let i = 0; i < highlighted.length; i++) bytes[i] = highlighted.charCodeAt(i);
+      term.write(bytes);
     });
 
     registerSnapshot(() => {
@@ -486,6 +487,7 @@ const ProfileModal: React.FC<{
   const [form] = Form.useForm();
   const [authType, setAuthType] = useState<'privateKey' | 'password' | 'agent'>('privateKey');
   const [keyMsg,   setKeyMsg]   = useState('');
+  const { credentials } = useSSHStore();
 
   useEffect(() => {
     if (open) {
@@ -505,6 +507,18 @@ const ProfileModal: React.FC<{
     setKeyMsg(r.ok ? `✅ 可读: ${r.resolved ?? p}` : `❌ ${r.msg ?? '不可读'}`);
   };
 
+  // 当选择凭证时，自动同步认证方式和用户名
+  const handleCredentialChange = (credId: string | undefined) => {
+    if (!credId) return;
+    const cred = credentials.find(c => c.id === credId);
+    if (cred) {
+      form.setFieldValue('username', cred.username);
+      form.setFieldValue('authType', cred.authType);
+      setAuthType(cred.authType);
+      if (cred.keyFilePath) form.setFieldValue('keyFilePath', cred.keyFilePath);
+    }
+  };
+
   return (
     <Modal title={initial ? '编辑档案' : '新建连接档案'} open={open}
       onOk={async () => { const v = await form.validateFields(); onOk(v); }}
@@ -521,6 +535,16 @@ const ProfileModal: React.FC<{
             <InputNumber min={1} max={65535} style={{ width: '100%' }} />
           </Form.Item>
         </div>
+        <Form.Item name="credentialId" label="绑定登录凭证 (可选)"
+          extra={<Text style={{ fontSize: 11 }}>绑定凭证后可一键直连，无需每次输入密码</Text>}>
+          <Select allowClear placeholder="不绑定 — 每次手动输入" onChange={handleCredentialChange}>
+            {credentials.map(c => (
+              <Select.Option key={c.id} value={c.id}>
+                {c.name} ({c.username}) <Tag color={c.authType === 'privateKey' ? 'blue' : 'green'} style={{ float: 'right', fontSize: 10 }}>{c.authType}</Tag>
+              </Select.Option>
+            ))}
+          </Select>
+        </Form.Item>
         <Form.Item name="username" label="用户名" rules={[{ required: true }]}>
           <Input placeholder="root" />
         </Form.Item>
@@ -566,7 +590,7 @@ const SSHManager: React.FC = () => {
   const analyzerLogCount = useAnalyzerStore(s => s.logs.length);
 
   const {
-    profiles, sessions, activeSessionId, proxyOnline, multiNodeRun,
+    credentials, profiles, sessions, activeSessionId, proxyOnline, multiNodeRun,
     addProfile, updateProfile, deleteProfile,
     addSession, removeSession, renameSession, setActiveSession,
     checkProxy, setSessionTermCallback,
@@ -597,7 +621,7 @@ const SSHManager: React.FC = () => {
   const [executing,   setExecuting]       = useState(false);
   const [activeView,  setActiveView]      = useState<'terminal' | 'progress' | 'journal' | 'analyzer' | 'bgjobs'>('terminal');
   const [activeTab, setActiveTab] = useState('connect'); // 'connect' | 'multi_node' | 'cron'
-  const [terminalHeight, setTerminalHeight] = useState(520);
+  const [terminalHeight, setTerminalHeight] = useState(720);
 
   // ── 终端写入函数 Map（每会话一个） ────────────────────────────────────────
   const writeCallbacks    = useRef<Map<string, (b64: string) => void>>(new Map());
@@ -993,20 +1017,43 @@ const SSHManager: React.FC = () => {
   const handleOpenConnect = (sessionId: string) => {
     const sess = sessions.find((x) => x.id === sessionId);
     const prf = profiles.find((x) => x.id === sess?.profileId);
-    if (sess && prf) {
-      setConnectingSessionId(sessionId);
-      const hasHostCreds = prf.authType === 'password' || prf.authType === 'privateKey';
-      const jumpPrf = profiles.find((x) => x.id === prf.jumpHostProfileId);
-      const hasJumpCreds = jumpPrf && (jumpPrf.authType === 'password' || jumpPrf.authType === 'privateKey');
+    if (!sess || !prf) return;
 
-      if (hasHostCreds || hasJumpCreds) {
-        setConnectModal(true);
-        connectForm.resetFields();
-      } else {
-        // agent 模式直接连
-        connectSession(sessionId, { agent: 'true', jumpAgent: jumpPrf?.authType === 'agent' ? 'true' : undefined });
-      }
+    // 解析主机凭证
+    const cred = prf.credentialId ? credentials.find(c => c.id === prf.credentialId) : null;
+    const effectiveAuth = cred?.authType ?? prf.authType ?? 'password';
+
+    // 解析跳板机凭证
+    const jumpPrf = profiles.find((x) => x.id === prf.jumpHostProfileId);
+    const jumpCred = jumpPrf?.credentialId ? credentials.find(c => c.id === jumpPrf.credentialId) : null;
+    const jumpAuth = jumpCred?.authType ?? jumpPrf?.authType;
+
+    // 判断是否需要手动输入
+    const hostNeedInput = effectiveAuth === 'password' && !cred?.password;
+    const hostNeedPassphrase = effectiveAuth === 'privateKey' && !cred; // 无凭证时可能需要 passphrase
+    const jumpNeedInput = jumpPrf && (
+      (jumpAuth === 'password' && !jumpCred?.password) ||
+      (jumpAuth === 'privateKey' && !jumpCred)
+    );
+
+    // 所有凭证已备齐 → 直接连接（跳过弹窗）
+    if (!hostNeedInput && !hostNeedPassphrase && !jumpNeedInput) {
+      connectSession(sessionId, {
+        credentialId: prf.credentialId || undefined,
+        password: cred?.password,
+        agent: effectiveAuth === 'agent' ? 'true' : undefined,
+        jumpPassword: jumpCred?.password,
+        jumpAgent: jumpAuth === 'agent' ? 'true' : undefined,
+      });
+      return;
     }
+
+    // 否则打开弹窗 — 预填已保存的密码
+    setConnectingSessionId(sessionId);
+    setConnectModal(true);
+    connectForm.resetFields();
+    if (cred?.password) connectForm.setFieldValue('password', cred.password);
+    if (jumpCred?.password) connectForm.setFieldValue('jumpPassword', jumpCred.password);
   };
 
   const handleConnect = async () => {
@@ -1031,9 +1078,16 @@ const SSHManager: React.FC = () => {
   const connectingProfile = profiles.find(
     (p) => p.id === sessions.find((s) => s.id === connectingSessionId)?.profileId
   );
+  const connectingCred = connectingProfile?.credentialId
+    ? credentials.find(c => c.id === connectingProfile.credentialId) : null;
+  const connectingEffectiveAuth = connectingCred?.authType ?? connectingProfile?.authType;
+
   const connectingJumpProfile = connectingProfile?.jumpHostProfileId 
     ? profiles.find(p => p.id === connectingProfile.jumpHostProfileId) 
     : null;
+  const connectingJumpCred = connectingJumpProfile?.credentialId
+    ? credentials.find(c => c.id === connectingJumpProfile.credentialId) : null;
+  const connectingJumpAuth = connectingJumpCred?.authType ?? connectingJumpProfile?.authType;
 
   // ── 渲染 ──────────────────────────────────────────────────────────────────
 
@@ -1669,12 +1723,12 @@ const SSHManager: React.FC = () => {
         onOk={handleConnect} onCancel={() => setConnectModal(false)}
         okText="连接" cancelText="取消">
         <Form form={connectForm} layout="vertical" style={{ marginTop: 12 }}>
-          {connectingProfile?.authType === 'privateKey' && (
+          {connectingEffectiveAuth === 'privateKey' && (
             <Form.Item name="passphrase" label="目标主机私钥 Passphrase">
               <Password prefix={<LockOutlined />} placeholder="私钥加密口令，无加密则留空" autoComplete="off" />
             </Form.Item>
           )}
-          {connectingProfile?.authType === 'password' && (
+          {connectingEffectiveAuth === 'password' && (
             <Form.Item name="password" label="目标主机密码" rules={[{ required: true }]}>
               <Password prefix={<LockOutlined />} placeholder="SSH 登录密码" autoComplete="off" />
             </Form.Item>
@@ -1682,12 +1736,12 @@ const SSHManager: React.FC = () => {
 
           {connectingJumpProfile && (
             <>
-              {connectingJumpProfile.authType === 'privateKey' && (
+              {connectingJumpAuth === 'privateKey' && (
                 <Form.Item name="jumpPassphrase" label="跳板机私钥 Passphrase">
                   <Password prefix={<LockOutlined />} placeholder={`[${connectingJumpProfile.name}] 私钥口令，无加密则留空`} autoComplete="off" />
                 </Form.Item>
               )}
-              {connectingJumpProfile.authType === 'password' && (
+              {connectingJumpAuth === 'password' && (
                 <Form.Item name="jumpPassword" label="跳板机密码" rules={[{ required: true }]}>
                   <Password prefix={<LockOutlined />} placeholder={`[${connectingJumpProfile.name}] SSH 登录密码`} autoComplete="off" />
                 </Form.Item>
@@ -1696,7 +1750,7 @@ const SSHManager: React.FC = () => {
           )}
 
           <Alert type="info" showIcon={false}
-            message={<Text style={{ fontSize: 12 }}>凭证仅本次会话使用，不保存</Text>} />
+            message={<Text style={{ fontSize: 12 }}>如已在凭证管理中保存密码，可自动连接无需重复输入</Text>} />
         </Form>
       </Modal>
 
