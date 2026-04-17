@@ -69,8 +69,8 @@ const ChaosFaultLibrary: React.FC<Props> = ({ faults, selectedId, onSelect }) =>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <Text strong>{fault.name}</Text>
                     <Space size="small">
-                      {fault.isBuiltin && <Tag size="small">内置</Tag>}
-                      {fault.recoveryCmdTemplate && <Tag color="success" size="small">可恢复</Tag>}
+                      {fault.isBuiltin && <Tag style={{ fontSize: 12 }}>内置</Tag>}
+                      {fault.recoveryCmdTemplate && <Tag color="success" style={{ fontSize: 12 }}>可恢复</Tag>}
                     </Space>
                   </div>
                   <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>

@@ -6,7 +6,7 @@ import { replaceFaultVars, buildInjection, buildDelayedRecoveryScript } from '..
 import type { ChaosFault, ChaosInjection } from '../types';
 import ChaosFaultLibrary from './ChaosFaultLibrary';
 
-const { Text, Title } = Typography;
+const { Text } = Typography;
 const { Panel } = Collapse;
 
 const ChaosInjectionPanel: React.FC = () => {
