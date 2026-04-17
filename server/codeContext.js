@@ -342,7 +342,12 @@ async function getTrackedSourceFiles(entry) {
   return entry.sourceFilesPromise;
 }
 
-function collectSignature(lines, startIndex, language) {
+const CFAMILY_CONTROL_IDS = new Set([
+  'if', 'while', 'for', 'switch', 'sizeof', 'typeof', 'offsetof',
+  'likely', 'unlikely', 'return', 'goto', 'break', 'continue',
+]);
+
+function collectSignature(lines, startIndex, language, kind = 'function') {
   const signatureLines = [];
   const maxLines = Math.min(lines.length, startIndex + 6);
 
@@ -352,6 +357,12 @@ function collectSignature(lines, startIndex, language) {
 
     if (language === 'python') {
       if (line.includes(':')) break;
+      continue;
+    }
+
+    if (kind === 'macro') {
+      // #define 宏签名就是整行，但多行宏用 \ 续行
+      if (!line.trim().endsWith('\\')) break;
       continue;
     }
 
@@ -369,50 +380,57 @@ function extractSymbolsFromLines(lines, relativePath) {
 
   const patternsByLanguage = {
     go: [
-      /^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^\]]+\])?\s*\(/,
+      { kind: 'function', pattern: /^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^\]]+\])?\s*\(/ },
     ],
     python: [
-      /^\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/,
+      { kind: 'function', pattern: /^\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/ },
     ],
     javascript: [
-      /^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*(?:<[^>(]+>)?\s*\(/,
-      /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?function\s*\(/,
-      /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^=]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{/,
-      /^\s*(?:public|private|protected|static|readonly|async|get|set|\s)*([A-Za-z_$][\w$]*)\s*(?:<[^>(]+>)?\s*\([^=;]*\)\s*\{/,
+      { kind: 'function', pattern: /^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*(?:<[^>(]+>)?\s*\(/ },
+      { kind: 'function', pattern: /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?function\s*\(/ },
+      { kind: 'function', pattern: /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^=]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{/ },
+      { kind: 'function', pattern: /^\s*(?:public|private|protected|static|readonly|async|get|set|\s)*([A-Za-z_$][\w$]*)\s*(?:<[^>(]+>)?\s*\([^=;]*\)\s*\{/ },
     ],
     jvm: [
-      /^\s*(?:@\w+(?:\([^)]*\))?\s*)*(?:public|protected|private|internal)?\s*(?:static\s+|final\s+|synchronized\s+|abstract\s+|open\s+|override\s+)*[\w<>\[\],?. ]+\s+([A-Za-z_][A-Za-z0-9_]*)\s*\([^;]*\)\s*(?:throws [^{]+)?\{/,
+      { kind: 'function', pattern: /^\s*(?:@\w+(?:\([^)]*\))?\s*)*(?:public|protected|private|internal)?\s*(?:static\s+|final\s+|synchronized\s+|abstract\s+|open\s+|override\s+)*[\w<>\[\],?. ]+\s+([A-Za-z_][A-Za-z0-9_]*)\s*\([^;]*\)\s*(?:throws [^{]+)?\{/ },
     ],
     rust: [
-      /^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>(]+>)?\s*\(/,
+      { kind: 'function', pattern: /^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>(]+>)?\s*\(/ },
     ],
     php: [
-      /^\s*(?:public|protected|private)?\s*(?:static\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/,
+      { kind: 'function', pattern: /^\s*(?:public|protected|private)?\s*(?:static\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/ },
     ],
     'c-family': [
-      /^\s*(?:template\s*<[^>]+>\s*)?(?:[\w:*<>\[\]&~]+\s+)+([A-Za-z_][A-Za-z0-9_:~]*)\s*\([^;]*\)\s*(?:const|override|final|noexcept|volatile)?\s*(?:\{|$)/,
+      { kind: 'function', pattern: /^\s*(?:template\s*<[^>]+>\s*)?(?:[\w:*<>\[\]&~]+\s+)+([A-Za-z_][A-Za-z0-9_:~]*)\s*\([^;]*\)\s*(?:const|override|final|noexcept|volatile)?\s*(?:\{|$)/ },
+      { kind: 'struct', pattern: /^\s*struct\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\{|;|$)/ },
+      { kind: 'union', pattern: /^\s*union\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\{|;|$)/ },
+      { kind: 'enum', pattern: /^\s*enum\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\{|;|$)/ },
+      { kind: 'macro', pattern: /^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(|[^\S\r\n]|$)/ },
+      { kind: 'typedef', pattern: /^\s*typedef\s+(?:[\w\s\*\(\),\[\]]+?)\s+([A-Za-z_][A-Za-z0-9_]*)\s*;/ },
     ],
   };
 
   const patterns = patternsByLanguage[language] || [];
 
   lines.forEach((line, lineIndex) => {
-    for (const pattern of patterns) {
+    for (const { kind, pattern } of patterns) {
       const matched = pattern.exec(line);
       if (!matched) continue;
 
       const symbolName = matched[1];
       if (!symbolName) continue;
       if (language === 'javascript' && JS_CONTROL_KEYWORDS.has(symbolName)) continue;
+      if (language === 'c-family' && kind === 'function' && CFAMILY_CONTROL_IDS.has(symbolName)) continue;
 
       const lineNumber = lineIndex + 1;
       symbols.push({
-        id: encodeSymbolId({ path: relativePath, line: lineNumber, name: symbolName, language }),
+        id: encodeSymbolId({ path: relativePath, line: lineNumber, name: symbolName, language, kind }),
         name: symbolName,
         path: relativePath,
         line: lineNumber,
         language,
-        signature: collectSignature(lines, lineIndex, language) || line.trim(),
+        kind,
+        signature: collectSignature(lines, lineIndex, language, kind) || line.trim(),
       });
       break;
     }
@@ -485,6 +503,7 @@ async function loadPersistedSymbolIndex(entry) {
         path: item.path,
         line: Number(item.line),
         language: item.language || languageFromExt(item.path),
+        kind: item.kind || 'function',
         signature: String(item.signature || ''),
       }));
 
@@ -714,6 +733,8 @@ async function openCodeContext({ repo, branch, commit, token }) {
     fileSymbolPromises: new Map(),
     symbolById: new Map(),
     searchCache: new Map(),
+    callGraph: null,
+    callGraphPromise: null,
   };
 
   activeContexts.set(contextId, metadata);
@@ -1015,11 +1036,29 @@ function detectBraceRange(lines, startIndex, language) {
   return { start: expandedStart, end };
 }
 
+function detectMacroRange(lines, startIndex) {
+  let end = startIndex;
+  for (let i = startIndex; i < lines.length; i += 1) {
+    end = i;
+    if (!lines[i].trim().endsWith('\\')) break;
+  }
+  return { start: startIndex, end };
+}
+
 function detectSymbolRange(lines, symbol) {
   const startIndex = Math.max(0, Number(symbol.line || 1) - 1);
+  const kind = symbol.kind || 'function';
 
   if (symbol.language === 'python') {
     return detectPythonRange(lines, startIndex);
+  }
+
+  if (kind === 'macro') {
+    return detectMacroRange(lines, startIndex);
+  }
+
+  if (kind === 'typedef') {
+    return { start: startIndex, end: startIndex };
   }
 
   return detectBraceRange(lines, startIndex, symbol.language);
@@ -1043,12 +1082,13 @@ async function renderSymbol(contextId, symbolId, options = {}) {
       line: Number(symbolKey.line),
       name: symbolKey.name,
       language: symbolKey.language || languageFromExt(symbolKey.path),
+      kind: symbolKey.kind || 'function',
       signature: String(symbolKey.signature || ''),
     };
   }
 
   if (!symbol) {
-    throw new Error('函数候选不存在，请重新搜索');
+    throw new Error('符号不存在，请重新搜索');
   }
 
   const content = await readSourceFile(entry, symbol.path);
@@ -1058,7 +1098,7 @@ async function renderSymbol(contextId, symbolId, options = {}) {
 
   const lines = content.split(/\r?\n/);
   if (!symbol.signature) {
-    symbol.signature = collectSignature(lines, Math.max(0, Number(symbol.line || 1) - 1), symbol.language) || symbol.name;
+    symbol.signature = collectSignature(lines, Math.max(0, Number(symbol.line || 1) - 1), symbol.language, symbol.kind || 'function') || symbol.name;
     entry.symbolById.set(symbol.id, symbol);
   }
   const { start, end } = detectSymbolRange(lines, symbol);
@@ -1086,8 +1126,132 @@ async function renderSymbol(contextId, symbolId, options = {}) {
   };
 }
 
+// ─── 调用链解析 ─────────────────────────────────────────────────────────────
+
+function stripCommentsAndStrings(line) {
+  return line
+    .replace(/\/\/.*/g, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/"(?:\\.|[^"\\])*"/g, '""')
+    .replace(/'(?:\\.|[^'\\])*'/g, "''");
+}
+
+function extractFunctionCalls(lines, startLine, endLine) {
+  const calls = new Set();
+  const controlIds = new Set([
+    'if', 'while', 'for', 'switch', 'sizeof', 'typeof', 'offsetof',
+    'likely', 'unlikely', 'return', 'goto', 'break', 'continue',
+    'static_assert', '_Static_assert',
+  ]);
+
+  for (let i = startLine; i <= endLine && i < lines.length; i += 1) {
+    const cleaned = stripCommentsAndStrings(lines[i]);
+    const regex = /\b([A-Za-z_][A-Za-z0-9_:]*)\s*\(/g;
+    let m;
+    while ((m = regex.exec(cleaned)) !== null) {
+      const name = m[1];
+      if (controlIds.has(name)) continue;
+      if (/^(?:struct|union|enum|typedef|static|extern|inline|const|volatile|unsigned|signed|long|short|int|char|float|double|void|bool)$/.test(name)) continue;
+      calls.add(name);
+    }
+  }
+
+  return Array.from(calls);
+}
+
+async function buildCallGraph(entry) {
+  const callers = new Map();
+  const callees = new Map();
+  const functions = (entry.symbolIndex || []).filter((s) => (s.kind || 'function') === 'function');
+
+  for (const func of functions) {
+    const content = await readSourceFile(entry, func.path);
+    if (!content) continue;
+
+    const lines = content.split(/\r?\n/);
+    const { start, end } = detectSymbolRange(lines, func);
+    const calls = extractFunctionCalls(lines, start, end);
+
+    if (!callees.has(func.name)) callees.set(func.name, new Set());
+    for (const call of calls) {
+      callees.get(func.name).add(call);
+      if (!callers.has(call)) callers.set(call, new Set());
+      callers.get(call).add(func.name);
+    }
+  }
+
+  entry.callGraph = { callers, callees };
+  entry.callGraphSymbolCount = entry.symbolCount;
+  return entry.callGraph;
+}
+
+async function ensureCallGraph(entry) {
+  const hasValidGraph = entry.callGraph
+    && entry.symbolIndex
+    && entry.symbolIndex.length > 0
+    && entry.callGraphSymbolCount === entry.symbolCount;
+  if (hasValidGraph) return entry.callGraph;
+
+  if (!entry.callGraphPromise) {
+    entry.callGraphPromise = buildCallGraph(entry).finally(() => {
+      entry.callGraphPromise = null;
+    });
+  }
+  return entry.callGraphPromise;
+}
+
+async function getCallers(contextId, symbolId) {
+  const entry = await getContextEntry(contextId);
+  const symbolKey = decodeSymbolId(symbolId);
+  await ensureCallGraph(entry);
+
+  const callerNames = entry.callGraph.callers.get(symbolKey.name) || new Set();
+  const results = [];
+  for (const callerName of callerNames) {
+    const callerSymbols = (entry.symbolIndex || []).filter(
+      (s) => s.name === callerName && (s.kind || 'function') === 'function'
+    );
+    results.push(...callerSymbols);
+  }
+  return results;
+}
+
+async function getCallees(contextId, symbolId) {
+  const entry = await getContextEntry(contextId);
+  const symbolKey = decodeSymbolId(symbolId);
+  await ensureCallGraph(entry);
+
+  const calleeNames = entry.callGraph.callees.get(symbolKey.name) || new Set();
+  const results = [];
+  for (const calleeName of calleeNames) {
+    const calleeSymbols = (entry.symbolIndex || []).filter(
+      (s) => s.name === calleeName && (s.kind || 'function') === 'function'
+    );
+    results.push(...calleeSymbols);
+  }
+  return results;
+}
+
+// ─── 多上下文管理 ───────────────────────────────────────────────────────────
+
+function listContexts() {
+  return Array.from(activeContexts.values()).map(formatContextResponse);
+}
+
+function closeContext(contextId) {
+  const entry = activeContexts.get(contextId);
+  if (!entry) return false;
+
+  activeContexts.delete(contextId);
+  return true;
+}
+
 module.exports = {
   openCodeContext,
   renderSymbol,
   searchSymbols,
+  getCallers,
+  getCallees,
+  listContexts,
+  closeContext,
 };

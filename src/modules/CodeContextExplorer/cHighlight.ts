@@ -167,7 +167,12 @@ const LIGHT_COLORS: Record<Token['type'], string> = {
   plain:    '#1e1e1e',
 };
 
-export function highlightCLine(line: string, inBlockComment: boolean, isDark: boolean): { html: string; endsInBlockComment: boolean } {
+export function highlightCLine(
+  line: string,
+  inBlockComment: boolean,
+  isDark: boolean,
+  knownFunctions?: Set<string>
+): { html: string; endsInBlockComment: boolean } {
   if (!line) return { html: ' ', endsInBlockComment: inBlockComment };
 
   const { tokens, endsInBlockComment } = tokenizeCLine(line, inBlockComment);
@@ -179,6 +184,11 @@ export function highlightCLine(line: string, inBlockComment: boolean, isDark: bo
       if (t.type === 'plain') return escaped;
       const fontWeight = t.type === 'keyword' ? ';font-weight:600' : '';
       const fontStyle = t.type === 'comment' ? ';font-style:italic' : '';
+
+      if (t.type === 'func' && knownFunctions?.has(t.text)) {
+        return `<span class="code-func-call" data-name="${escapeHtml(t.text)}" style="color:${palette[t.type]}${fontWeight};cursor:pointer;text-decoration:underline dotted">${escaped}</span>`;
+      }
+
       return `<span style="color:${palette[t.type]}${fontWeight}${fontStyle}">${escaped}</span>`;
     })
     .join('');
@@ -189,10 +199,14 @@ export function highlightCLine(line: string, inBlockComment: boolean, isDark: bo
 /**
  * 对一组行批量高亮，正确处理跨行的 /* ... * / 块注释
  */
-export function highlightCLines(lines: { text: string }[], isDark: boolean): string[] {
+export function highlightCLines(
+  lines: { text: string }[],
+  isDark: boolean,
+  knownFunctions?: Set<string>
+): string[] {
   let inBlock = false;
   return lines.map((line) => {
-    const result = highlightCLine(line.text, inBlock, isDark);
+    const result = highlightCLine(line.text, inBlock, isDark, knownFunctions);
     inBlock = result.endsInBlockComment;
     return result.html;
   });

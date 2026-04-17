@@ -78,6 +78,10 @@ const {
   openCodeContext,
   renderSymbol,
   searchSymbols,
+  getCallers,
+  getCallees,
+  listContexts,
+  closeContext,
 } = require('./codeContext');
 
 const app    = express();
@@ -2049,6 +2053,36 @@ app.post('/api/code-context/:contextId/render', async (req, res) => {
       beforeContext: req.body?.beforeContext,
       afterContext: req.body?.afterContext,
     });
+    res.json({ ok: true, data });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/api/code-context/contexts', (_req, res) => {
+  res.json({ ok: true, data: listContexts() });
+});
+
+app.delete('/api/code-context/contexts/:contextId', (req, res) => {
+  const closed = closeContext(req.params.contextId);
+  if (!closed) {
+    return res.status(404).json({ ok: false, error: '代码上下文不存在' });
+  }
+  return res.json({ ok: true });
+});
+
+app.get('/api/code-context/:contextId/symbols/:symbolId/callers', async (req, res) => {
+  try {
+    const data = await getCallers(req.params.contextId, req.params.symbolId);
+    res.json({ ok: true, data });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/api/code-context/:contextId/symbols/:symbolId/callees', async (req, res) => {
+  try {
+    const data = await getCallees(req.params.contextId, req.params.symbolId);
     res.json({ ok: true, data });
   } catch (e) {
     res.status(400).json({ ok: false, error: e.message });

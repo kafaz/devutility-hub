@@ -1,5 +1,6 @@
 import {
     BranchesOutlined,
+    CloseOutlined,
     CodeOutlined,
     ReloadOutlined,
     SearchOutlined,
@@ -8,6 +9,7 @@ import {
     Alert,
     Button,
     Card,
+    Collapse,
     Empty,
     Input,
     InputNumber,
@@ -27,6 +29,7 @@ import { useGlobalStore } from '../../store/globalStore';
 import { highlightCLines } from './cHighlight';
 
 const { Title, Text, Paragraph } = Typography;
+const { Panel } = Collapse;
 const { Password, Search, TextArea } = Input;
 
 const PROXY_HTTP = 'http://127.0.0.1:3001';
@@ -59,6 +62,24 @@ const FUNCTION_CANDIDATE_BLACKLIST = new Set([
   'while',
 ]);
 
+const SYMBOL_KIND_LABEL: Record<string, string> = {
+  function: '函数',
+  struct: '结构体',
+  union: '联合体',
+  enum: '枚举',
+  macro: '宏',
+  typedef: '类型别名',
+};
+
+const SYMBOL_KIND_COLOR: Record<string, string> = {
+  function: 'blue',
+  struct: 'purple',
+  union: 'cyan',
+  enum: 'orange',
+  macro: 'magenta',
+  typedef: 'gold',
+};
+
 interface CodeContextBindingDraft {
   repo: string;
   branch: string;
@@ -83,6 +104,7 @@ interface SymbolCandidate {
   path: string;
   line: number;
   language: string;
+  kind?: string;
   signature: string;
   matchType: 'exact' | 'fuzzy';
   score: number;
@@ -166,7 +188,6 @@ function isLikelyFunctionToken(rawToken: string) {
 
 function extractFunctionCandidates(text: string) {
   const exactPatterns = [
-    // 匹配明确的日志格式 ***[func_name:123] ***
     /\[([A-Za-z_][A-Za-z0-9_:]*):\d+\]/g,
   ];
 
@@ -254,7 +275,8 @@ const CodeContextExplorer: React.FC = () => {
   const [branch, setBranch] = useState(savedBinding.branch);
   const [commit, setCommit] = useState(savedBinding.commit);
   const [token, setToken] = useState('');
-  const [activeContext, setActiveContext] = useState<CodeContextBindingResult | null>(null);
+  const [activeContexts, setActiveContexts] = useState<CodeContextBindingResult[]>([]);
+  const [activeContextId, setActiveContextId] = useState<string | null>(null);
   const [openingContext, setOpeningContext] = useState(false);
 
   const [sessions, setSessions] = useState<SessionOption[]>([]);
@@ -279,15 +301,24 @@ const CodeContextExplorer: React.FC = () => {
   const [isDraggingSplit, setIsDraggingSplit] = useState(false);
   const [splitRatio, setSplitRatio] = useState(savedSplitRatio);
 
+  const [callers, setCallers] = useState<SymbolCandidate[]>([]);
+  const [callees, setCallees] = useState<SymbolCandidate[]>([]);
+  const [loadingCallChain, setLoadingCallChain] = useState(false);
+  const [knownFunctions, setKnownFunctions] = useState<Set<string>>(new Set());
+
   const codePanelRef = useRef<HTMLDivElement>(null);
   const splitContainerRef = useRef<HTMLDivElement>(null);
   const splitDragRef = useRef<{ left: number; width: number } | null>(null);
   const splitRatioRef = useRef(splitRatio);
   const pendingWheelExpandRef = useRef<'up' | 'down' | null>(null);
   const previousSnippetStartRef = useRef<number | null>(null);
+  const renderKeyRef = useRef(0);
+
+  const activeContext = activeContexts.find((c) => c.contextId === activeContextId) || null;
 
   useEffect(() => {
     void fetchSessions();
+    void fetchContexts();
   }, []);
 
   useEffect(() => {
@@ -364,6 +395,22 @@ const CodeContextExplorer: React.FC = () => {
     }
   }
 
+  async function fetchContexts() {
+    try {
+      const response = await fetch(`${PROXY_HTTP}/api/code-context/contexts`);
+      const data = await response.json();
+      if (data.ok && Array.isArray(data.data)) {
+        const contexts = data.data as CodeContextBindingResult[];
+        setActiveContexts(contexts);
+        if (contexts.length > 0 && !activeContextId) {
+          setActiveContextId(contexts[0].contextId);
+        }
+      }
+    } catch {
+      // silently ignore if server not running
+    }
+  }
+
   async function openContext() {
     const trimmedRepo = repo.trim();
     const trimmedBranch = branch.trim();
@@ -394,7 +441,11 @@ const CodeContextExplorer: React.FC = () => {
       }
 
       const nextContext = data.data as CodeContextBindingResult;
-      setActiveContext(nextContext);
+      setActiveContexts((prev) => {
+        const filtered = prev.filter((c) => c.contextId !== nextContext.contextId);
+        return [...filtered, nextContext];
+      });
+      setActiveContextId(nextContext.contextId);
       setSavedBinding({
         repo: trimmedRepo,
         branch: trimmedBranch,
@@ -406,16 +457,41 @@ const CodeContextExplorer: React.FC = () => {
       setActiveFunctionToken(null);
       setBeforeContext(DEFAULT_BEFORE_CONTEXT);
       setAfterContext(DEFAULT_AFTER_CONTEXT);
+      setKnownFunctions(new Set());
       if (typeof nextContext.symbolCount === 'number') {
-        messageApi.success(`已绑定代码版本，索引函数 ${nextContext.symbolCount} 个`);
+        messageApi.success(`已绑定代码版本，索引符号 ${nextContext.symbolCount} 个`);
       } else {
-        messageApi.success('已绑定代码版本，大仓库将按需检索函数定义');
+        messageApi.success('已绑定代码版本，大仓库将按需检索符号定义');
       }
     } catch {
       messageApi.error('代码上下文绑定失败');
     } finally {
       setOpeningContext(false);
     }
+  }
+
+  async function removeContext(contextId: string) {
+    try {
+      await fetch(`${PROXY_HTTP}/api/code-context/contexts/${encodeURIComponent(contextId)}`, {
+        method: 'DELETE',
+      });
+    } catch {
+      // ignore
+    }
+    let nextActiveId: string | null = activeContextId;
+    const nextContexts = activeContexts.filter((c) => c.contextId !== contextId);
+    if (activeContextId === contextId) {
+      nextActiveId = nextContexts.length > 0 ? nextContexts[0].contextId : null;
+      setActiveContextId(nextActiveId);
+      // Clear stale search/render state when the active context is removed
+      setResults([]);
+      setSelectedSymbol(null);
+      setRendered(null);
+      setCallers([]);
+      setCallees([]);
+      setKnownFunctions(new Set());
+    }
+    setActiveContexts(nextContexts);
   }
 
   async function searchFunctions(nextQuery?: string) {
@@ -426,12 +502,14 @@ const CodeContextExplorer: React.FC = () => {
     }
 
     if (!effectiveQuery) {
-      messageApi.warning('请输入函数名');
+      messageApi.warning('请输入搜索词');
       return;
     }
 
     setSelectedSymbol(null);
     setRendered(null);
+    setCallers([]);
+    setCallees([]);
     setSearching(true);
     try {
       const response = await fetch(
@@ -440,7 +518,7 @@ const CodeContextExplorer: React.FC = () => {
       const data = await response.json();
 
       if (!data.ok) {
-        messageApi.error(data.error || '函数搜索失败');
+        messageApi.error(data.error || '符号搜索失败');
         return;
       }
 
@@ -448,23 +526,25 @@ const CodeContextExplorer: React.FC = () => {
       setResults(nextResults);
 
       if (nextResults.length === 0) {
-        messageApi.info(`没有找到匹配函数：${effectiveQuery}`);
+        messageApi.info(`没有找到匹配符号：${effectiveQuery}`);
         return;
       }
 
-      // 总是自动渲染第一个最相关结果
       setBeforeContext(DEFAULT_BEFORE_CONTEXT);
       setAfterContext(DEFAULT_AFTER_CONTEXT);
       setSelectedSymbol(nextResults[0]);
     } catch {
-      messageApi.error('函数搜索失败');
+      messageApi.error('符号搜索失败');
     } finally {
       setSearching(false);
     }
   }
 
   async function renderSelectedSymbol(contextId: string, symbolId: string) {
+    renderKeyRef.current += 1;
+    const currentKey = renderKeyRef.current;
     setRendering(true);
+    setKnownFunctions(new Set());
     previousSnippetStartRef.current = rendered?.snippetStartLine ?? null;
 
     try {
@@ -480,12 +560,36 @@ const CodeContextExplorer: React.FC = () => {
       const data = await response.json();
 
       if (!data.ok) {
-        messageApi.error(data.error || '函数源码渲染失败');
+        messageApi.error(data.error || '源码渲染失败');
         return;
       }
 
       const payload = data.data as RenderedSymbolPayload;
+      if (currentKey !== renderKeyRef.current) return;
       setRendered(payload);
+
+      // Build known functions set from symbol index for clickable highlighting
+      try {
+        const idxResponse = await fetch(
+          `${PROXY_HTTP}/api/code-context/${encodeURIComponent(contextId)}/symbols?q=${encodeURIComponent(payload.symbol.name)}&limit=200`
+        );
+        const idxData = await idxResponse.json();
+        if (currentKey !== renderKeyRef.current) return;
+        if (idxData.ok && Array.isArray(idxData.data)) {
+          const funcNames = new Set<string>();
+          (idxData.data as SymbolCandidate[]).forEach((s) => {
+            if ((s.kind || 'function') === 'function') {
+              funcNames.add(s.name);
+            }
+          });
+          setKnownFunctions(funcNames);
+        }
+      } catch {
+        // ignore index fetch errors
+      }
+
+      // Load call chain
+      void loadCallChain(contextId, symbolId, currentKey);
 
       const panel = codePanelRef.current;
       if (!panel) return;
@@ -503,9 +607,32 @@ const CodeContextExplorer: React.FC = () => {
       }
       pendingWheelExpandRef.current = null;
     } catch {
-      messageApi.error('函数源码渲染失败');
+      messageApi.error('源码渲染失败');
     } finally {
-      setRendering(false);
+      if (currentKey === renderKeyRef.current) {
+        setRendering(false);
+      }
+    }
+  }
+
+  async function loadCallChain(contextId: string, symbolId: string, renderKey?: number) {
+    setLoadingCallChain(true);
+    try {
+      const [callersRes, calleesRes] = await Promise.all([
+        fetch(`${PROXY_HTTP}/api/code-context/${encodeURIComponent(contextId)}/symbols/${encodeURIComponent(symbolId)}/callers`),
+        fetch(`${PROXY_HTTP}/api/code-context/${encodeURIComponent(contextId)}/symbols/${encodeURIComponent(symbolId)}/callees`),
+      ]);
+      const callersData = await callersRes.json();
+      const calleesData = await calleesRes.json();
+
+      if (renderKey !== undefined && renderKey !== renderKeyRef.current) return;
+      setCallers(callersData.ok && Array.isArray(callersData.data) ? callersData.data : []);
+      setCallees(calleesData.ok && Array.isArray(calleesData.data) ? calleesData.data : []);
+    } catch {
+      setCallers([]);
+      setCallees([]);
+    } finally {
+      setLoadingCallChain(false);
     }
   }
 
@@ -588,6 +715,19 @@ const CodeContextExplorer: React.FC = () => {
     pendingWheelExpandRef.current = null;
   }
 
+  function handleCodeClick(event: React.MouseEvent<HTMLDivElement>) {
+    const target = event.target as HTMLElement;
+    const funcCall = target.closest('.code-func-call');
+    if (funcCall) {
+      const funcName = funcCall.getAttribute('data-name');
+      if (funcName && funcName !== selectedSymbol?.name) {
+        setQuery(funcName);
+        setActiveFunctionToken({ token: funcName, query: funcName, hits: 1, sampleLine: `代码内点击: ${funcName}` });
+        void searchFunctions(funcName);
+      }
+    }
+  }
+
   function expandContext(direction: 'up' | 'down') {
     if (!selectedSymbol || rendering) return;
 
@@ -661,8 +801,8 @@ const CodeContextExplorer: React.FC = () => {
 
   const highlightedHtml = useMemo(() => {
     if (!rendered?.lines) return [];
-    return highlightCLines(rendered.lines, isDark);
-  }, [rendered?.lines, isDark]);
+    return highlightCLines(rendered.lines, isDark, knownFunctions);
+  }, [rendered?.lines, isDark, knownFunctions]);
 
   return (
     <div style={{ padding: 24 }}>
@@ -671,7 +811,7 @@ const CodeContextExplorer: React.FC = () => {
       <div style={{ marginBottom: 20 }}>
         <Title level={2} style={{ margin: 0 }}>源码上下文</Title>
         <Paragraph type="secondary" style={{ margin: '8px 0 0' }}>
-          同一个页面里完成节点定位和源码渲染。先绑定本次问题的 repo / branch / commit，左侧执行节点命令并点击抽取出的函数候选，右侧实时渲染对应函数代码。
+          多代码库符号检索、调用链可视化与节点命令联动。绑定 repo / branch / commit 后，左侧执行命令提取符号，右侧渲染源码并支持点击跳转。
         </Paragraph>
       </div>
 
@@ -726,22 +866,37 @@ const CodeContextExplorer: React.FC = () => {
             </Button>
           </div>
         </div>
-
-        {activeContext && (
-          <div style={{ marginTop: 12 }}>
-            <Space wrap>
-              <Tag color="processing">{activeContext.repoDisplayName}</Tag>
-              <Tag>{activeContext.branch}</Tag>
-              <Tag>{activeContext.commit.slice(0, 12)}</Tag>
-              <Tag color="blue">
-                {typeof activeContext.symbolCount === 'number'
-                  ? `函数索引 ${activeContext.symbolCount}`
-                  : '按需检索'}
-              </Tag>
-            </Space>
-          </div>
-        )}
       </Card>
+
+      {activeContexts.length > 0 && (
+        <div style={{ marginBottom: 16, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <Text strong>已挂载仓库：</Text>
+          {activeContexts.map((ctx) => (
+            <Tag
+              key={ctx.contextId}
+              color={ctx.contextId === activeContextId ? 'processing' : 'default'}
+              style={{ cursor: 'pointer', paddingInline: 10 }}
+              onClick={() => {
+                setActiveContextId(ctx.contextId);
+                setResults([]);
+                setSelectedSymbol(null);
+                setRendered(null);
+                setCallers([]);
+                setCallees([]);
+              }}
+              closable
+              onClose={(e) => {
+                e.preventDefault();
+                void removeContext(ctx.contextId);
+              }}
+              closeIcon={<CloseOutlined />}
+            >
+              {ctx.repoDisplayName} · {ctx.branch} · {ctx.commit.slice(0, 7)}
+              {typeof ctx.symbolCount === 'number' ? ` (${ctx.symbolCount})` : ''}
+            </Tag>
+          ))}
+        </div>
+      )}
 
       <div
         ref={splitContainerRef}
@@ -756,7 +911,7 @@ const CodeContextExplorer: React.FC = () => {
       >
         <div style={{ minWidth: 0, paddingRight: leftPaneWidth ? 8 : 0 }}>
           <Space direction="vertical" size={16} style={{ width: '100%' }}>
-          <Card title="节点执行与函数提取" style={{ background: cardBg, border: `1px solid ${borderColor}` }}>
+          <Card title="节点执行与符号提取" style={{ background: cardBg, border: `1px solid ${borderColor}` }}>
             <Space direction="vertical" size={12} style={{ width: '100%' }}>
               <div
                 style={{
@@ -834,7 +989,7 @@ const CodeContextExplorer: React.FC = () => {
                   在节点执行
                 </Button>
                 {activeFunctionToken && (
-                  <Tag color="magenta">当前选中函数：{activeFunctionToken.token}</Tag>
+                  <Tag color="magenta">当前选中：{activeFunctionToken.token}</Tag>
                 )}
               </Space>
 
@@ -885,9 +1040,9 @@ const CodeContextExplorer: React.FC = () => {
                           {item.stdout && (
                             <div>
                               <Text strong>stdout</Text>
-                              <ResizableOutput 
-                                content={item.stdout} 
-                                isDark={isDark} minHeight={56} maxHeight={220} 
+                              <ResizableOutput
+                                content={item.stdout}
+                                isDark={isDark} minHeight={56} maxHeight={220}
                                 onTextSelect={(text) => void handleTextSelect(text)}
                               />
                             </div>
@@ -896,9 +1051,9 @@ const CodeContextExplorer: React.FC = () => {
                           {item.stderr && (
                             <div>
                               <Text strong>stderr</Text>
-                              <ResizableOutput 
-                                content={item.stderr} 
-                                isDark={isDark} minHeight={56} maxHeight={220} 
+                              <ResizableOutput
+                                content={item.stderr}
+                                isDark={isDark} minHeight={56} maxHeight={220}
                                 onTextSelect={(text) => void handleTextSelect(text)}
                               />
                             </div>
@@ -912,10 +1067,10 @@ const CodeContextExplorer: React.FC = () => {
             </Space>
           </Card>
 
-          <Card title="函数候选与补充检索" style={{ background: cardBg, border: `1px solid ${borderColor}` }}>
+          <Card title="符号检索" style={{ background: cardBg, border: `1px solid ${borderColor}` }}>
             <Space direction="vertical" size={12} style={{ width: '100%' }}>
               <Search
-                placeholder="可手动补充函数名搜索，例如 CreateOrder"
+                placeholder="可手动补充符号名搜索，例如 CreateOrder 或 struct page"
                 value={query}
                 enterButton={compactSearchButton ? <SearchOutlined /> : <><SearchOutlined /> 搜索</>}
                 onChange={(event) => setQuery(event.target.value)}
@@ -925,7 +1080,7 @@ const CodeContextExplorer: React.FC = () => {
               />
 
               {!activeContext ? (
-                <Alert type="warning" showIcon message="请先绑定代码版本，再执行节点命令或搜索函数" />
+                <Alert type="warning" showIcon message="请先绑定代码版本，再执行节点命令或搜索符号" />
               ) : results.length === 0 ? (
                 <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="点击左侧抽取出的函数候选后，匹配结果会列在这里" />
               ) : (
@@ -948,14 +1103,18 @@ const CodeContextExplorer: React.FC = () => {
                         title={
                           <Space wrap>
                             <Text strong>{item.name}</Text>
+                            {item.kind && (
+                              <Tag color={SYMBOL_KIND_COLOR[item.kind] || 'default'}>
+                                {SYMBOL_KIND_LABEL[item.kind] || item.kind}
+                              </Tag>
+                            )}
                             <Tag color={item.matchType === 'exact' ? 'success' : 'default'}>{item.matchType}</Tag>
-                            <Tag>{item.language}</Tag>
                           </Space>
                         }
                         description={
                           <Space direction="vertical" size={4} style={{ width: '100%' }}>
                             <Text code>{item.path}:{item.line}</Text>
-                            <Text type="secondary">{item.signature}</Text>
+                            <Text type="secondary" ellipsis>{item.signature}</Text>
                           </Space>
                         }
                       />
@@ -1002,115 +1161,172 @@ const CodeContextExplorer: React.FC = () => {
 
         <div style={{ minWidth: 0, paddingLeft: leftPaneWidth ? 8 : 0, marginTop: leftPaneWidth ? 0 : 16 }}>
           <Card
-          title="函数源码"
-          style={{ background: cardBg, border: `1px solid ${borderColor}` }}
-          extra={
-            rendered && (
-              <Space wrap>
-                <Button size="small" onClick={() => expandContext('up')} disabled={rendering || beforeContext >= MAX_BEFORE_CONTEXT}>
-                  上文 +20
-                </Button>
-                <Button size="small" onClick={() => expandContext('down')} disabled={rendering || afterContext >= MAX_AFTER_CONTEXT}>
-                  下文 +40
-                </Button>
-              </Space>
-            )
-          }
-        >
-          {!selectedSymbol ? (
-            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="左侧执行节点命令后点击函数候选，右侧会实时渲染对应源码" />
-          ) : rendering && !rendered ? (
-            <div style={{ textAlign: 'center', padding: '80px 0' }}>
-              <Spin />
-            </div>
-          ) : !rendered ? (
-            <Alert type="warning" showIcon message="暂未加载到函数源码" />
-          ) : (
-            <Space direction="vertical" size={12} style={{ width: '100%' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10 }}>
-                <div style={{ background: mutedBg, borderRadius: 8, padding: 10 }}>
-                  <Text type="secondary">函数</Text>
-                  <div><Text strong>{rendered.symbol.name}</Text></div>
-                </div>
-                <div style={{ background: mutedBg, borderRadius: 8, padding: 10 }}>
-                  <Text type="secondary">文件</Text>
-                  <div><Text code>{rendered.symbol.path}:{rendered.symbol.line}</Text></div>
-                </div>
-                <div style={{ background: mutedBg, borderRadius: 8, padding: 10 }}>
-                  <Text type="secondary">函数范围</Text>
-                  <div><Text strong>{rendered.functionStartLine} - {rendered.functionEndLine}</Text></div>
-                </div>
+            title="符号源码"
+            style={{ background: cardBg, border: `1px solid ${borderColor}` }}
+            extra={
+              rendered && (
+                <Space wrap>
+                  <Button size="small" onClick={() => expandContext('up')} disabled={rendering || beforeContext >= MAX_BEFORE_CONTEXT}>
+                    上文 +20
+                  </Button>
+                  <Button size="small" onClick={() => expandContext('down')} disabled={rendering || afterContext >= MAX_AFTER_CONTEXT}>
+                    下文 +40
+                  </Button>
+                </Space>
+              )
+            }
+          >
+            {!selectedSymbol ? (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="左侧执行节点命令后点击符号候选，右侧会实时渲染对应源码" />
+            ) : rendering && !rendered ? (
+              <div style={{ textAlign: 'center', padding: '80px 0' }}>
+                <Spin />
               </div>
-
-              <Alert
-                type="info"
-                showIcon
-                message={rendered.signature}
-                description="在代码面板顶部或底部继续滚轮，可以自动补更多上下文。"
-              />
-
-              <div
-                ref={codePanelRef}
-                onWheel={handleCodeWheel}
-                style={{
-                  height: 820,
-                  overflow: 'auto',
-                  borderRadius: 8,
-                  border: `1px solid ${borderColor}`,
-                  background: codeBg,
-                  padding: '10px 0',
-                }}
-              >
-                {rendering && (
-                  <div style={{ position: 'sticky', top: 0, zIndex: 1, padding: '0 12px 8px' }}>
-                    <Tag color="processing">更新上下文中...</Tag>
+            ) : !rendered ? (
+              <Alert type="warning" showIcon message="暂未加载到符号源码" />
+            ) : (
+              <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10 }}>
+                  <div style={{ background: mutedBg, borderRadius: 8, padding: 10 }}>
+                    <Text type="secondary">符号</Text>
+                    <div>
+                      <Text strong>{rendered.symbol.name}</Text>
+                      {rendered.symbol.kind && (
+                        <Tag style={{ marginLeft: 8 }} color={SYMBOL_KIND_COLOR[rendered.symbol.kind] || 'default'}>
+                          {SYMBOL_KIND_LABEL[rendered.symbol.kind] || rendered.symbol.kind}
+                        </Tag>
+                      )}
+                    </div>
                   </div>
-                )}
+                  <div style={{ background: mutedBg, borderRadius: 8, padding: 10 }}>
+                    <Text type="secondary">文件</Text>
+                    <div><Text code>{rendered.symbol.path}:{rendered.symbol.line}</Text></div>
+                  </div>
+                  <div style={{ background: mutedBg, borderRadius: 8, padding: 10 }}>
+                    <Text type="secondary">范围</Text>
+                    <div><Text strong>{rendered.functionStartLine} - {rendered.functionEndLine}</Text></div>
+                  </div>
+                </div>
 
-                {rendered.lines.map((line, idx) => (
-                  <div
-                    key={`${line.lineNumber}-${line.text}`}
-                    style={{
-                      display: 'grid',
-                      gridTemplateColumns: '72px 1fr',
-                      gap: 12,
-                      padding: '0 16px',
-                      minHeight: APPROX_LINE_HEIGHT,
-                      lineHeight: `${APPROX_LINE_HEIGHT}px`,
-                      background: line.isDeclaration
-                        ? (isDark ? 'rgba(59, 130, 246, 0.22)' : 'rgba(59, 130, 246, 0.12)')
-                        : line.inFunction
-                        ? (isDark ? 'rgba(15, 23, 42, 0.38)' : 'rgba(241, 245, 249, 0.92)')
-                        : 'transparent',
-                    }}
+                <Alert
+                  type="info"
+                  showIcon
+                  message={rendered.signature}
+                  description="在代码面板顶部或底部继续滚轮，可以自动补更多上下文。点击代码中的函数调用可直接跳转定义。"
+                />
+
+                <Collapse ghost defaultActiveKey={[]}>
+                  <Panel
+                    header={<Text strong>调用者 ({callers.length})</Text>}
+                    key="callers"
                   >
-                    <Text
-                      type="secondary"
+                    {loadingCallChain ? (
+                      <Spin size="small" />
+                    ) : callers.length === 0 ? (
+                      <Text type="secondary">未找到调用者</Text>
+                    ) : (
+                      <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                        {callers.map((caller) => (
+                          <div
+                            key={caller.id}
+                            style={{ cursor: 'pointer', padding: '4px 8px', borderRadius: 4, background: isDark ? '#1e293b' : '#f1f5f9' }}
+                            onClick={() => handleSelectSymbol(caller)}
+                          >
+                            <Text strong>{caller.name}</Text>
+                            <Text type="secondary" style={{ marginLeft: 8 }} code>{caller.path}:{caller.line}</Text>
+                          </div>
+                        ))}
+                      </Space>
+                    )}
+                  </Panel>
+                  <Panel
+                    header={<Text strong>被调用者 ({callees.length})</Text>}
+                    key="callees"
+                  >
+                    {loadingCallChain ? (
+                      <Spin size="small" />
+                    ) : callees.length === 0 ? (
+                      <Text type="secondary">未找到被调用者</Text>
+                    ) : (
+                      <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                        {callees.map((callee) => (
+                          <div
+                            key={callee.id}
+                            style={{ cursor: 'pointer', padding: '4px 8px', borderRadius: 4, background: isDark ? '#1e293b' : '#f1f5f9' }}
+                            onClick={() => handleSelectSymbol(callee)}
+                          >
+                            <Text strong>{callee.name}</Text>
+                            <Text type="secondary" style={{ marginLeft: 8 }} code>{callee.path}:{callee.line}</Text>
+                          </div>
+                        ))}
+                      </Space>
+                    )}
+                  </Panel>
+                </Collapse>
+
+                <div
+                  ref={codePanelRef}
+                  onWheel={handleCodeWheel}
+                  onClick={handleCodeClick}
+                  style={{
+                    height: 820,
+                    overflow: 'auto',
+                    borderRadius: 8,
+                    border: `1px solid ${borderColor}`,
+                    background: codeBg,
+                    padding: '10px 0',
+                  }}
+                >
+                  {rendering && (
+                    <div style={{ position: 'sticky', top: 0, zIndex: 1, padding: '0 12px 8px' }}>
+                      <Tag color="processing">更新上下文中...</Tag>
+                    </div>
+                  )}
+
+                  {rendered.lines.map((line, idx) => (
+                    <div
+                      key={`${line.lineNumber}-${line.text}`}
                       style={{
-                        userSelect: 'none',
-                        textAlign: 'right',
-                        fontFamily: 'JetBrains Mono, Fira Code, monospace',
-                        fontSize: 12,
+                        display: 'grid',
+                        gridTemplateColumns: '72px 1fr',
+                        gap: 12,
+                        padding: '0 16px',
+                        minHeight: APPROX_LINE_HEIGHT,
+                        lineHeight: `${APPROX_LINE_HEIGHT}px`,
+                        background: line.isDeclaration
+                          ? (isDark ? 'rgba(59, 130, 246, 0.22)' : 'rgba(59, 130, 246, 0.12)')
+                          : line.inFunction
+                          ? (isDark ? 'rgba(15, 23, 42, 0.38)' : 'rgba(241, 245, 249, 0.92)')
+                          : 'transparent',
                       }}
                     >
-                      {line.lineNumber}
-                    </Text>
-                    <pre
-                      style={{
-                        margin: 0,
-                        whiteSpace: 'pre-wrap',
-                        wordBreak: 'break-word',
-                        fontFamily: 'JetBrains Mono, Fira Code, monospace',
-                        fontSize: 12,
-                        color: isDark ? '#e5e7eb' : '#111827',
-                      }}
-                      dangerouslySetInnerHTML={{ __html: highlightedHtml[idx] || ' ' }}
-                    />
-                  </div>
-                ))}
-              </div>
-            </Space>
-          )}
+                      <Text
+                        type="secondary"
+                        style={{
+                          userSelect: 'none',
+                          textAlign: 'right',
+                          fontFamily: 'JetBrains Mono, Fira Code, monospace',
+                          fontSize: 12,
+                        }}
+                      >
+                        {line.lineNumber}
+                      </Text>
+                      <pre
+                        style={{
+                          margin: 0,
+                          whiteSpace: 'pre-wrap',
+                          wordBreak: 'break-word',
+                          fontFamily: 'JetBrains Mono, Fira Code, monospace',
+                          fontSize: 12,
+                          color: isDark ? '#e5e7eb' : '#111827',
+                        }}
+                        dangerouslySetInnerHTML={{ __html: highlightedHtml[idx] || ' ' }}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </Space>
+            )}
           </Card>
         </div>
       </div>
