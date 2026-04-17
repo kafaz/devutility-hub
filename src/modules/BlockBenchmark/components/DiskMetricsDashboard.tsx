@@ -1,10 +1,11 @@
 import { PlayCircleOutlined, StopOutlined } from '@ant-design/icons';
-import { Badge, Button, Card, Col, Empty, Row, Select, Space, Typography, message } from 'antd';
-import ReactECharts from 'echarts-for-react';
+import { Button, Card, Empty, Space, Typography, message } from 'antd';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSSHStore } from '../../SSHManager/store/sshStore';
 import { useDiskDiscovery } from '../hooks/useDiskDiscovery';
 import { useBenchmarkStore } from '../store/benchmarkStore';
+import IOMonitorGrid from './IOMonitorGrid';
+import IOMonitorDetail from './IOMonitorDetail';
 
 const { Title, Text } = Typography;
 
@@ -48,165 +49,157 @@ export function parseIostatLine(line: string, deviceBase: string): IostatMetrics
 
 export const DiskMetricsDashboard: React.FC = () => {
   const { discoveredNodes } = useDiskDiscovery();
-  const { tasks } = useBenchmarkStore();
+  const { ioSnapshots, updateIOSnapshot, clearIOSnapshots, tasks } = useBenchmarkStore();
   const { subscribeToSessionLines, sendInputToSession, sessions } = useSSHStore();
 
-  const [selectedDiskKey, setSelectedDiskKey] = useState<string>('');
-  const [history, setHistory] = useState<Record<string, IostatMetrics[]>>({});
+  const [selectedDiskKey, setSelectedDiskKey] = useState<string | null>(null);
   const [isMonitoring, setIsMonitoring] = useState(false);
-  const unsubRef = useRef<(() => void) | null>(null);
+  const unsubRef = useRef<(() => void)[]>([]);
 
-  // FIX-1: Now reads from shared store — same data as TopologyMatrix
+  // Flat list of all discovered disks across all sessions
   const flatDisks = useMemo(() => {
-    return Object.values(discoveredNodes).flatMap(node =>
-      node.disks.map(d => ({
-        sessionId: node.sessionId,
-        // FIX-5: sessionName instead of UUID
-        sessionName: sessions.find(s => s.id === node.sessionId)?.name || node.sessionId,
-        diskName: d.name,
-        key: `${node.sessionId}::${d.name}`,
-      }))
+    return Object.values(discoveredNodes).flatMap((node) =>
+      node.disks.map((d) => {
+        const session = sessions.find((s) => s.id === node.sessionId);
+        return {
+          sessionId: node.sessionId,
+          sessionName: session?.name || node.sessionId,
+          diskName: d.name,
+          key: `${node.sessionId}::${d.name}`,
+        };
+      })
     );
   }, [discoveredNodes, sessions]);
 
+  // Build a map of active IO models from running tasks
+  const activeIOModelMap = useMemo(() => {
+    const map: Record<string, { model: string; taskId: string }> = {};
+    for (const task of tasks) {
+      if (task.status === 'running' || task.status === 'RUNNING') {
+        // Try to infer disk from task params if available; fallback to agent_id mapping
+        // The key format is sessionId::device
+        const sessionId = task.agent_id;
+        // Best-effort: we mark all disks on that session with the active model
+        // A more precise mapping would require device in task payload
+        const disksForSession = flatDisks.filter((d) => d.sessionId === sessionId);
+        for (const d of disksForSession) {
+          map[d.key] = { model: task.task_type, taskId: task.id };
+        }
+      }
+    }
+    return map;
+  }, [tasks, flatDisks]);
+
+  // Enrich snapshots with session names and active IO models
+  const enrichedSnapshots = useMemo(() => {
+    return ioSnapshots.map((snap) => {
+      const diskInfo = flatDisks.find((d) => d.key === snap.key);
+      const active = activeIOModelMap[snap.key];
+      return {
+        ...snap,
+        sessionName: diskInfo?.sessionName || snap.sessionName || snap.sessionId,
+        diskName: diskInfo?.diskName || snap.diskName,
+        activeIOModel: active?.model,
+        activeTaskId: active?.taskId,
+      };
+    });
+  }, [ioSnapshots, flatDisks, activeIOModelMap]);
+
+  // Auto-select first disk if none selected
   useEffect(() => {
     if (flatDisks.length > 0 && !selectedDiskKey) {
       setSelectedDiskKey(flatDisks[0].key);
     }
   }, [flatDisks, selectedDiskKey]);
 
-  // FIX-3: Start/stop real iostat monitoring over SSH
+  // Start monitoring all discovered disks across all sessions
   const startMonitoring = useCallback(() => {
-    if (!selectedDiskKey) return;
-    const [sessionId, diskName] = selectedDiskKey.split('::');
-    const deviceBase = diskName.replace('/dev/', '');
+    if (flatDisks.length === 0) {
+      message.warning('未发现可用磁盘，请先扫描拓扑。');
+      return;
+    }
 
-    // Inject the iostat command into the live terminal session
-    // The output will stream back through the WebSocket and get intercepted by subscribeToSessionLines
-    sendInputToSession(sessionId, `iostat -xd 1 ${deviceBase}\n`);
+    // Clear previous unsubs
+    unsubRef.current.forEach((unsub) => unsub());
+    unsubRef.current = [];
+
+    const sessionDiskMap = new Map<string, string[]>();
+    for (const d of flatDisks) {
+      const list = sessionDiskMap.get(d.sessionId) || [];
+      list.push(d.diskName);
+      sessionDiskMap.set(d.sessionId, list);
+    }
+
+    for (const [sessionId, diskNames] of sessionDiskMap.entries()) {
+      const deviceBases = diskNames.map((n) => n.replace('/dev/', ''));
+      // Start a single iostat for all devices on this session
+      const cmd = `iostat -xd 1 ${deviceBases.join(' ')}\n`;
+      sendInputToSession(sessionId, cmd);
+
+      for (const diskName of diskNames) {
+        const deviceBase = diskName.replace('/dev/', '');
+        const key = `${sessionId}::${diskName}`;
+
+        const unsub = subscribeToSessionLines(sessionId, (line: string) => {
+          const parsed = parseIostatLine(line, deviceBase);
+          if (!parsed) return;
+          updateIOSnapshot(key, parsed);
+        });
+
+        unsubRef.current.push(unsub);
+      }
+    }
+
     setIsMonitoring(true);
+    message.success(`已启动 ${flatDisks.length} 个磁盘的 iostat 监控`);
+  }, [flatDisks, subscribeToSessionLines, sendInputToSession, updateIOSnapshot]);
 
-    // Subscribe to line stream and parse each line
-    const unsub = subscribeToSessionLines(sessionId, (line: string) => {
-      const parsed = parseIostatLine(line, deviceBase);
-      if (!parsed) return;
-      setHistory(prev => {
-        const cur = prev[selectedDiskKey] || [];
-        const next = [...cur, parsed];
-        if (next.length > 120) next.shift(); // keep 2 min of history
-        return { ...prev, [selectedDiskKey]: next };
-      });
-    });
-
-    unsubRef.current = unsub;
-  }, [selectedDiskKey, subscribeToSessionLines, sendInputToSession]);
-
+  // Stop all iostat processes
   const stopMonitoring = useCallback(() => {
-    if (!selectedDiskKey) return;
-    const [sessionId] = selectedDiskKey.split('::');
-    // Send Ctrl+C to kill iostat on the remote
-    sendInputToSession(sessionId, '\x03');
-    unsubRef.current?.();
-    unsubRef.current = null;
-    setIsMonitoring(false);
-    message.info('已停止 iostat 监控。');
-  }, [selectedDiskKey, sendInputToSession]);
+    const sessionIds = new Set(flatDisks.map((d) => d.sessionId));
+    for (const sessionId of sessionIds) {
+      sendInputToSession(sessionId, '\x03');
+    }
 
-  // Cleanup on disk change
+    unsubRef.current.forEach((unsub) => unsub());
+    unsubRef.current = [];
+    setIsMonitoring(false);
+    message.info('已停止所有 iostat 监控。');
+  }, [flatDisks, sendInputToSession]);
+
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
-      unsubRef.current?.();
-      unsubRef.current = null;
-      setIsMonitoring(false);
+      unsubRef.current.forEach((unsub) => unsub());
+      unsubRef.current = [];
     };
-  }, [selectedDiskKey]);
+  }, []);
 
   if (flatDisks.length === 0) {
     return <Empty description="暂无扫描到的数据盘，请先在「矩阵调度」页面扫描拓扑" />;
   }
 
-  const currentHistory = history[selectedDiskKey] || [];
-  const xAxisData = currentHistory.map(h => h.timestamp);
-
-  const [sessionId] = selectedDiskKey.split('::');
-  const relatedTask = tasks.find(t => t.agent_id === sessionId);
-  const isDataInconsistent = relatedTask?.status === 'FAIL';
-
-  const optionUtil = {
-    tooltip: { trigger: 'axis' },
-    legend: { data: ['%Util (跑满)', 'R_Await (读延迟 ms)', 'W_Await (写延迟 ms)'], bottom: 0 },
-    grid: { left: '3%', right: '4%', bottom: '20%', containLabel: true },
-    xAxis: { type: 'category', boundaryGap: false, data: xAxisData },
-    yAxis: [
-      { type: 'value', name: '%', position: 'left', max: 100 },
-      { type: 'value', name: 'ms', position: 'right', splitLine: { show: false } },
-    ],
-    series: [
-      {
-        name: '%Util (跑满)',
-        type: 'line',
-        itemStyle: { color: '#ef4444' },
-        areaStyle: { color: 'rgba(239, 68, 68, 0.2)' },
-        data: currentHistory.map(h => h.util.toFixed(1)),
-        smooth: true,
-      },
-      {
-        name: 'R_Await (读延迟 ms)',
-        type: 'line',
-        yAxisIndex: 1,
-        itemStyle: { color: '#f97316' },
-        data: currentHistory.map(h => h.r_await.toFixed(2)),
-        smooth: true,
-      },
-      {
-        name: 'W_Await (写延迟 ms)',
-        type: 'line',
-        yAxisIndex: 1,
-        itemStyle: { color: '#eab308' },
-        data: currentHistory.map(h => h.w_await.toFixed(2)),
-        smooth: true,
-      },
-    ],
-  };
-
-  const optionBw = {
-    tooltip: { trigger: 'axis' },
-    legend: { data: ['Bandwidth (MB/s)'], bottom: 0 },
-    grid: { left: '3%', right: '4%', bottom: '15%', containLabel: true },
-    xAxis: { type: 'category', boundaryGap: false, data: xAxisData },
-    yAxis: { type: 'value', name: 'MB/s' },
-    series: [
-      {
-        name: 'Bandwidth (MB/s)',
-        type: 'line',
-        itemStyle: { color: '#3b82f6' },
-        areaStyle: { color: 'rgba(59, 130, 246, 0.2)' },
-        data: currentHistory.map(h => h.bw_mbps.toFixed(2)),
-        smooth: true,
-      },
-    ],
-  };
+  const selectedSnapshot = enrichedSnapshots.find((s) => s.key === selectedDiskKey) || null;
 
   return (
     <Card size="small" bordered={false}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          marginBottom: 16,
+        }}
+      >
         <Space direction="vertical" size={2}>
-          <Title level={5} style={{ margin: 0 }}>单盘精准 IO 可观测大盘 (iostat 实时解析)</Title>
+          <Title level={5} style={{ margin: 0 }}>
+            集群 IO 实时监控大盘 (iostat 聚合)
+          </Title>
           <Text type="secondary" style={{ fontSize: 12 }}>
-            点击「开始监控」后，系统将向目标节点注入 <code>iostat -xd 1 {'{device}'}</code>，实时解析 r/w await 与 %util。
+            点击「开始监控」后，系统将向所有节点注入 <code>iostat -xd 1</code>，实时解析所有磁盘的 r/w await 与 %util。
           </Text>
         </Space>
         <Space>
-          {isDataInconsistent && (
-            <Badge status="error" text={<Text type="danger" strong>触发脏读！(数据不一致)</Text>} />
-          )}
-          {/* FIX-5: Label shows sessionName */}
-          <Select
-            value={selectedDiskKey}
-            onChange={val => { setSelectedDiskKey(val); stopMonitoring(); }}
-            style={{ width: 260 }}
-            options={flatDisks.map(d => ({ label: `${d.sessionName} — ${d.diskName}`, value: d.key }))}
-          />
           {!isMonitoring ? (
             <Button type="primary" icon={<PlayCircleOutlined />} onClick={startMonitoring}>
               开始监控
@@ -216,28 +209,21 @@ export const DiskMetricsDashboard: React.FC = () => {
               停止监控
             </Button>
           )}
+          {ioSnapshots.length > 0 && (
+            <Button onClick={clearIOSnapshots}>清空数据</Button>
+          )}
         </Space>
       </div>
 
-      {currentHistory.length === 0 ? (
-        <Empty
-          description={isMonitoring ? '等待 iostat 数据流...' : '点击「开始监控」以启动 iostat 数据流'}
-          style={{ margin: '40px 0' }}
-        />
-      ) : (
-        <Row gutter={16}>
-          <Col span={12}>
-            <Card size="small" title="IO 卡顿与跑满检测 (%util & r/w await)">
-              <ReactECharts option={optionUtil} notMerge={true} lazyUpdate={true} style={{ height: 280 }} />
-            </Card>
-          </Col>
-          <Col span={12}>
-            <Card size="small" title="磁盘聚合吞吐量 (Bandwidth MB/s)">
-              <ReactECharts option={optionBw} notMerge={true} lazyUpdate={true} style={{ height: 280 }} />
-            </Card>
-          </Col>
-        </Row>
-      )}
+      <IOMonitorGrid
+        snapshots={enrichedSnapshots}
+        selectedKey={selectedDiskKey}
+        onSelect={(key) => setSelectedDiskKey(key)}
+      />
+
+      <div style={{ marginTop: 16 }}>
+        <IOMonitorDetail snapshot={selectedSnapshot} />
+      </div>
     </Card>
   );
 };
