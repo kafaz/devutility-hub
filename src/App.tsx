@@ -8,7 +8,6 @@ const CommandBuilder = lazy(() => import('./modules/CommandBuilder'));
 const SOPBuilder        = lazy(() => import('./modules/SOPBuilder'));
 const SSHManager        = lazy(() => import('./modules/SSHManager'));
 const NumberConverter   = lazy(() => import('./modules/NumberConverter'));
-const FIOVisualizer     = lazy(() => import('./modules/FIOVisualizer'));
 const ProtocolDecoder   = lazy(() => import('./modules/ProtocolDecoder'));
 const IOAnalyzer        = lazy(() => import('./modules/IOAnalyzer'));
 const DiagnosticWorkbench = lazy(() => import('./modules/DiagnosticWorkbench'));
@@ -26,7 +25,6 @@ const TOOL_ROUTES: ToolRouteDefinition[] = [
   { path: '/sop-builder', Component: SOPBuilder },
   { path: '/ssh-manager', Component: SSHManager },
   { path: '/number-converter', Component: NumberConverter },
-  { path: '/fio-visualizer', Component: FIOVisualizer },
   { path: '/protocol-decoder', Component: ProtocolDecoder },
   { path: '/io-analyzer', Component: IOAnalyzer },
   { path: '/diagnostic-workbench', Component: DiagnosticWorkbench },

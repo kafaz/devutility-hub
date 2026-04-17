@@ -1,6 +1,5 @@
 import {
     ApartmentOutlined,
-    AreaChartOutlined,
     BarChartOutlined,
     BulbOutlined,
     CloudServerOutlined,
@@ -29,7 +28,6 @@ const ICON_MAP: Record<string, React.ReactNode> = {
   ApartmentOutlined:  <ApartmentOutlined />,
   ConsoleSqlOutlined: <ConsoleSqlOutlined />,
   NumberOutlined:     <NumberOutlined />,
-  AreaChartOutlined:  <AreaChartOutlined />,
   ControlOutlined:    <ControlOutlined />,
   ThunderboltOutlined:<ThunderboltOutlined />,
   BarChartOutlined:   <BarChartOutlined />,
@@ -68,12 +66,6 @@ const tools = [
     name: '进制转换',
     icon: 'NumberOutlined',
     path: '/number-converter',
-  },
-  {
-    id:   'fio-visualizer',
-    name: 'FIO 解析器',
-    icon: 'AreaChartOutlined',
-    path: '/fio-visualizer',
   },
   {
     id:   'protocol-decoder',
