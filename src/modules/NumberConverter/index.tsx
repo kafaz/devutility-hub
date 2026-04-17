@@ -127,6 +127,27 @@ function maxForWidth(bitWidth: BitWidth): bigint | null {
   return (2n ** BigInt(bits)) - 1n;
 }
 
+/** 按指定位宽进行字节交换（大小端转换） */
+function byteSwap(value: bigint, bitWidth: number): bigint {
+  const bytes = bitWidth / 8;
+  let result = 0n;
+  for (let i = 0; i < bytes; i++) {
+    const byte = (value >> BigInt(i * 8)) & 0xFFn;
+    result = (result << 8n) | byte;
+  }
+  return result;
+}
+
+/** 将数值转为可打印字符（ASCII / Unicode） */
+function charFromValue(value: bigint): string | null {
+  if (value < 0n || value > 0x10FFFFn) return null;
+  try {
+    return String.fromCodePoint(Number(value));
+  } catch {
+    return null;
+  }
+}
+
 // ─── 单个进制输入框组件 ────────────────────────────────────────────────────
 
 interface FieldProps {
@@ -277,8 +298,19 @@ const NumberConverter: React.FC = () => {
   const [bitWidth, setBitWidth] = useState<BitWidth>('auto');
   const [activeBase, setActiveBase] = useState<Base | null>(null);
   const [error, setError]       = useState('');
+  const [operandB, setOperandB] = useState<string>('1');
 
   const borderColor = isDark ? '#3e3e42' : '#e4e4e7';
+
+  const handleByteSwap = (width: number) => {
+    const decVal = values.dec.trim();
+    if (!decVal) return;
+    const bigVal = parseValue(decVal, 'dec');
+    if (bigVal === null) return;
+    const mask = (2n ** BigInt(width)) - 1n;
+    const swapped = byteSwap(bigVal & mask, width);
+    handleChange('dec', swapped.toString(10));
+  };
 
   // 当用户在某个进制输入框中输入时的核心逻辑
   const handleChange = useCallback((base: Base, raw: string) => {
@@ -350,6 +382,27 @@ const NumberConverter: React.FC = () => {
   const handleQuickValue = (dec: string) => {
     handleChange('dec', dec);
   };
+
+  const decValNum = values.dec.trim() ? parseValue(values.dec.trim(), 'dec') : null;
+  const bValNum = operandB.trim() ? parseValue(operandB.trim(), 'dec') : null;
+  const asciiChar = decValNum ? charFromValue(decValNum) : null;
+
+  const bitwise = decValNum && bValNum ? {
+    not: ~decValNum,
+    and: decValNum & bValNum,
+    or: decValNum | bValNum,
+    xor: decValNum ^ bValNum,
+    shl: decValNum << bValNum,
+    shr: decValNum >> bValNum,
+  } : null;
+
+  const renderBitResult = (val: bigint) => (
+    <Space size={8} wrap>
+      <Text code style={{ fontSize: 12, color: '#f59e0b' }}>0x{val.toString(16).toUpperCase()}</Text>
+      <Text code style={{ fontSize: 12, color: '#22c55e' }}>{val.toString(10)}</Text>
+      <Text code style={{ fontSize: 12, color: '#3b82f6' }}>0b{formatBinary(val.toString(2))}</Text>
+    </Space>
+  );
 
   return (
     <div style={{ padding: 24 }}>
@@ -464,6 +517,111 @@ const NumberConverter: React.FC = () => {
           />
         ))}
       </div>
+
+      {/* ASCII / Unicode 显示 */}
+      {asciiChar && (
+        <Card
+          size="small"
+          style={{
+            marginTop: 12,
+            background: isDark ? '#252526' : '#ffffff',
+            border: `1px solid ${borderColor}`,
+          }}
+        >
+          <Space size={16} wrap>
+            <Text style={{ fontSize: 13 }}>字符映射：</Text>
+            <div
+              style={{
+                fontSize: 24,
+                fontFamily: 'JetBrains Mono, Consolas, monospace',
+                minWidth: 40,
+                textAlign: 'center',
+                padding: '4px 12px',
+                background: isDark ? '#1e1e1e' : '#f8f8f8',
+                borderRadius: 4,
+                border: `1px solid ${borderColor}`,
+              }}
+            >
+              {asciiChar}
+            </div>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              U+{decValNum!.toString(16).toUpperCase().padStart(4, '0')}
+            </Text>
+          </Space>
+        </Card>
+      )}
+
+      {/* 位运算面板 */}
+      <Card
+        size="small"
+        title={<Text strong>位运算</Text>}
+        style={{
+          marginTop: 12,
+          background: isDark ? '#252526' : '#ffffff',
+          border: `1px solid ${borderColor}`,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
+          <Text style={{ fontSize: 13 }}>操作数 B：</Text>
+          <Input
+            value={operandB}
+            onChange={(e) => setOperandB(e.target.value.replace(/\s/g, ''))}
+            placeholder="输入十进制或十六进制如 0xF"
+            style={{ width: 200, fontFamily: 'JetBrains Mono, Consolas, monospace', fontSize: 13 }}
+          />
+          {!bValNum && operandB.trim() && (
+            <Text type="danger" style={{ fontSize: 12 }}>非法数字</Text>
+          )}
+        </div>
+        {bitwise ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {[
+              { label: '~A (NOT)', val: bitwise.not },
+              { label: 'A & B (AND)', val: bitwise.and },
+              { label: 'A | B (OR)', val: bitwise.or },
+              { label: 'A ^ B (XOR)', val: bitwise.xor },
+              { label: 'A << B (左移)', val: bitwise.shl },
+              { label: 'A >> B (右移)', val: bitwise.shr },
+            ].map((item) => (
+              <div key={item.label} style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                <Text type="secondary" style={{ fontSize: 12, minWidth: 90 }}>{item.label}</Text>
+                {renderBitResult(item.val)}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            输入合法的 A（当前数值）和 B 后显示位运算结果。
+          </Text>
+        )}
+      </Card>
+
+      {/* 字节交换 / 大小端 */}
+      <Card
+        size="small"
+        title={<Text strong>字节交换（大小端转换）</Text>}
+        style={{
+          marginTop: 12,
+          background: isDark ? '#252526' : '#ffffff',
+          border: `1px solid ${borderColor}`,
+        }}
+      >
+        <Space size={8} wrap>
+          {[16, 32, 64].map((w) => (
+            <Button
+              key={w}
+              size="small"
+              disabled={!decValNum}
+              onClick={() => handleByteSwap(w)}
+            >
+              {w}-bit 交换
+            </Button>
+          ))}
+        </Space>
+        <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 8 }}>
+          按指定位宽截取当前数值后进行字节反序（如 0x1234 → 0x3412）。
+        </Text>
+      </Card>
 
       {/* 说明提示 */}
       <div

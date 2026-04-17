@@ -15,10 +15,8 @@ import {
     MenuUnfoldOutlined,
     NumberOutlined,
     RadarChartOutlined,
-    SafetyCertificateOutlined,
     SettingOutlined,
     ThunderboltOutlined,
-    ToolOutlined,
 } from '@ant-design/icons';
 import { Layout, Menu, Tooltip, Typography } from 'antd';
 import React from 'react';
@@ -34,7 +32,6 @@ const ICON_MAP: Record<string, React.ReactNode> = {
   ApartmentOutlined:  <ApartmentOutlined />,
   ConsoleSqlOutlined: <ConsoleSqlOutlined />,
   NumberOutlined:     <NumberOutlined />,
-  SafetyCertificateOutlined: <SafetyCertificateOutlined />,
   AlignLeftOutlined:  <AlignLeftOutlined />,
   AreaChartOutlined:  <AreaChartOutlined />,
   BlockOutlined:      <BlockOutlined />,
@@ -42,7 +39,6 @@ const ICON_MAP: Record<string, React.ReactNode> = {
   ControlOutlined:    <ControlOutlined />,
   ThunderboltOutlined:<ThunderboltOutlined />,
   BarChartOutlined:   <BarChartOutlined />,
-  ToolOutlined:       <ToolOutlined />,
   RadarChartOutlined: <RadarChartOutlined />,
   BulbOutlined:       <BulbOutlined />,
   CloudServerOutlined:<CloudServerOutlined />,
@@ -80,12 +76,6 @@ const tools = [
     path: '/number-converter',
   },
   {
-    id:   'file-hasher',
-    name: '文件校验 (MD5/CRC)',
-    icon: 'SafetyCertificateOutlined',
-    path: '/file-hasher',
-  },
-  {
     id:   'fio-visualizer',
     name: 'FIO 解析器',
     icon: 'AreaChartOutlined',
@@ -116,22 +106,10 @@ const tools = [
     path: '/timeline-correlator',
   },
   {
-    id:   'fault-builder',
-    name: '故障注入生成器',
-    icon: 'ThunderboltOutlined',
-    path: '/fault-builder',
-  },
-  {
     id:   'io-analyzer',
     name: 'IO 性能分析',
     icon: 'BarChartOutlined',
     path: '/io-analyzer',
-  },
-  {
-    id:   'code-profiler',
-    name: '代码路径优化',
-    icon: 'ToolOutlined',
-    path: '/code-profiler',
   },
   {
     id:   'diagnostic-workbench',

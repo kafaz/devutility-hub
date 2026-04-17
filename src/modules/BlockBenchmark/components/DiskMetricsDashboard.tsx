@@ -8,7 +8,7 @@ import { useBenchmarkStore } from '../store/benchmarkStore';
 
 const { Title, Text } = Typography;
 
-interface IostatMetrics {
+export interface IostatMetrics {
   timestamp: string;
   r_await: number;
   w_await: number;
@@ -18,7 +18,7 @@ interface IostatMetrics {
 
 // Parse a single line of `iostat -xd` output for a given device basename (e.g. "sdb")
 // Column order (iostat -xd): Device r/s rkB/s rrqm/s %rrqm r_await rareq-sz w/s wkB/s wrqm/s %wrqm w_await wareq-sz ... %util
-function parseIostatLine(line: string, deviceBase: string): IostatMetrics | null {
+export function parseIostatLine(line: string, deviceBase: string): IostatMetrics | null {
   const trimmed = line.trim();
   if (!trimmed.startsWith(deviceBase)) return null;
   const parts = trimmed.split(/\s+/);

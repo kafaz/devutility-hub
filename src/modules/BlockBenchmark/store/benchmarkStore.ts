@@ -16,6 +16,26 @@ export interface BenchmarkTask {
   created_at: string;
 }
 
+export interface WriteTestPayload {
+  agent_id: string;
+  task_type: 'WRITE_TEST';
+  business_name: string;
+  dispatch_count: number;
+  params: {
+    device: string;
+    volume_id: string;
+    lba: string;
+    block_size: string;
+    io_model: string;
+    concurrency: string;
+    iterations: string;
+    read_verify: string;
+    fio_engine?: string;
+    workload_profile?: string;
+    iodepth?: string;
+  };
+}
+
 export interface IOModelConfig {
   id: string;
   name: string;
@@ -58,8 +78,8 @@ interface BenchmarkStore {
   tasks: BenchmarkTask[];
   fetchTasks: () => Promise<void>;
 
-  startTask: (payload: any) => Promise<void>;
-  startIOSession: (payload: any) => Promise<void>;
+  startTask: (payload: WriteTestPayload) => Promise<void>;
+  startIOSession: (payload: WriteTestPayload) => Promise<void>;
 
   savedModels: IOModelConfig[];
   addModel: (model: IOModelConfig) => void;

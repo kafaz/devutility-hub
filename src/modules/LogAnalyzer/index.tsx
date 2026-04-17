@@ -20,6 +20,7 @@ import {
   DownloadOutlined,
   MergeCellsOutlined,
   FunctionOutlined,
+  FieldTimeOutlined,
 } from '@ant-design/icons';
 import { useLogStore } from './store/logStore';
 import RuleManager from './components/RuleManager';
@@ -28,6 +29,7 @@ import CFormatRuleModal from './components/CFormatRuleModal';
 import ResultTable from './components/ResultTable';
 import GrepGroupTable from './components/GrepGroupTable';
 import CFunctionAnalyzer from './components/CFunctionAnalyzer';
+import TimestampAnalyzer from './components/TimestampAnalyzer';
 import type { ParseRule } from '../../types';
 import { useGlobalStore } from '../../store/globalStore';
 import { downloadJSON, cFormatToRegex } from '../../utils';
@@ -72,7 +74,7 @@ const LogAnalyzer: React.FC = () => {
     clearResults,
   } = useLogStore();
 
-  const [activeTab, setActiveTab] = useState<'log' | 'cfunc'>('log');
+  const [activeTab, setActiveTab] = useState<'log' | 'cfunc' | 'timestamp'>('log');
   const [regexModalOpen, setRegexModalOpen] = useState(false);
   const [cFormatModalOpen, setCFormatModalOpen] = useState(false);
   const [editingRule, setEditingRule] = useState<ParseRule | null>(null);
@@ -208,11 +210,18 @@ const LogAnalyzer: React.FC = () => {
             label: <Space size={4}><FunctionOutlined />C函数调用分析</Space>,
             value: 'cfunc',
           },
+          {
+            label: <Space size={4}><FieldTimeOutlined />时间开销分析</Space>,
+            value: 'timestamp',
+          },
         ]}
       />
 
       {/* C函数分析面板 */}
       {activeTab === 'cfunc' && <CFunctionAnalyzer />}
+
+      {/* 时间开销分析面板 */}
+      {activeTab === 'timestamp' && <TimestampAnalyzer />}
 
       {/* 以下是「日志解析」面板内容 */}
       {activeTab === 'log' && <>

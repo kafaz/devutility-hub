@@ -25,13 +25,25 @@ export type ConnStatus  = 'idle' | 'connecting' | 'connected' | 'error' | 'disco
 export type RunMode     = 'broadcast' | 'targeted';
 export type PlanStepStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped';
 
+export interface SSHCredential {
+  id: string;
+  name: string;         // e.g., "Prod Global Key", "Test Root Pass"
+  username: string;
+  authType: AuthType;
+  password?: string;
+  keyFilePath?: string;
+  createdAt: number;
+}
+
 export interface SSHProfile {
   id: string;
   name: string;
   host: string;
   port: number;
-  username: string;
-  authType: AuthType;
+  credentialId?: string; // Ref to SSHCredential
+  // Legacy fields below (can be overwritten or ignored if credentialId is set)
+  username?: string;
+  authType?: AuthType;
   keyFilePath?: string;
   jumpHostProfileId?: string; // Phase 12: Bastion/Jump Host
   createdAt: number;
@@ -175,6 +187,12 @@ const PROXY_WS   = 'ws://127.0.0.1:3001/terminal';
 // ─── Store ─────────────────────────────────────────────────────────────────
 
 interface SSHStore {
+  // 凭证管理 (Phase 15: 支持预设凭证/记住密码)
+  credentials:      SSHCredential[];
+  addCredential:    (c: Omit<SSHCredential, 'id' | 'createdAt'>) => string;
+  updateCredential: (id: string, c: Partial<SSHCredential>) => void;
+  deleteCredential: (id: string) => void;
+
   // 连接档案（持久化）
   profiles:       SSHProfile[];
   addProfile:     (p: Omit<SSHProfile, 'id' | 'createdAt'>) => string;
@@ -194,7 +212,7 @@ interface SSHStore {
   checkProxy:  () => Promise<void>;
 
   // 每会话连接操作
-  connectSession:         (sessionId: string, params: { passphrase?: string; password?: string; agent?: string; jumpPassphrase?: string; jumpPassword?: string; jumpAgent?: string; cols?: number; rows?: number }) => void;
+  connectSession:         (sessionId: string, params: { credentialId?: string; passphrase?: string; password?: string; agent?: string; jumpPassphrase?: string; jumpPassword?: string; jumpAgent?: string; cols?: number; rows?: number }) => void;
   disconnectSession:      (sessionId: string) => void;
   sendInputToSession:     (sessionId: string, data: string) => void;
   resizeSession:          (sessionId: string, cols: number, rows: number) => void;
@@ -248,7 +266,7 @@ function makeWSHandler(
 
       case 'data': {
         const payload = msg.data as string;
-        let finalPayload = payload;
+        const finalPayload = payload;
         try {
           const bin = atob(payload);
           rt.terminalBuffer += bin;
@@ -270,32 +288,6 @@ function makeWSHandler(
           rt.lineBuffer = lines.pop() ?? '';
 
           const analyzerStore = useAnalyzerStore.getState();
-          const highlightRules = analyzerStore.highlightRules;
-          
-          // Apply ANSI highlighting dynamically if user defined rules
-          if (highlightRules && highlightRules.length > 0) {
-            let colorizedUtf8 = chunkUtf8;
-            highlightRules.forEach(rule => {
-                if (!rule.keyword) return;
-                const hex = rule.color.replace('#', '');
-                const r = parseInt(hex.substring(0, 2), 16) || 255;
-                const g = parseInt(hex.substring(2, 4), 16) || 255;
-                const b = parseInt(hex.substring(4, 6), 16) || 255;
-                
-                // Extremely basic replacement (might misfire inside ANSI codes but works for pure text words)
-                try {
-                  const regex = new RegExp(`(${rule.keyword})`, 'gi');
-                  colorizedUtf8 = colorizedUtf8.replace(regex, `\x1b[38;2;${r};${g};${b}m$1\x1b[0m`);
-                } catch { /* ignore bad regex */ }
-            });
-
-            if (colorizedUtf8 !== chunkUtf8) {
-              const newBytes = new TextEncoder().encode(colorizedUtf8);
-              let binary = '';
-              for (let i = 0; i < newBytes.byteLength; i++) binary += String.fromCharCode(newBytes[i]);
-              finalPayload = btoa(binary);
-            }
-          }
 
           if (lines.length > 0) {
             const keywords = analyzerStore.keywords;
@@ -473,12 +465,25 @@ function makeWSHandler(
 export const useSSHStore = create<SSHStore>()(
   persist(
     (set, get) => ({
+      credentials:     [],
       profiles:        [],
       sessions:        [],
       activeSessionId: null,
       proxyOnline:     false,
       multiNodeRun:    null,
       termLineListeners: {},
+
+      // ── 凭证管理 ──────────────────────────────────────────────────────────
+
+      addCredential: (c) => {
+        const id = generateId();
+        set((s) => ({ credentials: [...s.credentials, { ...c, id, createdAt: Date.now() }] }));
+        return id;
+      },
+      updateCredential: (id, c) =>
+        set((s) => ({ credentials: s.credentials.map((x) => x.id === id ? { ...x, ...c } : x) })),
+      deleteCredential: (id) =>
+        set((s) => ({ credentials: s.credentials.filter((x) => x.id !== id) })),
 
       // ── 档案管理 ──────────────────────────────────────────────────────────
 
@@ -552,20 +557,48 @@ export const useSSHStore = create<SSHStore>()(
 
       // ── 建立 SSH 连接 ─────────────────────────────────────────────────────
 
-      connectSession: (sessionId, { passphrase, password, agent, jumpPassphrase, jumpPassword, jumpAgent, cols = 220, rows = 50 }) => {
+      connectSession: (sessionId, { credentialId, passphrase, password, agent, jumpPassphrase, jumpPassword, jumpAgent, cols = 220, rows = 50 }) => {
         const profile = get().profiles.find(
           (p) => p.id === get().sessions.find((s) => s.id === sessionId)?.profileId
         );
         if (!profile) return;
 
+        let targetUser = profile.username ?? '';
+        let targetAuth = profile.authType ?? 'password';
+        let targetKey  = profile.keyFilePath;
+        let targetPass = password;
+
+        const effectiveCredId = credentialId || profile.credentialId;
+        if (effectiveCredId) {
+          const cred = get().credentials.find(c => c.id === effectiveCredId);
+          if (cred) {
+            targetUser = cred.username;
+            targetAuth = cred.authType;
+            targetKey = cred.keyFilePath;
+            targetPass = cred.password || password;
+          }
+        }
+
         let jumpHostConfig = undefined;
         if (profile.jumpHostProfileId) {
           const jp = get().profiles.find(p => p.id === profile.jumpHostProfileId);
           if (jp) {
+            let jpUser = jp.username ?? '';
+            let jpAuth = jp.authType ?? 'password';
+            let jpKey = jp.keyFilePath;
+            let jpPass = jumpPassword;
+
+            if (jp.credentialId) {
+               const jc = get().credentials.find(c => c.id === jp.credentialId);
+               if (jc) {
+                 jpUser = jc.username; jpAuth = jc.authType; jpKey = jc.keyFilePath; jpPass = jc.password || jumpPassword;
+               }
+            }
+
             jumpHostConfig = {
-              host: jp.host, port: jp.port, username: jp.username,
-              authType: jp.authType, keyFilePath: jp.keyFilePath,
-              passphrase: jumpPassphrase, password: jumpPassword, agent: jumpAgent
+              host: jp.host, port: jp.port, username: jpUser,
+              authType: jpAuth, keyFilePath: jpKey,
+              passphrase: jumpPassphrase, password: jpPass, agent: jumpAgent
             };
           }
         }
@@ -580,9 +613,9 @@ export const useSSHStore = create<SSHStore>()(
           socket.send(JSON.stringify({
             type: 'connect',
             sessionId,
-            host: profile.host, port: profile.port, username: profile.username,
-            authType: profile.authType, keyFilePath: profile.keyFilePath,
-            passphrase, password, agent, cols, rows,
+            host: profile.host, port: profile.port, username: targetUser,
+            authType: targetAuth, keyFilePath: targetKey,
+            passphrase, password: targetPass, agent, cols, rows,
             jumpHost: jumpHostConfig,
           }));
         };
@@ -746,6 +779,7 @@ export const useSSHStore = create<SSHStore>()(
     {
       name:        'devutility-ssh-v2',
       partialize:  (s) => ({
+        credentials:     s.credentials,
         profiles:        s.profiles,
         sessions:        s.sessions,
         activeSessionId: s.activeSessionId,

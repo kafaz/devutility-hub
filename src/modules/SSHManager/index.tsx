@@ -8,6 +8,7 @@
  */
 import {
     ApiOutlined,
+    BgColorsOutlined,
     CheckCircleOutlined,
     ClockCircleOutlined,
     CloseCircleOutlined,
@@ -21,6 +22,7 @@ import {
     PlayCircleOutlined,
     PlusOutlined,
     ReloadOutlined,
+    SearchOutlined,
     StopOutlined,
 } from '@ant-design/icons';
 import { SearchAddon } from '@xterm/addon-search';
@@ -55,6 +57,8 @@ import {
 } from '../../utils';
 import { useSOPStore } from '../SOPBuilder/store/sopStore';
 import BackgroundJobMonitor from './components/BackgroundJobMonitor';
+import BatchLoginModal from './components/BatchLoginModal';
+import CredentialManager from './components/CredentialManager';
 import KeywordAnalyzer from './components/KeywordAnalyzer';
 import SessionJournal from './components/SessionJournal';
 import { useAnalyzerStore } from './store/analyzerStore';
@@ -91,10 +95,47 @@ const TerminalInstance: React.FC<{
   registerGetCurrentLine?: (fn: () => string) => void;
 }> = ({ sessionId, isDark, visible, onInput, onResize, registerWrite, registerSnapshot, registerGetCurrentLine }) => {
   const ref = useRef<HTMLDivElement>(null);
-  // 14-B: search state
+  const termRef = useRef<Terminal | null>(null);
   const [searchOpen, setSearchOpen]   = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [highlightOpen, setHighlightOpen] = useState(false);
+  const [highlightKeyword, setHighlightKeyword] = useState('');
+  const [highlightColor, setHighlightColor] = useState('#ef4444');
   const searchAddonRef = useRef<SearchAddon | null>(null);
+  const { highlightRules, addHighlightRule, removeHighlightRule } = useAnalyzerStore();
+  const highlightRulesRef = useRef(highlightRules);
+  highlightRulesRef.current = highlightRules;
+
+  const applyHighlights = (bin: string, rules: typeof highlightRules) => {
+    if (!rules.length) return bin;
+    let result = bin;
+    rules.forEach(rule => {
+      if (!rule.keyword) return;
+      try {
+        const hex = rule.color.replace('#', '');
+        const r = parseInt(hex.substring(0, 2), 16) || 255;
+        const g = parseInt(hex.substring(2, 4), 16) || 255;
+        const b = parseInt(hex.substring(4, 6), 16) || 255;
+        const regex = new RegExp(`(${rule.keyword})`, 'gi');
+        result = result.replace(regex, `\x1b[38;2;${r};${g};${b}m$1\x1b[0m`);
+      } catch {
+        // ignore bad regex
+      }
+    });
+    return result;
+  };
+
+  // Re-apply highlights to existing buffer when rules change
+  useEffect(() => {
+    if (!termRef.current) return;
+    const rawBuffer = getTerminalBuffer(sessionId);
+    const highlighted = applyHighlights(rawBuffer, highlightRules);
+    termRef.current.clear();
+    const buf = new Uint8Array(highlighted.length);
+    for (let i = 0; i < highlighted.length; i++) buf[i] = highlighted.charCodeAt(i);
+    termRef.current.write(buf);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [highlightRules, sessionId]);
 
   useEffect(() => {
     if (!ref.current) return;
@@ -105,6 +146,7 @@ const TerminalInstance: React.FC<{
       fontFamily: 'JetBrains Mono, Fira Code, Consolas, monospace',
       fontSize: 13, lineHeight: 1.4, cursorBlink: true, scrollback: 5000,
     });
+    termRef.current = term;
     const fit = new FitAddon();
     const search = new SearchAddon();
     searchAddonRef.current = search;
@@ -112,11 +154,12 @@ const TerminalInstance: React.FC<{
     term.loadAddon(search);
     term.open(ref.current);
 
-    // 恢复历史缓冲区
+    // 恢复历史缓冲区（带高亮）
     const initBuffer = getTerminalBuffer(sessionId);
     if (initBuffer) {
-      const buf = new Uint8Array(initBuffer.length);
-      for (let i = 0; i < initBuffer.length; i++) buf[i] = initBuffer.charCodeAt(i);
+      const highlighted = applyHighlights(initBuffer, highlightRulesRef.current);
+      const buf = new Uint8Array(highlighted.length);
+      for (let i = 0; i < highlighted.length; i++) buf[i] = highlighted.charCodeAt(i);
       term.write(buf);
     }
 
@@ -126,25 +169,24 @@ const TerminalInstance: React.FC<{
     const ro = new ResizeObserver(() => { if (visible) { fit.fit(); onResize(term.cols, term.rows); } });
     ro.observe(ref.current);
 
-    // 14-B: Ctrl+F 快捷键切换搜索栏
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
         e.preventDefault();
         setSearchOpen(prev => !prev);
       }
-      if (e.key === 'Escape') setSearchOpen(false);
+      if (e.key === 'Escape') { setSearchOpen(false); setHighlightOpen(false); }
     };
     ref.current?.addEventListener('keydown', handleKeyDown);
     document.addEventListener('keydown', handleKeyDown);
 
     registerWrite((b64: string) => {
       const bin = atob(b64);
-      const buf = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+      const highlighted = applyHighlights(bin, highlightRulesRef.current);
+      const buf = new Uint8Array(highlighted.length);
+      for (let i = 0; i < highlighted.length; i++) buf[i] = highlighted.charCodeAt(i);
       term.write(buf);
     });
 
-    // 注册快照函数：读取 XTerm 当前可见缓冲区的所有文本行
     registerSnapshot(() => {
       const lines: string[] = [];
       for (let i = 0; i < term.buffer.active.length; i++) {
@@ -163,7 +205,7 @@ const TerminalInstance: React.FC<{
     }
 
     return () => {
-      d1.dispose(); ro.disconnect(); term.dispose();
+      d1.dispose(); ro.disconnect(); term.dispose(); termRef.current = null;
       document.removeEventListener('keydown', handleKeyDown);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -171,10 +213,20 @@ const TerminalInstance: React.FC<{
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%', display: visible ? 'flex' : 'none', flexDirection: 'column' }}>
-      {/* 14-B: 搜索浮层 */}
+      {/* Toolbar */}
+      <div style={{ position: 'absolute', top: 4, right: 12, zIndex: 101, display: 'flex', gap: 4 }}>
+        <Tooltip title="搜索 (Ctrl+F)">
+          <Button size="small" icon={<SearchOutlined />} onClick={() => { setSearchOpen(v => !v); setHighlightOpen(false); }} />
+        </Tooltip>
+        <Tooltip title="关键字高亮">
+          <Button size="small" icon={<BgColorsOutlined />} onClick={() => { setHighlightOpen(v => !v); setSearchOpen(false); }} />
+        </Tooltip>
+      </div>
+
+      {/* 搜索浮层 */}
       {searchOpen && (
         <div style={{
-          position: 'absolute', top: 4, right: 12, zIndex: 100,
+          position: 'absolute', top: 36, right: 12, zIndex: 100,
           display: 'flex', gap: 4, alignItems: 'center',
           background: isDark ? '#252526' : '#fff',
           border: '1px solid #3b82f6',
@@ -202,6 +254,66 @@ const TerminalInstance: React.FC<{
           <Button size="small" onClick={() => setSearchOpen(false)}>×</Button>
         </div>
       )}
+
+      {/* 关键字高亮浮层 */}
+      {highlightOpen && (
+        <div style={{
+          position: 'absolute', top: 36, right: 12, zIndex: 100,
+          display: 'flex', flexDirection: 'column', gap: 6,
+          background: isDark ? '#252526' : '#fff',
+          border: '1px solid #22c55e',
+          borderRadius: 6, padding: '8px 10px', boxShadow: '0 2px 8px rgba(0,0,0,.25)',
+          width: 260,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <Text strong style={{ fontSize: 12 }}>关键字高亮</Text>
+            <Button size="small" onClick={() => setHighlightOpen(false)}>×</Button>
+          </div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <input
+              type="color"
+              value={highlightColor}
+              onChange={e => setHighlightColor(e.target.value)}
+              style={{ width: 28, height: 28, padding: 0, border: 'none', cursor: 'pointer', outline: 'none' }}
+            />
+            <Input
+              size="small"
+              placeholder="输入关键字"
+              value={highlightKeyword}
+              onChange={e => setHighlightKeyword(e.target.value)}
+              onPressEnter={() => {
+                if (highlightKeyword.trim()) {
+                  addHighlightRule({ keyword: highlightKeyword.trim(), color: highlightColor });
+                  setHighlightKeyword('');
+                }
+              }}
+              style={{ flex: 1 }}
+            />
+            <Button
+              size="small"
+              type="primary"
+              onClick={() => {
+                if (highlightKeyword.trim()) {
+                  addHighlightRule({ keyword: highlightKeyword.trim(), color: highlightColor });
+                  setHighlightKeyword('');
+                }
+              }}
+            >添加</Button>
+          </div>
+          <div style={{ maxHeight: 120, overflowY: 'auto' }}>
+            {highlightRules.map(rule => (
+              <div key={rule.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 4 }}>
+                <Space size={4}>
+                  <div style={{ width: 10, height: 10, borderRadius: '50%', background: rule.color }} />
+                  <Text code style={{ fontSize: 11 }}>{rule.keyword}</Text>
+                </Space>
+                <Button type="text" danger size="small" onClick={() => removeHighlightRule(rule.id)} style={{ padding: 0, height: 18 }}>删除</Button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div
         ref={ref}
         style={{
@@ -469,6 +581,8 @@ const SSHManager: React.FC = () => {
   const [profileModal, setProfileModal] = useState(false);
   const [editingProfile, setEditingProfile] = useState<SSHProfile | null>(null);
   const [connectModal, setConnectModal]     = useState(false);
+  const [credentialModal, setCredentialModal] = useState(false);
+  const [batchLoginModal, setBatchLoginModal] = useState(false);
   const [connectingSessionId, setConnectingSessionId] = useState('');
   const [renamingSessionId, setRenamingSessionId]     = useState('');
   const [renameValue, setRenameValue] = useState('');
@@ -483,6 +597,7 @@ const SSHManager: React.FC = () => {
   const [executing,   setExecuting]       = useState(false);
   const [activeView,  setActiveView]      = useState<'terminal' | 'progress' | 'journal' | 'analyzer' | 'bgjobs'>('terminal');
   const [activeTab, setActiveTab] = useState('connect'); // 'connect' | 'multi_node' | 'cron'
+  const [terminalHeight, setTerminalHeight] = useState(520);
 
   // ── 终端写入函数 Map（每会话一个） ────────────────────────────────────────
   const writeCallbacks    = useRef<Map<string, (b64: string) => void>>(new Map());
@@ -935,6 +1050,8 @@ const SSHManager: React.FC = () => {
           </Text>
         </div>
         <Space>
+          <Button icon={<KeyOutlined />} size="small" onClick={() => setCredentialModal(true)}>凭证管理</Button>
+          <Button icon={<ApiOutlined />} size="small" type="primary" onClick={() => setBatchLoginModal(true)}>批量快捷登录</Button>
           <Badge status={proxyOnline ? 'success' : 'default'} />
           <Text type="secondary" style={{ fontSize: 12 }}>
             {proxyOnline ? '代理运行中' : '代理未启动'}
@@ -1125,82 +1242,115 @@ const SSHManager: React.FC = () => {
           {activeView === 'terminal' ? (
             <div style={{
               border: `1px solid ${borderColor}`, borderRadius: 6,
-              overflow: 'hidden', minHeight: 400, background: isDark ? '#1e1e1e' : '#fafafa',
+              overflow: 'hidden', display: 'flex', flexDirection: 'column',
+              height: terminalHeight, minHeight: 300,
+              background: isDark ? '#1e1e1e' : '#fafafa',
+              position: 'relative',
             }}>
-            {/* ----------------- 定时任务列表面板 ----------------- */}
-            <div style={{ display: activeTab === 'cron' ? 'block' : 'none', flex: 1, overflowY: 'auto' }}>
-              <React.Suspense fallback={<Spin />}>
-                {activeTab === 'cron' && <CronJobList />}
-              </React.Suspense>
-            </div>
-              {/* Tab 切换 */}
-              {sessions.length > 0 && (
-                <div style={{
-                  display: 'flex', overflowX: 'auto',
-                  borderBottom: `1px solid ${borderColor}`,
-                  background: isDark ? '#252526' : '#fafafa',
-                }}>
-                  {sessions.map((sess) => {
-                    const sc = STATUS[sess.status];
-                    return (
-                      <div
-                        key={sess.id}
-                        onClick={() => setActiveSession(sess.id)}
-                        style={{
-                          padding: '6px 14px', cursor: 'pointer', whiteSpace: 'nowrap',
-                          borderBottom: activeSessionId === sess.id ? '2px solid #3b82f6' : '2px solid transparent',
-                          background: activeSessionId === sess.id
-                            ? isDark ? '#1e1e1e' : '#ffffff'
-                            : 'transparent',
-                          fontSize: 12,
-                        }}
-                      >
-                        <Badge status={sc.badge} />
-                        <span style={{ marginLeft: 4, color: activeSessionId === sess.id ? '#3b82f6' : undefined }}>
-                          {sess.name}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
+              {/* ----------------- 定时任务列表面板 ----------------- */}
+              <div style={{ display: activeTab === 'cron' ? 'block' : 'none', flex: 1, overflowY: 'auto' }}>
+                <React.Suspense fallback={<Spin />}>
+                  {activeTab === 'cron' && <CronJobList />}
+                </React.Suspense>
+              </div>
 
-              {/* 每个会话的终端（CSS display 控制显隐，保留历史） */}
-              <div style={{ height: sessions.length > 0 ? 'calc(100% - 34px)' : '100%', minHeight: 360 }}>
-                {sessions.length === 0 ? (
+              {/* 终端区域 */}
+              <div style={{ flex: 1, display: activeTab === 'cron' ? 'none' : 'flex', flexDirection: 'column', minHeight: 260 }}>
+                {/* Tab 切换 */}
+                {sessions.length > 0 && (
                   <div style={{
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    height: '100%', color: '#6b7280', fontSize: 13,
+                    display: 'flex', overflowX: 'auto',
+                    borderBottom: `1px solid ${borderColor}`,
+                    background: isDark ? '#252526' : '#fafafa',
                   }}>
-                    从左侧档案点击 + 创建会话后连接
+                    {sessions.map((sess) => {
+                      const sc = STATUS[sess.status];
+                      return (
+                        <div
+                          key={sess.id}
+                          onClick={() => setActiveSession(sess.id)}
+                          style={{
+                            padding: '6px 14px', cursor: 'pointer', whiteSpace: 'nowrap',
+                            borderBottom: activeSessionId === sess.id ? '2px solid #3b82f6' : '2px solid transparent',
+                            background: activeSessionId === sess.id
+                              ? isDark ? '#1e1e1e' : '#ffffff'
+                              : 'transparent',
+                            fontSize: 12,
+                          }}
+                        >
+                          <Badge status={sc.badge} />
+                          <span style={{ marginLeft: 4, color: activeSessionId === sess.id ? '#3b82f6' : undefined }}>
+                            {sess.name}
+                          </span>
+                        </div>
+                      );
+                    })}
                   </div>
-                ) : (
-                  sessions.map((sess) => (
-                    <TerminalInstance
-                      key={sess.id}
-                      sessionId={sess.id}
-                      isDark={isDark}
-                      visible={sess.id === activeSessionId && activeView === 'terminal'}
-                      onInput={(data) => {
-                        sendInputToSession(sess.id, data);
-                        if (data === '\r') {
-                          const getLine = getLineFns.current[sess.id];
-                          if (getLine) {
-                            const currentLine = getLine();
-                            const cleanCmd = currentLine.replace(/^.*?[#$]\s+/, '').trim();
-                            if (cleanCmd) {
-                              recordManualCommandStart(sess.id, cleanCmd);
+                )}
+
+                {/* 每个会话的终端（CSS display 控制显隐，保留历史） */}
+                <div style={{ flex: 1, minHeight: 220, position: 'relative' }}>
+                  {sessions.length === 0 ? (
+                    <div style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      height: '100%', color: '#6b7280', fontSize: 13,
+                    }}>
+                      从左侧档案点击 + 创建会话后连接
+                    </div>
+                  ) : (
+                    sessions.map((sess) => (
+                      <TerminalInstance
+                        key={sess.id}
+                        sessionId={sess.id}
+                        isDark={isDark}
+                        visible={sess.id === activeSessionId && activeView === 'terminal'}
+                        onInput={(data) => {
+                          sendInputToSession(sess.id, data);
+                          if (data === '\r') {
+                            const getLine = getLineFns.current[sess.id];
+                            if (getLine) {
+                              const currentLine = getLine();
+                              const cleanCmd = currentLine.replace(/^.*?[#$]\s+/, '').trim();
+                              if (cleanCmd) {
+                                recordManualCommandStart(sess.id, cleanCmd);
+                              }
                             }
                           }
-                        }
-                      }}
-                      onResize={(cols, rows) => resizeSession(sess.id, cols, rows)}
-                      registerGetCurrentLine={(fn) => { getLineFns.current[sess.id] = fn; }}
-                      registerWrite={(fn) => { writeCallbacks.current.set(sess.id, fn); }}
-                      registerSnapshot={(fn) => { snapshotCallbacks.current.set(sess.id, fn); }}
-                    />
-                  ))
-                )}
+                        }}
+                        onResize={(cols, rows) => resizeSession(sess.id, cols, rows)}
+                        registerGetCurrentLine={(fn) => { getLineFns.current[sess.id] = fn; }}
+                        registerWrite={(fn) => { writeCallbacks.current.set(sess.id, fn); }}
+                        registerSnapshot={(fn) => { snapshotCallbacks.current.set(sess.id, fn); }}
+                      />
+                    ))
+                  )}
+                </div>
+              </div>
+
+              {/* 拖拽调整高度 */}
+              <div
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  const startY = e.clientY;
+                  const startH = terminalHeight;
+                  const onMove = (ev: MouseEvent) => {
+                    const newH = Math.max(300, startH + ev.clientY - startY);
+                    setTerminalHeight(newH);
+                  };
+                  const onUp = () => {
+                    window.removeEventListener('mousemove', onMove);
+                    window.removeEventListener('mouseup', onUp);
+                  };
+                  window.addEventListener('mousemove', onMove);
+                  window.addEventListener('mouseup', onUp);
+                }}
+                style={{
+                  height: 6, cursor: 'row-resize', background: isDark ? '#3e3e42' : '#e4e4e7',
+                  position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 10,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                }}
+              >
+                <div style={{ width: 40, height: 3, borderRadius: 2, background: isDark ? '#555' : '#ccc' }} />
               </div>
             </div>
           ) : (
@@ -1549,6 +1699,19 @@ const SSHManager: React.FC = () => {
             message={<Text style={{ fontSize: 12 }}>凭证仅本次会话使用，不保存</Text>} />
         </Form>
       </Modal>
+
+      {/* ── 批量快捷登录弹窗 */}
+      <BatchLoginModal
+        open={batchLoginModal}
+        onCancel={() => setBatchLoginModal(false)}
+        onSuccess={() => setBatchLoginModal(false)}
+      />
+
+      {/* ── 凭证管理弹窗 */}
+      <CredentialManager
+        open={credentialModal}
+        onCancel={() => setCredentialModal(false)}
+      />
     </div>
   );
 };

@@ -1,25 +1,25 @@
 import {
-  Alert,
-  Button,
-  Card,
-  Empty,
-  Input,
-  InputNumber,
-  List,
-  Select,
-  Space,
-  Spin,
-  Tag,
-  Tooltip,
-  Typography,
-  message,
-} from 'antd';
-import {
-  BranchesOutlined,
-  CodeOutlined,
-  ReloadOutlined,
-  SearchOutlined,
+    BranchesOutlined,
+    CodeOutlined,
+    ReloadOutlined,
+    SearchOutlined,
 } from '@ant-design/icons';
+import {
+    Alert,
+    Button,
+    Card,
+    Empty,
+    Input,
+    InputNumber,
+    List,
+    Select,
+    Space,
+    Spin,
+    Tag,
+    Tooltip,
+    Typography,
+    message,
+} from 'antd';
 import React, { useEffect, useRef, useState } from 'react';
 import ResizableOutput from '../../components/shared/ResizableOutput';
 import { useLocalStorage } from '../../hooks/useLocalStorage';
@@ -165,6 +165,8 @@ function isLikelyFunctionToken(rawToken: string) {
 
 function extractFunctionCandidates(text: string) {
   const patterns = [
+    // 匹配类似 ****[func_name:123]**** 日志格式
+    /\[([A-Za-z_][A-Za-z0-9_:]*):\d+\]/g,
     /\b([A-Za-z_][A-Za-z0-9_$]*(?:(?:::|->|\.)[A-Za-z_][A-Za-z0-9_$]+)+)\b/g,
     /\b([A-Za-z_][A-Za-z0-9_$]*)\s*(?=\()/g,
     /\b([a-z]+(?:[A-Z][A-Za-z0-9_$]*)+)\b/g,
@@ -439,11 +441,10 @@ const CodeContextExplorer: React.FC = () => {
         return;
       }
 
-      if (nextResults.length === 1) {
-        setBeforeContext(DEFAULT_BEFORE_CONTEXT);
-        setAfterContext(DEFAULT_AFTER_CONTEXT);
-        setSelectedSymbol(nextResults[0]);
-      }
+      // 总是自动渲染第一个最相关结果
+      setBeforeContext(DEFAULT_BEFORE_CONTEXT);
+      setAfterContext(DEFAULT_AFTER_CONTEXT);
+      setSelectedSymbol(nextResults[0]);
     } catch {
       messageApi.error('函数搜索失败');
     } finally {
@@ -546,7 +547,7 @@ const CodeContextExplorer: React.FC = () => {
       setCommandRuns((items) => [runRecord, ...items].slice(0, MAX_COMMAND_RUNS));
       messageApi.success(`命令执行完成，exit=${runRecord.exitCode}`);
 
-      if (activeContext && runRecord.functionCandidates.length === 1) {
+      if (activeContext && runRecord.functionCandidates.length > 0) {
         void handleFunctionCandidateClick(runRecord.functionCandidates[0]);
       }
     } catch {

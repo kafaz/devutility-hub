@@ -42,14 +42,6 @@ const toolsConfig: ToolConfig[] = [
     version: '1.0.0',
   },
   {
-    id: 'code-profiler',
-    name: '代码路径优化',
-    icon: 'ToolOutlined',
-    description: 'perf、火焰图、GDB 堆栈分析，识别热点代码优化点',
-    category: 'analyzer',
-    version: '1.0.0',
-  },
-  {
     id: 'diagnostic-workbench',
     name: '诊断工作台',
     icon: 'RadarChartOutlined',

@@ -3,7 +3,7 @@ import { Button, Card, Input, Modal, Select, Space, Table, Tag, Typography, mess
 import React, { useState } from 'react';
 import { useSSHStore } from '../../SSHManager/store/sshStore';
 import { useDiskDiscovery } from '../hooks/useDiskDiscovery';
-import { useBenchmarkStore } from '../store/benchmarkStore';
+import { useBenchmarkStore, type WriteTestPayload } from '../store/benchmarkStore';
 
 const { Title, Text } = Typography;
 
@@ -73,49 +73,67 @@ export const TopologyMatrix: React.FC = () => {
       return;
     }
 
+    // Pre-dispatch validation: build payloads and validate required fields
+    const validatedPayloads: WriteTestPayload[] = [];
+    for (const [key, modelId] of selectedKeys) {
+      const [sessionId, diskName] = key.split('::');
+      const model = savedModels.find(m => m.id === modelId);
+      if (!model) continue;
+
+      const bbAgentId = getBBAgentId(sessionId);
+      if (!bbAgentId) {
+        message.error(`节点 ${sessionId} 未映射 Agent ID`);
+        return;
+      }
+
+      if (model.io_model === 'fio') {
+        if (!model.fio_engine || !model.workload_profile || !model.iodepth) {
+          message.error(`模型 ${model.name} 缺少 fio 必填参数`);
+          return;
+        }
+      }
+
+      const volumeId = `vol-${diskName.replace('/dev/', '').replace('/', '_')}`;
+      const params: WriteTestPayload['params'] = {
+        device: diskName,
+        volume_id: volumeId,
+        lba: '0',
+        block_size: model.block_size || '4096',
+        io_model: model.io_model,
+        concurrency: model.concurrency || '8',
+        iterations: model.iterations || '1',
+        read_verify: 'true',
+      };
+
+      if (model.io_model === 'fio') {
+        params.fio_engine = model.fio_engine;
+        params.workload_profile = model.workload_profile;
+        params.iodepth = model.iodepth;
+      }
+
+      validatedPayloads.push({
+        agent_id: bbAgentId,
+        task_type: 'WRITE_TEST',
+        business_name: `${model.name}-${diskName.replace('/dev/', '')}`,
+        dispatch_count: 1,
+        params,
+      });
+    }
+
     setIsDispatching(true);
-    let successCount = 0;
 
     try {
-      const promises = selectedKeys.map(async ([key, modelId]) => {
-        const [sessionId, diskName] = key.split('::');
-        const model = savedModels.find(m => m.id === modelId);
-        if (!model) return;
-
-        // FIX-2: Use the mapped BB agent ID
-        const bbAgentId = getBBAgentId(sessionId);
-        // FIX-6: volume_id uses disk name to scope LBA arbitration correctly
-        const volumeId = `vol-${diskName.replace('/dev/', '').replace('/', '_')}`;
-
-        const payload: any = {
-          agent_id: bbAgentId,
-          task_type: 'WRITE_TEST',
-          business_name: `${model.name}-${diskName.replace('/dev/', '')}`,
-          dispatch_count: 1,
-          params: {
-            device: diskName,
-            volume_id: volumeId,
-            lba: '0',
-            block_size: model.block_size || '4096',
-            io_model: model.io_model,
-            concurrency: model.concurrency || '8',
-            iterations: model.iterations || '1',
-            read_verify: 'true',
-          },
-        };
-
-        if (model.io_model === 'fio') {
-          payload.params.fio_engine = model.fio_engine;
-          payload.params.workload_profile = model.workload_profile;
-          payload.params.iodepth = model.iodepth;
-        }
-
-        await startTask(payload);
-        successCount++;
-      });
-
-      await Promise.allSettled(promises);
-      message.success(`矩阵派发完成，已成功拉起 ${successCount} 个独立压测流！`);
+      const results = await Promise.allSettled(
+        validatedPayloads.map(async (payload) => {
+          await startTask(payload);
+        })
+      );
+      const successCount = results.filter(r => r.status === 'fulfilled').length;
+      const failCount = results.filter(r => r.status === 'rejected').length;
+      if (failCount > 0) {
+        message.error(`${failCount} 个任务派发失败`);
+      }
+      message.success(`矩阵派发完成，成功 ${successCount} 个，失败 ${failCount} 个`);
     } finally {
       setIsDispatching(false);
     }

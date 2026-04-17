@@ -193,6 +193,12 @@ const EditableTabName: React.FC<{
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState(name);
 
+  useEffect(() => {
+    if (editing) {
+      setVal(name);
+    }
+  }, [editing, name]);
+
   if (editing) {
     return (
       <Input
@@ -200,8 +206,10 @@ const EditableTabName: React.FC<{
         value={val}
         autoFocus
         onChange={e => setVal(e.target.value)}
-        onBlur={() => { setEditing(false); if (val.trim()) onSave(val.trim()); else setVal(name); }}
-        onPressEnter={() => { setEditing(false); if (val.trim()) onSave(val.trim()); else setVal(name); }}
+        onBlur={() => { setEditing(false); if (val.trim() && val !== name) onSave(val.trim()); else setVal(name); }}
+        onPressEnter={() => { setEditing(false); if (val.trim() && val !== name) onSave(val.trim()); else setVal(name); }}
+        onKeyDown={(e) => e.stopPropagation()}
+        onClick={(e) => e.stopPropagation()}
         style={{ width: 120, fontSize: 12 }}
       />
     );

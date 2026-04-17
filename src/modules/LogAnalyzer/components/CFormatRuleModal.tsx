@@ -74,7 +74,19 @@ const CFormatRuleModal: React.FC<Props> = ({ open, initial, onOk, onCancel }) =>
       if (initial && initial.mode === 'C_FORMAT') {
         form.setFieldsValue({ name: initial.name });
         setPatternSource(initial.patternSource || '');
-        setFieldNames((initial.fields || []).map((f) => f.name));
+        // 直接基于 initial.patternSource 计算初始 fieldNames，避免 debounce 空窗期被覆盖
+        const initialFieldNames = (initial.fields || []).map((f) => f.name);
+        const initialFormatCount = parseCFormat(initial.patternSource || '').filter(
+          (t) => t.type === 'format'
+        ).length;
+        if (initialFormatCount > initialFieldNames.length) {
+          setFieldNames([
+            ...initialFieldNames,
+            ...Array(initialFormatCount - initialFieldNames.length).fill(''),
+          ]);
+        } else {
+          setFieldNames(initialFieldNames.slice(0, initialFormatCount));
+        }
       } else {
         form.resetFields();
         setPatternSource('');
@@ -87,16 +99,6 @@ const CFormatRuleModal: React.FC<Props> = ({ open, initial, onOk, onCancel }) =>
     }
   }, [open, initial, form]);
 
-  // 当格式符数量变化时，同步字段名数组长度
-  useEffect(() => {
-    setFieldNames((prev) => {
-      if (formatTokens.length === prev.length) return prev;
-      if (formatTokens.length > prev.length) {
-        return [...prev, ...Array(formatTokens.length - prev.length).fill('')];
-      }
-      return prev.slice(0, formatTokens.length);
-    });
-  }, [formatTokens.length]);
 
   // 批量命名
   const handleBatchNames = useCallback(
@@ -331,8 +333,21 @@ const CFormatRuleModal: React.FC<Props> = ({ open, initial, onOk, onCancel }) =>
             }}
             value={patternSource}
             onChange={(e) => {
-              setPatternSource(e.target.value);
-              form.setFieldValue('patternSource', e.target.value);
+              const val = e.target.value;
+              setPatternSource(val);
+              form.setFieldValue('patternSource', val);
+              // 同步 resize fieldNames，避免独立 effect 造成竞态覆盖
+              const nextTokens = parseCFormat(val).filter((t) => t.type === 'format');
+              setFieldNames((prev) => {
+                if (nextTokens.length === prev.length) return prev;
+                if (nextTokens.length > prev.length) {
+                  return [
+                    ...prev,
+                    ...Array(nextTokens.length - prev.length).fill(''),
+                  ];
+                }
+                return prev.slice(0, nextTokens.length);
+              });
             }}
             placeholder="[INFO] User %s login, id: %d"
           />

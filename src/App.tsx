@@ -8,19 +8,15 @@ const CommandBuilder = lazy(() => import('./modules/CommandBuilder'));
 const SOPBuilder        = lazy(() => import('./modules/SOPBuilder'));
 const SSHManager        = lazy(() => import('./modules/SSHManager'));
 const NumberConverter   = lazy(() => import('./modules/NumberConverter'));
-const FileHasher        = lazy(() => import('./modules/FileHasher'));
 const FIOVisualizer     = lazy(() => import('./modules/FIOVisualizer'));
 const HexLBAExplorer    = lazy(() => import('./modules/HexLBAExplorer'));
 const CrashAnalyzer     = lazy(() => import('./modules/CrashAnalyzer'));
 const ProtocolDecoder   = lazy(() => import('./modules/ProtocolDecoder'));
 const TimelineCorrelator = lazy(() => import('./modules/TimelineCorrelator'));
-const FaultBuilder      = lazy(() => import('./modules/FaultBuilder'));
 const IOAnalyzer        = lazy(() => import('./modules/IOAnalyzer'));
-const CodeProfiler      = lazy(() => import('./modules/CodeProfiler'));
 const DiagnosticWorkbench = lazy(() => import('./modules/DiagnosticWorkbench'));
 const CodeContextExplorer = lazy(() => import('./modules/CodeContextExplorer'));
 const BlockBenchmark    = lazy(() => import('./modules/BlockBenchmark'));
-const ChaosOrchestrator = lazy(() => import('./modules/ChaosOrchestrator'));
 
 interface ToolRouteDefinition {
   path: string;
@@ -33,19 +29,15 @@ const TOOL_ROUTES: ToolRouteDefinition[] = [
   { path: '/sop-builder', Component: SOPBuilder },
   { path: '/ssh-manager', Component: SSHManager },
   { path: '/number-converter', Component: NumberConverter },
-  { path: '/file-hasher', Component: FileHasher },
   { path: '/fio-visualizer', Component: FIOVisualizer },
   { path: '/hex-lba-explorer', Component: HexLBAExplorer },
   { path: '/crash-analyzer', Component: CrashAnalyzer },
   { path: '/protocol-decoder', Component: ProtocolDecoder },
   { path: '/timeline-correlator', Component: TimelineCorrelator },
-  { path: '/fault-builder', Component: FaultBuilder },
   { path: '/io-analyzer', Component: IOAnalyzer },
-  { path: '/code-profiler', Component: CodeProfiler },
   { path: '/diagnostic-workbench', Component: DiagnosticWorkbench },
   { path: '/code-context-explorer', Component: CodeContextExplorer },
   { path: '/block-benchmark', Component: BlockBenchmark },
-  { path: '/chaos-orchestrator', Component: ChaosOrchestrator },
 ];
 
 const TOOL_ROUTE_MAP = new Map(TOOL_ROUTES.map((route) => [route.path, route]));
