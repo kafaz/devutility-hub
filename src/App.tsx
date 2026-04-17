@@ -9,10 +9,7 @@ const SOPBuilder        = lazy(() => import('./modules/SOPBuilder'));
 const SSHManager        = lazy(() => import('./modules/SSHManager'));
 const NumberConverter   = lazy(() => import('./modules/NumberConverter'));
 const FIOVisualizer     = lazy(() => import('./modules/FIOVisualizer'));
-const HexLBAExplorer    = lazy(() => import('./modules/HexLBAExplorer'));
-const CrashAnalyzer     = lazy(() => import('./modules/CrashAnalyzer'));
 const ProtocolDecoder   = lazy(() => import('./modules/ProtocolDecoder'));
-const TimelineCorrelator = lazy(() => import('./modules/TimelineCorrelator'));
 const IOAnalyzer        = lazy(() => import('./modules/IOAnalyzer'));
 const DiagnosticWorkbench = lazy(() => import('./modules/DiagnosticWorkbench'));
 const CodeContextExplorer = lazy(() => import('./modules/CodeContextExplorer'));
@@ -30,10 +27,7 @@ const TOOL_ROUTES: ToolRouteDefinition[] = [
   { path: '/ssh-manager', Component: SSHManager },
   { path: '/number-converter', Component: NumberConverter },
   { path: '/fio-visualizer', Component: FIOVisualizer },
-  { path: '/hex-lba-explorer', Component: HexLBAExplorer },
-  { path: '/crash-analyzer', Component: CrashAnalyzer },
   { path: '/protocol-decoder', Component: ProtocolDecoder },
-  { path: '/timeline-correlator', Component: TimelineCorrelator },
   { path: '/io-analyzer', Component: IOAnalyzer },
   { path: '/diagnostic-workbench', Component: DiagnosticWorkbench },
   { path: '/code-context-explorer', Component: CodeContextExplorer },
