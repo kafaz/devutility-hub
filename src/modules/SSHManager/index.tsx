@@ -12,6 +12,7 @@ import {
     CheckCircleOutlined,
     ClockCircleOutlined,
     CloseCircleOutlined,
+    CopyOutlined,
     DeleteOutlined,
     DisconnectOutlined,
     EditOutlined,
@@ -24,6 +25,7 @@ import {
     ReloadOutlined,
     SearchOutlined,
     StopOutlined,
+    ThunderboltOutlined,
 } from '@ant-design/icons';
 import { SearchAddon } from '@xterm/addon-search';
 import {
@@ -1155,11 +1157,28 @@ const SSHManager: React.FC = () => {
                     </Text>
                   </div>
                   <Space size={4}>
-                    <Tooltip title="添加会话">
+                    <Tooltip title="⚡ 一键连接（创建会话+自动连接）">
+                      <Button size="small" icon={<ThunderboltOutlined />} type="primary"
+                        disabled={!proxyOnline}
+                        onClick={() => {
+                          const sessId = addSession(`${p.host}:${p.port}`, p.id);
+                          // 下一帧触发连接，确保 session 已在 store 中
+                          queueMicrotask(() => handleOpenConnect(sessId));
+                        }}
+                      />
+                    </Tooltip>
+                    <Tooltip title="添加会话（仅创建，不自动连接）">
                       <Button size="small" icon={<PlusOutlined />} type="dashed"
-                        onClick={() => addSession(`${p.name}-${Date.now().toString(36).slice(-4)}`, p.id)}
+                        onClick={() => addSession(`${p.host}:${p.port}`, p.id)}
                         disabled={!proxyOnline}
                       />
+                    </Tooltip>
+                    <Tooltip title="复制档案">
+                      <CopyOutlined style={{ cursor: 'pointer', color: '#3b82f6', fontSize: 12 }}
+                        onClick={() => {
+                          setEditingProfile({ ...p, id: '', name: `${p.name} (副本)`, host: '' } as any);
+                          setProfileModal(true);
+                        }} />
                     </Tooltip>
                     <EditOutlined style={{ cursor: 'pointer', color: '#a1a1aa', fontSize: 12 }}
                       onClick={() => { setEditingProfile(p); setProfileModal(true); }} />
@@ -1184,10 +1203,17 @@ const SSHManager: React.FC = () => {
             }
             style={{ background: cardBg, border: `1px solid ${borderColor}` }}>
             {sessions.length === 0
-              ? <Text type="secondary" style={{ fontSize: 12 }}>点击档案的 + 按钮创建会话</Text>
+              ? <Text type="secondary" style={{ fontSize: 12 }}>点击档案的 ⚡ 按钮一键连接</Text>
               : sessions.map((sess) => {
                 const sc  = STATUS[sess.status];
                 const prf = profiles.find((p) => p.id === sess.profileId);
+                const isDisconnectedOrError = sess.status === 'disconnected' || sess.status === 'error';
+                const uptimeMs = sess.status === 'connected' && sess.connectedAt ? Date.now() - sess.connectedAt : 0;
+                const uptimeStr = uptimeMs > 0 ? (
+                  uptimeMs > 3600000 ? `${Math.floor(uptimeMs / 3600000)}h${Math.floor((uptimeMs % 3600000) / 60000)}m`
+                  : uptimeMs > 60000 ? `${Math.floor(uptimeMs / 60000)}m`
+                  : `${Math.floor(uptimeMs / 1000)}s`
+                ) : '';
                 return (
                   <div key={sess.id} style={{
                     padding: '6px 8px', borderRadius: 6, marginBottom: 6,
@@ -1214,7 +1240,9 @@ const SSHManager: React.FC = () => {
                         />
                       ) : (
                         <Space size={5}>
-                          <Badge status={sc.badge} />
+                          <Tooltip title={sess.status === 'error' ? sess.statusMsg : sc.label}>
+                            <Badge status={sc.badge} />
+                          </Tooltip>
                           <Text
                             strong
                             style={{ fontSize: 12, cursor: 'text', color: activeSessionId === sess.id ? '#3b82f6' : undefined }}
@@ -1226,21 +1254,29 @@ const SSHManager: React.FC = () => {
                           >
                             {sess.name}
                           </Text>
+                          {uptimeStr && <Tag color="processing" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>{uptimeStr}</Tag>}
                         </Space>
                       )}
                       <Space size={3} onClick={(e) => e.stopPropagation()}>
-                        {sess.status !== 'connected' ? (
+                        {sess.status === 'connected' ? (
+                          <Button size="small" danger
+                            icon={<DisconnectOutlined />}
+                            onClick={() => disconnectSession(sess.id)}>
+                            断开
+                          </Button>
+                        ) : isDisconnectedOrError ? (
+                          <Button size="small" type="primary"
+                            icon={<ReloadOutlined />}
+                            disabled={!proxyOnline}
+                            onClick={() => handleOpenConnect(sess.id)}>
+                            重连
+                          </Button>
+                        ) : (
                           <Button size="small" type="primary"
                             icon={<ApiOutlined />}
                             disabled={!proxyOnline}
                             onClick={() => handleOpenConnect(sess.id)}>
                             连接
-                          </Button>
-                        ) : (
-                          <Button size="small" danger
-                            icon={<DisconnectOutlined />}
-                            onClick={() => disconnectSession(sess.id)}>
-                            断开
                           </Button>
                         )}
                         <Popconfirm title="删除此会话？"
@@ -1253,10 +1289,9 @@ const SSHManager: React.FC = () => {
                     {prf && (
                       <Text type="secondary" style={{ fontSize: 10, display: 'block', marginTop: 1 }}>
                         {prf.username}@{prf.host}:{prf.port}
-                        {sess.status === 'error' && ` · ${sess.statusMsg}`}
+                        {sess.status === 'error' && sess.statusMsg ? ` · ⚠ ${sess.statusMsg}` : ''}
                       </Text>
                     )}
-                    <Text type="secondary" style={{ fontSize: 10 }}>双击名称重命名</Text>
                   </div>
                 );
               })}
@@ -1709,7 +1744,7 @@ const SSHManager: React.FC = () => {
         initial={editingProfile}
         profiles={profiles}
         onOk={(p) => {
-          if (editingProfile) updateProfile(editingProfile.id, p);
+          if (editingProfile && editingProfile.id) updateProfile(editingProfile.id, p);
           else addProfile(p);
           setProfileModal(false);
         }}
