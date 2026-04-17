@@ -20,10 +20,11 @@ import {
     Typography,
     message,
 } from 'antd';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import ResizableOutput from '../../components/shared/ResizableOutput';
 import { useLocalStorage } from '../../hooks/useLocalStorage';
 import { useGlobalStore } from '../../store/globalStore';
+import { highlightCLines } from './cHighlight';
 
 const { Title, Text, Paragraph } = Typography;
 const { Password, Search, TextArea } = Input;
@@ -658,6 +659,11 @@ const CodeContextExplorer: React.FC = () => {
   const isStackedCommandLayout = leftPaneContentWidth > 0 && leftPaneContentWidth < 560;
   const compactSearchButton = leftPaneContentWidth > 0 && leftPaneContentWidth < 620;
 
+  const highlightedHtml = useMemo(() => {
+    if (!rendered?.lines) return [];
+    return highlightCLines(rendered.lines, isDark);
+  }, [rendered?.lines, isDark]);
+
   return (
     <div style={{ padding: 24 }}>
       {contextHolder}
@@ -1061,7 +1067,7 @@ const CodeContextExplorer: React.FC = () => {
                   </div>
                 )}
 
-                {rendered.lines.map((line) => (
+                {rendered.lines.map((line, idx) => (
                   <div
                     key={`${line.lineNumber}-${line.text}`}
                     style={{
@@ -1098,9 +1104,8 @@ const CodeContextExplorer: React.FC = () => {
                         fontSize: 12,
                         color: isDark ? '#e5e7eb' : '#111827',
                       }}
-                    >
-                      {line.text || ' '}
-                    </pre>
+                      dangerouslySetInnerHTML={{ __html: highlightedHtml[idx] || ' ' }}
+                    />
                   </div>
                 ))}
               </div>
