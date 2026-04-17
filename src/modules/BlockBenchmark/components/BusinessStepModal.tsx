@@ -18,18 +18,23 @@ const BusinessStepModal: React.FC<Props> = ({ open, initial, onOk, onCancel }) =
   React.useEffect(() => {
     if (open) {
       form.setFieldsValue(initial ?? {
-        name: '', cmd: '', target: 'all', timeout: 30000, blocking: true,
+        name: '', cmd: '', target: ['all'], timeout: 30000, blocking: true,
       });
     }
   }, [open, initial, form]);
 
   const handleOk = () => {
     form.validateFields().then((vals) => {
+      const targetValue: string[] = Array.isArray(vals.target) ? vals.target : [vals.target];
+      const normalizedTarget: 'all' | string[] =
+        targetValue.length === 1 && targetValue[0] === 'all'
+          ? 'all'
+          : targetValue;
       onOk({
         id: initial?.id ?? generateId(),
         name: vals.name,
         cmd: vals.cmd,
-        target: vals.target,
+        target: normalizedTarget,
         timeout: vals.timeout,
         captureVar: vals.captureName ? { name: vals.captureName, pattern: vals.capturePattern } : undefined,
         blocking: vals.blocking,
