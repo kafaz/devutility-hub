@@ -7,6 +7,7 @@ import type {
   ChaosFault,
   ChaosInjection,
   TracedTask,
+  IostatMetrics,
   IOMetricsSnapshot,
   ConsistencyCheck,
 } from '../types';
@@ -261,7 +262,7 @@ interface BenchmarkStore {
 
   // IO Monitoring
   ioSnapshots: IOMetricsSnapshot[];
-  updateIOSnapshot: (snapshot: IOMetricsSnapshot) => void;
+  updateIOSnapshot: (key: string, metrics: IostatMetrics) => void;
   clearIOSnapshots: () => void;
 
   // Consistency Analysis
@@ -414,16 +415,36 @@ export const useBenchmarkStore = create<BenchmarkStore>()(
 
       // IO Monitoring
       ioSnapshots: [],
-      updateIOSnapshot: (snapshot) =>
+      updateIOSnapshot: (key, metrics) =>
         set((s) => {
-          const existingIndex = s.ioSnapshots.findIndex((x) => x.key === snapshot.key);
+          const existingIndex = s.ioSnapshots.findIndex((x) => x.key === key);
           if (existingIndex === -1) {
-            return { ioSnapshots: [...s.ioSnapshots, snapshot] };
+            return {
+              ioSnapshots: [
+                ...s.ioSnapshots,
+                {
+                  key,
+                  sessionId: key.split('::')[0] ?? '',
+                  sessionName: '',
+                  diskName: key.split('::')[1] ?? '',
+                  latest: metrics,
+                  history: [metrics],
+                },
+              ],
+            };
           }
           const updated = s.ioSnapshots.map((x, i) => {
             if (i !== existingIndex) return x;
-            const history = [...x.history, snapshot.latest].slice(-120);
-            return { ...x, ...snapshot, history };
+            const history = [...x.history, metrics];
+            if (history.length > 120) history.shift();
+            return {
+              key,
+              sessionId: x.sessionId,
+              sessionName: x.sessionName,
+              diskName: x.diskName,
+              latest: metrics,
+              history,
+            };
           });
           return { ioSnapshots: updated };
         }),
