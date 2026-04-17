@@ -1,5 +1,15 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import { generateId } from '../../../utils';
+import type {
+  BusinessTemplate,
+  BusinessExecution,
+  ChaosFault,
+  ChaosInjection,
+  TracedTask,
+  IOMetricsSnapshot,
+  ConsistencyCheck,
+} from '../types';
 
 export interface AgentStatus {
   id: string;
@@ -71,6 +81,131 @@ export interface AgentMapping {
   label: string;          // Human readable label
 }
 
+export const BUILTIN_CHAOS_FAULTS: ChaosFault[] = [
+  {
+    id: 'net_delay',
+    name: 'Network Delay',
+    category: 'network',
+    description: 'network delay via tc qdisc',
+    cmdTemplate: 'tc qdisc add dev ${interface} root netem delay ${delay}ms',
+    params: [
+      { name: 'interface', label: 'Interface', defaultValue: 'eth0', required: true },
+      { name: 'delay', label: 'Delay (ms)', defaultValue: '100', required: true },
+    ],
+    recoveryCmdTemplate: 'tc qdisc del dev ${interface} root',
+    recoveryParams: [
+      { name: 'interface', label: 'Interface', defaultValue: 'eth0', required: true },
+    ],
+    defaultDurationSec: 60,
+    isBuiltin: true,
+  },
+  {
+    id: 'net_loss',
+    name: 'Network Loss',
+    category: 'network',
+    description: 'network loss via tc qdisc',
+    cmdTemplate: 'tc qdisc add dev ${interface} root netem loss ${loss}%',
+    params: [
+      { name: 'interface', label: 'Interface', defaultValue: 'eth0', required: true },
+      { name: 'loss', label: 'Loss (%)', defaultValue: '10', required: true },
+    ],
+    recoveryCmdTemplate: 'tc qdisc del dev ${interface} root',
+    recoveryParams: [
+      { name: 'interface', label: 'Interface', defaultValue: 'eth0', required: true },
+    ],
+    defaultDurationSec: 60,
+    isBuiltin: true,
+  },
+  {
+    id: 'io_stuck',
+    name: 'IO Stuck',
+    category: 'disk',
+    description: 'IO stuck via sys/block timeout',
+    cmdTemplate: 'echo ${timeout} > /sys/block/${device}/queue/io_timeout',
+    params: [
+      { name: 'device', label: 'Device', defaultValue: 'sda', required: true },
+      { name: 'timeout', label: 'Timeout (ms)', defaultValue: '30000', required: true },
+    ],
+    defaultDurationSec: 60,
+    isBuiltin: true,
+  },
+  {
+    id: 'cpu_stress',
+    name: 'CPU Stress',
+    category: 'cpu',
+    description: 'CPU stress via stress-ng',
+    cmdTemplate: 'stress-ng --cpu ${workers} --cpu-load ${load} --timeout ${duration}s',
+    params: [
+      { name: 'workers', label: 'Workers', defaultValue: '4', required: true },
+      { name: 'load', label: 'Load (%)', defaultValue: '80', required: true },
+      { name: 'duration', label: 'Duration (s)', defaultValue: '60', required: true },
+    ],
+    defaultDurationSec: 60,
+    isBuiltin: true,
+  },
+  {
+    id: 'proc_kill',
+    name: 'Process Kill',
+    category: 'process',
+    description: 'process kill via kill -9',
+    cmdTemplate: 'kill -9 ${pid}',
+    params: [
+      { name: 'pid', label: 'PID', required: true },
+    ],
+    defaultDurationSec: 0,
+    isBuiltin: true,
+  },
+  {
+    id: 'disk_ro',
+    name: 'Disk Read-Only',
+    category: 'disk',
+    description: 'disk read-only via blockdev',
+    cmdTemplate: 'blockdev --setro ${device}',
+    params: [
+      { name: 'device', label: 'Device', defaultValue: '/dev/sda', required: true },
+    ],
+    recoveryCmdTemplate: 'blockdev --setrw ${device}',
+    recoveryParams: [
+      { name: 'device', label: 'Device', defaultValue: '/dev/sda', required: true },
+    ],
+    defaultDurationSec: 60,
+    isBuiltin: true,
+  },
+];
+
+export const BUILTIN_CONSISTENCY_CHECKS: ConsistencyCheck[] = [
+  {
+    id: 'crc_check',
+    name: 'CRC Check',
+    checkType: 'crc',
+    nodeIds: [],
+    cmdTemplate: 'md5sum ${device}',
+    params: { device: '' },
+    status: 'pending',
+    triggeredAt: 0,
+  },
+  {
+    id: 'lba_cmp',
+    name: 'LBA Compare',
+    checkType: 'lba_range',
+    nodeIds: [],
+    cmdTemplate: 'dd if=${device} bs=${bs} count=${count} skip=${skip} | md5sum',
+    params: { device: '', bs: '4k', count: '1024', skip: '0' },
+    status: 'pending',
+    triggeredAt: 0,
+  },
+  {
+    id: 'meta_cmp',
+    name: 'Metadata Compare',
+    checkType: 'metadata',
+    nodeIds: [],
+    cmdTemplate: 'rbd info ${image} --format json',
+    params: { image: '' },
+    status: 'pending',
+    triggeredAt: 0,
+  },
+];
+
 interface BenchmarkStore {
   agents: AgentStatus[];
   fetchAgents: () => Promise<void>;
@@ -98,6 +233,42 @@ interface BenchmarkStore {
   removeAgentMapping: (sshSessionId: string) => void;
   updateAgentMapping: (sshSessionId: string, bbAgentId: string, label: string) => void;
   getBBAgentId: (sshSessionId: string) => string;
+
+  // Business Orchestration
+  businessTemplates: BusinessTemplate[];
+  addBusinessTemplate: (template: BusinessTemplate) => void;
+  removeBusinessTemplate: (id: string) => void;
+  updateBusinessTemplate: (id: string, updates: Partial<BusinessTemplate>) => void;
+
+  businessExecutions: BusinessExecution[];
+  addBusinessExecution: (execution: BusinessExecution) => void;
+  updateBusinessExecution: (id: string, updates: Partial<BusinessExecution>) => void;
+
+  // Chaos Injection
+  chaosFaults: ChaosFault[];
+  chaosInjections: ChaosInjection[];
+  addChaosFault: (fault: ChaosFault) => void;
+  removeChaosFault: (id: string) => void;
+  addChaosInjection: (injection: ChaosInjection) => void;
+  updateChaosInjection: (id: string, updates: Partial<ChaosInjection>) => void;
+
+  // Task Tracing
+  tracedTasks: TracedTask[];
+  addTracedTask: (task: Omit<TracedTask, 'id'>) => string;
+  updateTracedTask: (id: string, updates: Partial<TracedTask>) => void;
+  removeTracedTask: (id: string) => void;
+  appendLogBuffer: (taskId: string, pathId: string, lines: string[]) => void;
+
+  // IO Monitoring
+  ioSnapshots: IOMetricsSnapshot[];
+  updateIOSnapshot: (snapshot: IOMetricsSnapshot) => void;
+  clearIOSnapshots: () => void;
+
+  // Consistency Analysis
+  consistencyChecks: ConsistencyCheck[];
+  addConsistencyCheck: (check: ConsistencyCheck) => void;
+  updateConsistencyCheck: (id: string, updates: Partial<ConsistencyCheck>) => void;
+  removeConsistencyCheck: (id: string) => void;
 }
 
 export const useBenchmarkStore = create<BenchmarkStore>()(
@@ -171,6 +342,105 @@ export const useBenchmarkStore = create<BenchmarkStore>()(
         const mapping = get().agentMappings.find((m) => m.sshSessionId === sshSessionId);
         return mapping?.bbAgentId || sshSessionId;
       },
+
+      // Business Orchestration
+      businessTemplates: [],
+      addBusinessTemplate: (template) =>
+        set((s) => ({ businessTemplates: [...s.businessTemplates, template] })),
+      removeBusinessTemplate: (id) =>
+        set((s) => ({ businessTemplates: s.businessTemplates.filter((t) => t.id !== id) })),
+      updateBusinessTemplate: (id, updates) =>
+        set((s) => ({
+          businessTemplates: s.businessTemplates.map((t) =>
+            t.id === id ? { ...t, ...updates, updatedAt: Date.now() } : t
+          ),
+        })),
+
+      businessExecutions: [],
+      addBusinessExecution: (execution) =>
+        set((s) => ({ businessExecutions: [...s.businessExecutions, execution] })),
+      updateBusinessExecution: (id, updates) =>
+        set((s) => ({
+          businessExecutions: s.businessExecutions.map((e) =>
+            e.id === id ? { ...e, ...updates } : e
+          ),
+        })),
+
+      // Chaos Injection
+      chaosFaults: [...BUILTIN_CHAOS_FAULTS],
+      chaosInjections: [],
+      addChaosFault: (fault) =>
+        set((s) => ({ chaosFaults: [...s.chaosFaults, fault] })),
+      removeChaosFault: (id) =>
+        set((s) => ({ chaosFaults: s.chaosFaults.filter((f) => f.id !== id) })),
+      addChaosInjection: (injection) =>
+        set((s) => ({ chaosInjections: [...s.chaosInjections, injection] })),
+      updateChaosInjection: (id, updates) =>
+        set((s) => ({
+          chaosInjections: s.chaosInjections.map((i) =>
+            i.id === id ? { ...i, ...updates } : i
+          ),
+        })),
+
+      // Task Tracing
+      tracedTasks: [],
+      addTracedTask: (task) => {
+        const id = generateId();
+        set((s) => ({ tracedTasks: [...s.tracedTasks, { ...task, id }] }));
+        return id;
+      },
+      updateTracedTask: (id, updates) =>
+        set((s) => ({
+          tracedTasks: s.tracedTasks.map((t) =>
+            t.id === id ? { ...t, ...updates } : t
+          ),
+        })),
+      removeTracedTask: (id) =>
+        set((s) => ({ tracedTasks: s.tracedTasks.filter((t) => t.id !== id) })),
+      appendLogBuffer: (taskId, pathId, lines) =>
+        set((s) => ({
+          tracedTasks: s.tracedTasks.map((t) => {
+            if (t.id !== taskId) return t;
+            return {
+              ...t,
+              logPaths: t.logPaths.map((lp) => {
+                if (lp.id !== pathId) return lp;
+                const combined = [...(lp.buffer || []), ...lines];
+                return { ...lp, buffer: combined.slice(-500) };
+              }),
+            };
+          }),
+        })),
+
+      // IO Monitoring
+      ioSnapshots: [],
+      updateIOSnapshot: (snapshot) =>
+        set((s) => {
+          const existingIndex = s.ioSnapshots.findIndex((x) => x.key === snapshot.key);
+          if (existingIndex === -1) {
+            return { ioSnapshots: [...s.ioSnapshots, snapshot] };
+          }
+          const updated = s.ioSnapshots.map((x, i) => {
+            if (i !== existingIndex) return x;
+            const history = [...x.history, snapshot.latest].slice(-120);
+            return { ...x, ...snapshot, history };
+          });
+          return { ioSnapshots: updated };
+        }),
+      clearIOSnapshots: () => set({ ioSnapshots: [] }),
+
+      // Consistency Analysis
+      consistencyChecks: [...BUILTIN_CONSISTENCY_CHECKS],
+      addConsistencyCheck: (check) =>
+        set((s) => ({ consistencyChecks: [...s.consistencyChecks, check] })),
+      updateConsistencyCheck: (id, updates) =>
+        set((s) => ({
+          consistencyChecks: s.consistencyChecks.map((c) =>
+            c.id === id ? { ...c, ...updates } : c
+          ),
+        })),
+      removeConsistencyCheck: (id) =>
+        set((s) => ({ consistencyChecks: s.consistencyChecks.filter((c) => c.id !== id) })),
     }),
     {
       name: 'benchmark-store',
@@ -178,6 +448,9 @@ export const useBenchmarkStore = create<BenchmarkStore>()(
       partialize: (state) => ({
         savedModels: state.savedModels,
         agentMappings: state.agentMappings,
+        businessTemplates: state.businessTemplates,
+        chaosFaults: state.chaosFaults,
+        consistencyChecks: state.consistencyChecks,
       }),
     }
   )
