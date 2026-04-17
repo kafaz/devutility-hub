@@ -542,6 +542,11 @@ async function connectManagedSession({
     };
 
     ssh.on('ready', handleShellReady);
+
+    // keyboard-interactive 认证回调：部分 SSH 服务端（PAM）仅接受此方式
+    ssh.on('keyboard-interactive', (_name, _instructions, _instructionsLang, prompts, finish) => {
+      finish(prompts.map(() => cfg.password || ''));
+    });
     ssh.on('error', (err) => {
       if (!settled) {
         fail(new Error(normalizeSSHError(err, cfg)));
@@ -875,6 +880,9 @@ function buildConnectConfig(msg) {
   } else if (authType === 'password') {
     if (!msg.password) throw new Error('password 模式需要 password 字段');
     cfg.password = msg.password;
+    // 很多 SSH 服务端（特别是使用 PAM 的 Linux）只接受 keyboard-interactive，
+    // 需要开启 tryKeyboard 且注册 keyboard-interactive 事件才能正常认证
+    cfg.tryKeyboard = true;
   } else if (authType === 'agent') {
     cfg.agent = msg.agent || process.env.SSH_AUTH_SOCK;
     if (!cfg.agent) throw new Error('agent 模式需要 SSH Agent 正在运行');
@@ -2271,6 +2279,11 @@ wss.on('connection', (ws) => {
         };
 
         ssh.on('ready', handleReady);
+
+        // keyboard-interactive 认证回调：部分 SSH 服务端（PAM）仅接受此方式
+        ssh.on('keyboard-interactive', (_name, _instructions, _instructionsLang, prompts, finish) => {
+          finish(prompts.map(() => cfg.password || ''));
+        });
 
         ssh.on('error', (err) => {
           let userMsg = err.message;
