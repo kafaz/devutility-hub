@@ -1,4 +1,4 @@
-import { AppstoreOutlined, CloudServerOutlined, DashboardOutlined } from '@ant-design/icons';
+import { AppstoreOutlined, CloudServerOutlined, CodeOutlined, DashboardOutlined, FileSearchOutlined, ThunderboltOutlined } from '@ant-design/icons';
 import { Card, Tabs, Typography } from 'antd';
 import React, { useEffect } from 'react';
 import { useGlobalStore } from '../../store/globalStore';
@@ -10,6 +10,8 @@ const TopologyMatrix = React.lazy(() => import('./components/TopologyMatrix'));
 const MetricsDashboard = React.lazy(() => import('./components/MetricsDashboard'));
 const DiskMetricsDashboard = React.lazy(() => import('./components/DiskMetricsDashboard'));
 const ArtifactDistributor = React.lazy(() => import('./components/ArtifactDistributor'));
+const ChaosInjectionPanel = React.lazy(() => import('./components/ChaosInjectionPanel'));
+const TracingPanel = React.lazy(() => import('./components/TracingPanel'));
 
 const { Title, Text } = Typography;
 
@@ -49,7 +51,7 @@ const BlockBenchmark: React.FC = () => {
     },
     {
       key: 'task',
-      label: <><AppstoreOutlined /> 自定义参数分发 (Tasks)</>,
+      label: <><AppstoreOutlined /> 业务编排与下发</>,
       children: (
         <React.Suspense fallback={<div>Loading...</div>}>
           <TaskDispatcher />
@@ -57,20 +59,38 @@ const BlockBenchmark: React.FC = () => {
       )
     },
     {
-      key: 'dash',
-      label: <><DashboardOutlined /> 性能指标与仲裁大盘</>,
+      key: 'chaos',
+      label: <><ThunderboltOutlined /> 故障混沌注入</>,
       children: (
         <React.Suspense fallback={<div>Loading...</div>}>
-          <MetricsDashboard />
+          <ChaosInjectionPanel />
         </React.Suspense>
       )
     },
     {
-      key: 'disk_metrics',
-      label: <><DashboardOutlined /> 单挂载点 IO 监控 (iostat)</>,
+      key: 'io_monitor',
+      label: <><DashboardOutlined /> IO 实时监控</>,
       children: (
         <React.Suspense fallback={<div>Loading...</div>}>
           <DiskMetricsDashboard />
+        </React.Suspense>
+      )
+    },
+    {
+      key: 'tracing',
+      label: <><FileSearchOutlined /> 任务追踪与日志</>,
+      children: (
+        <React.Suspense fallback={<div>Loading...</div>}>
+          <TracingPanel />
+        </React.Suspense>
+      )
+    },
+    {
+      key: 'analysis',
+      label: <><CodeOutlined /> 一致性检测与仲裁</>,
+      children: (
+        <React.Suspense fallback={<div>Loading...</div>}>
+          <MetricsDashboard />
         </React.Suspense>
       )
     },
