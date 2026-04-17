@@ -11,7 +11,7 @@ const { Panel } = Collapse;
 
 const ChaosInjectionPanel: React.FC = () => {
   const { sessions, execCommandOnSession } = useSSHStore();
-  const { chaosFaults, chaosInjections, addChaosInjection, updateChaosInjection } = useBenchmarkStore();
+  const { chaosFaults, chaosInjections, addChaosInjection, updateChaosInjection, addTracedTask } = useBenchmarkStore();
 
   const connectedSessions = sessions.filter((s) => s.status === 'connected');
 
@@ -51,6 +51,20 @@ const ChaosInjectionPanel: React.FC = () => {
     addChaosInjection(injection);
     setInjecting(true);
     updateChaosInjection(injection.id, { status: 'injecting' });
+
+    // Register traced tasks for each selected node
+    selectedNodeIds.forEach((nodeId) => {
+      const sess = connectedSessions.find((s) => s.id === nodeId);
+      addTracedTask({
+        name: `${selectedFault.name} @ ${sess?.name ?? nodeId}`,
+        nodeId,
+        nodeName: sess?.name ?? nodeId,
+        source: { type: 'chaos', refId: injection.id },
+        status: 'running',
+        logPaths: [],
+        startedAt: Date.now(),
+      });
+    });
 
     const injectCmd = replaceFaultVars(selectedFault.cmdTemplate, paramValues);
     const recoveryScript = buildDelayedRecoveryScript(selectedFault, paramValues, durationSec, injection.id);
