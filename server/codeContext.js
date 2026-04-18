@@ -34,14 +34,6 @@ const IGNORED_PATH_SEGMENTS = new Set([
   'vendor',
 ]);
 
-const JS_CONTROL_KEYWORDS = new Set([
-  'catch',
-  'for',
-  'if',
-  'switch',
-  'while',
-]);
-
 const MAX_FILE_SIZE_BYTES = 1024 * 1024;
 const FULL_INDEX_CONCURRENCY = 12;
 const MAX_FAST_SEARCH_FILES = 120;
@@ -124,13 +116,6 @@ async function normalizeRepoSource(repo) {
 }
 
 function languageFromExt(filePath) {
-  const ext = path.extname(filePath).toLowerCase();
-  if (ext === '.go') return 'go';
-  if (ext === '.py') return 'python';
-  if (ext === '.java' || ext === '.kt') return 'jvm';
-  if (ext === '.rs') return 'rust';
-  if (ext === '.php') return 'php';
-  if (['.js', '.jsx', '.ts', '.tsx', '.mjs'].includes(ext)) return 'javascript';
   return 'c-family';
 }
 
@@ -342,6 +327,88 @@ async function getTrackedSourceFiles(entry) {
   return entry.sourceFilesPromise;
 }
 
+function normalizeSourcePath(rawPath) {
+  const withoutScheme = String(rawPath || '').trim().replace(/^file:\/\//i, '');
+  const cleaned = withoutScheme.replace(/^[`'"[\](){}<]+|[`'"\])}>.,;]+$/g, '');
+  if (!cleaned || cleaned.includes('://')) return '';
+  return cleaned.replace(/\\/g, '/').replace(/^\.\/+/, '').replace(/\/+/g, '/');
+}
+
+async function resolveSourcePath(entry, rawPath) {
+  const normalizedInput = normalizeSourcePath(rawPath);
+  if (!normalizedInput) {
+    return null;
+  }
+
+  const files = await getTrackedSourceFiles(entry);
+  const fileSet = new Set(files.map((file) => file.path));
+  const candidates = [];
+  const seenCandidates = new Set();
+
+  const pushCandidate = (candidate, matchedBy) => {
+    const normalizedCandidate = normalizeSourcePath(candidate);
+    if (!normalizedCandidate || seenCandidates.has(normalizedCandidate)) return;
+    seenCandidates.add(normalizedCandidate);
+    candidates.push({ path: normalizedCandidate, matchedBy });
+  };
+
+  pushCandidate(normalizedInput, path.isAbsolute(normalizedInput) ? 'absolute' : 'exact');
+
+  if (path.isAbsolute(normalizedInput)) {
+    const relativeToRepo = path.relative(entry.repoDir, path.resolve(normalizedInput));
+    if (relativeToRepo && !relativeToRepo.startsWith('..') && !path.isAbsolute(relativeToRepo)) {
+      pushCandidate(relativeToRepo, 'worktree');
+    }
+  }
+
+  if (entry.repoDisplayName && normalizedInput.startsWith(`${entry.repoDisplayName}/`)) {
+    pushCandidate(normalizedInput.slice(entry.repoDisplayName.length + 1), 'repo-name');
+  }
+
+  const segments = normalizedInput.split('/').filter(Boolean);
+  const minStart = Math.max(0, segments.length - 5);
+  for (let start = minStart; start < segments.length; start += 1) {
+    pushCandidate(segments.slice(start).join('/'), 'suffix');
+  }
+
+  for (const candidate of candidates) {
+    if (fileSet.has(candidate.path)) {
+      return {
+        path: candidate.path,
+        matchedBy: candidate.matchedBy,
+      };
+    }
+  }
+
+  const suffixMatches = [];
+  candidates.forEach((candidate) => {
+    files.forEach((file) => {
+      if (file.path === candidate.path || file.path.endsWith(`/${candidate.path}`)) {
+        suffixMatches.push({
+          path: file.path,
+          matchedBy: candidate.matchedBy,
+          score: file.path.length - candidate.path.length,
+        });
+      }
+    });
+  });
+
+  suffixMatches.sort((left, right) =>
+    left.score - right.score ||
+    left.path.length - right.path.length ||
+    left.path.localeCompare(right.path)
+  );
+
+  if (suffixMatches[0]) {
+    return {
+      path: suffixMatches[0].path,
+      matchedBy: suffixMatches[0].matchedBy,
+    };
+  }
+
+  return null;
+}
+
 const CFAMILY_CONTROL_IDS = new Set([
   'if', 'while', 'for', 'switch', 'sizeof', 'typeof', 'offsetof',
   'likely', 'unlikely', 'return', 'goto', 'break', 'continue',
@@ -355,18 +422,13 @@ function collectSignature(lines, startIndex, language, kind = 'function') {
     const line = lines[index];
     signatureLines.push(line.trim());
 
-    if (language === 'python') {
-      if (line.includes(':')) break;
-      continue;
-    }
-
     if (kind === 'macro') {
       // #define 宏签名就是整行，但多行宏用 \ 续行
       if (!line.trim().endsWith('\\')) break;
       continue;
     }
 
-    if (line.includes('{') || line.includes('=>') || line.trim().endsWith(';')) {
+    if (line.includes('{') || line.trim().endsWith(';')) {
       break;
     }
   }
@@ -378,39 +440,14 @@ function extractSymbolsFromLines(lines, relativePath) {
   const language = languageFromExt(relativePath);
   const symbols = [];
 
-  const patternsByLanguage = {
-    go: [
-      { kind: 'function', pattern: /^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:\[[^\]]+\])?\s*\(/ },
-    ],
-    python: [
-      { kind: 'function', pattern: /^\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/ },
-    ],
-    javascript: [
-      { kind: 'function', pattern: /^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*(?:<[^>(]+>)?\s*\(/ },
-      { kind: 'function', pattern: /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?function\s*\(/ },
-      { kind: 'function', pattern: /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^=]*\)|[A-Za-z_$][\w$]*)\s*=>\s*\{/ },
-      { kind: 'function', pattern: /^\s*(?:public|private|protected|static|readonly|async|get|set|\s)*([A-Za-z_$][\w$]*)\s*(?:<[^>(]+>)?\s*\([^=;]*\)\s*\{/ },
-    ],
-    jvm: [
-      { kind: 'function', pattern: /^\s*(?:@\w+(?:\([^)]*\))?\s*)*(?:public|protected|private|internal)?\s*(?:static\s+|final\s+|synchronized\s+|abstract\s+|open\s+|override\s+)*[\w<>\[\],?. ]+\s+([A-Za-z_][A-Za-z0-9_]*)\s*\([^;]*\)\s*(?:throws [^{]+)?\{/ },
-    ],
-    rust: [
-      { kind: 'function', pattern: /^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:<[^>(]+>)?\s*\(/ },
-    ],
-    php: [
-      { kind: 'function', pattern: /^\s*(?:public|protected|private)?\s*(?:static\s+)?function\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/ },
-    ],
-    'c-family': [
-      { kind: 'function', pattern: /^\s*(?:template\s*<[^>]+>\s*)?(?:[\w:*<>\[\]&~]+\s+)+([A-Za-z_][A-Za-z0-9_:~]*)\s*\([^;]*\)\s*(?:const|override|final|noexcept|volatile)?\s*(?:\{|$)/ },
-      { kind: 'struct', pattern: /^\s*struct\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\{|;|$)/ },
-      { kind: 'union', pattern: /^\s*union\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\{|;|$)/ },
-      { kind: 'enum', pattern: /^\s*enum\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\{|;|$)/ },
-      { kind: 'macro', pattern: /^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(|[^\S\r\n]|$)/ },
-      { kind: 'typedef', pattern: /^\s*typedef\s+(?:[\w\s\*\(\),\[\]]+?)\s+([A-Za-z_][A-Za-z0-9_]*)\s*;/ },
-    ],
-  };
-
-  const patterns = patternsByLanguage[language] || [];
+  const patterns = [
+    { kind: 'function', pattern: /^\s*(?:template\s*<[^>]+>\s*)?(?:[\w:*<>\[\]&~]+\s+)+([A-Za-z_][A-Za-z0-9_:~]*)\s*\([^;]*\)\s*(?:const|override|final|noexcept|volatile)?\s*(?:\{|$)/ },
+    { kind: 'struct', pattern: /^\s*struct\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\{|;|$)/ },
+    { kind: 'union', pattern: /^\s*union\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\{|;|$)/ },
+    { kind: 'enum', pattern: /^\s*enum\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\{|;|$)/ },
+    { kind: 'macro', pattern: /^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(|[^\S\r\n]|$)/ },
+    { kind: 'typedef', pattern: /^\s*typedef\s+(?:[\w\s\*\(\),\[\]]+?)\s+([A-Za-z_][A-Za-z0-9_]*)\s*;/ },
+  ];
 
   lines.forEach((line, lineIndex) => {
     for (const { kind, pattern } of patterns) {
@@ -419,8 +456,7 @@ function extractSymbolsFromLines(lines, relativePath) {
 
       const symbolName = matched[1];
       if (!symbolName) continue;
-      if (language === 'javascript' && JS_CONTROL_KEYWORDS.has(symbolName)) continue;
-      if (language === 'c-family' && kind === 'function' && CFAMILY_CONTROL_IDS.has(symbolName)) continue;
+      if (kind === 'function' && CFAMILY_CONTROL_IDS.has(symbolName)) continue;
 
       const lineNumber = lineIndex + 1;
       symbols.push({
@@ -954,49 +990,13 @@ function countBraces(line) {
 function expandSymbolStart(lines, startIndex, language) {
   let start = startIndex;
 
-  if (language === 'python') {
-    while (start > 0 && lines[start - 1].trim().startsWith('@')) {
-      start -= 1;
-    }
-    return start;
-  }
-
   while (start > 0) {
     const previous = lines[start - 1].trim();
     if (!previous) break;
-    if (previous.startsWith('@')) {
-      start -= 1;
-      continue;
-    }
     break;
   }
 
   return start;
-}
-
-function detectPythonRange(lines, startIndex) {
-  const expandedStart = expandSymbolStart(lines, startIndex, 'python');
-  const declarationLine = lines[startIndex];
-  const declarationIndent = declarationLine.match(/^\s*/)?.[0].length || 0;
-  let end = Math.min(lines.length - 1, startIndex + 1);
-
-  for (let index = startIndex + 1; index < lines.length; index += 1) {
-    const line = lines[index];
-    const trimmed = line.trim();
-
-    if (!trimmed) {
-      end = index;
-      continue;
-    }
-
-    const indent = line.match(/^\s*/)?.[0].length || 0;
-    if (indent <= declarationIndent && !trimmed.startsWith('#')) {
-      break;
-    }
-    end = index;
-  }
-
-  return { start: expandedStart, end };
 }
 
 function detectBraceRange(lines, startIndex, language) {
@@ -1049,10 +1049,6 @@ function detectSymbolRange(lines, symbol) {
   const startIndex = Math.max(0, Number(symbol.line || 1) - 1);
   const kind = symbol.kind || 'function';
 
-  if (symbol.language === 'python') {
-    return detectPythonRange(lines, startIndex);
-  }
-
   if (kind === 'macro') {
     return detectMacroRange(lines, startIndex);
   }
@@ -1062,6 +1058,10 @@ function detectSymbolRange(lines, symbol) {
   }
 
   return detectBraceRange(lines, startIndex, symbol.language);
+}
+
+function normalizeContextWindow(value, fallback, maxValue) {
+  return Math.max(0, Math.min(Number(value) || fallback, maxValue));
 }
 
 async function renderSymbol(contextId, symbolId, options = {}) {
@@ -1102,12 +1102,16 @@ async function renderSymbol(contextId, symbolId, options = {}) {
     entry.symbolById.set(symbol.id, symbol);
   }
   const { start, end } = detectSymbolRange(lines, symbol);
-  const beforeContext = Math.max(0, Math.min(Number(options.beforeContext) || 12, 240));
-  const afterContext = Math.max(0, Math.min(Number(options.afterContext) || 24, 360));
+  const beforeContext = normalizeContextWindow(options.beforeContext, 12, 240);
+  const afterContext = normalizeContextWindow(options.afterContext, 24, 360);
   const snippetStart = Math.max(0, start - beforeContext);
   const snippetEnd = Math.min(lines.length - 1, end + afterContext);
 
   return {
+    mode: 'symbol',
+    path: symbol.path,
+    line: Number(symbol.line),
+    matchedBy: 'symbol',
     symbol,
     signature: symbol.signature,
     functionStartLine: start + 1,
@@ -1122,7 +1126,99 @@ async function renderSymbol(contextId, symbolId, options = {}) {
       text,
       inFunction: snippetStart + index >= start && snippetStart + index <= end,
       isDeclaration: snippetStart + index === Number(symbol.line) - 1,
+      isAnchor: snippetStart + index === Number(symbol.line) - 1,
     })),
+  };
+}
+
+async function renderLocation(contextId, sourcePath, lineNumber, options = {}) {
+  const entry = await getContextEntry(contextId);
+  const requestedLine = Number(lineNumber || 0);
+  if (!String(sourcePath || '').trim()) {
+    throw new Error('sourcePath 不能为空');
+  }
+  if (!Number.isFinite(requestedLine) || requestedLine <= 0) {
+    throw new Error('line 必须是正整数');
+  }
+
+  const normalizedPath = normalizeSourcePath(sourcePath);
+  const explicitExt = path.extname(normalizedPath).toLowerCase();
+  if (explicitExt && !SOURCE_EXTENSIONS.has(explicitExt)) {
+    throw new Error(`当前仅支持 C 源码定位: ${sourcePath}`);
+  }
+
+  const resolved = await resolveSourcePath(entry, sourcePath);
+  if (!resolved?.path) {
+    throw new Error(`无法在当前代码上下文中定位源码文件: ${sourcePath}`);
+  }
+
+  const content = await readSourceFile(entry, resolved.path);
+  if (!content) {
+    throw new Error(`无法读取源码文件: ${resolved.path}`);
+  }
+
+  const lines = content.split(/\r?\n/);
+  const safeLine = Math.min(lines.length, Math.max(1, requestedLine));
+  const anchorIndex = safeLine - 1;
+  const beforeContext = normalizeContextWindow(options.beforeContext, 12, 240);
+  const afterContext = normalizeContextWindow(options.afterContext, 24, 360);
+  const snippetStart = Math.max(0, anchorIndex - beforeContext);
+  const snippetEnd = Math.min(lines.length - 1, anchorIndex + afterContext);
+
+  const symbols = await getFileSymbols(entry, resolved.path);
+  let containingSymbol = null;
+  let containingRange = null;
+
+  symbols.forEach((symbol) => {
+    const range = detectSymbolRange(lines, symbol);
+    if (anchorIndex < range.start || anchorIndex > range.end) {
+      return;
+    }
+
+    if (
+      !containingRange ||
+      (range.end - range.start) < (containingRange.end - containingRange.start) ||
+      ((range.end - range.start) === (containingRange.end - containingRange.start) && range.start > containingRange.start)
+    ) {
+      containingSymbol = symbol;
+      containingRange = range;
+    }
+  });
+
+  if (containingSymbol && !containingSymbol.signature) {
+    containingSymbol.signature = collectSignature(
+      lines,
+      Math.max(0, Number(containingSymbol.line || 1) - 1),
+      containingSymbol.language,
+      containingSymbol.kind || 'function'
+    ) || containingSymbol.name;
+    entry.symbolById.set(containingSymbol.id, containingSymbol);
+  }
+
+  return {
+    mode: 'location',
+    path: resolved.path,
+    line: safeLine,
+    matchedBy: resolved.matchedBy,
+    symbol: containingSymbol,
+    signature: containingSymbol?.signature || '',
+    functionStartLine: containingRange ? containingRange.start + 1 : null,
+    functionEndLine: containingRange ? containingRange.end + 1 : null,
+    snippetStartLine: snippetStart + 1,
+    snippetEndLine: snippetEnd + 1,
+    beforeContext,
+    afterContext,
+    totalLines: lines.length,
+    lines: lines.slice(snippetStart, snippetEnd + 1).map((text, index) => {
+      const currentIndex = snippetStart + index;
+      return {
+        lineNumber: currentIndex + 1,
+        text,
+        inFunction: containingRange ? currentIndex >= containingRange.start && currentIndex <= containingRange.end : false,
+        isDeclaration: containingSymbol ? currentIndex === Number(containingSymbol.line) - 1 : false,
+        isAnchor: currentIndex === anchorIndex,
+      };
+    }),
   };
 }
 
@@ -1248,6 +1344,7 @@ function closeContext(contextId) {
 
 module.exports = {
   openCodeContext,
+  renderLocation,
   renderSymbol,
   searchSymbols,
   getCallers,

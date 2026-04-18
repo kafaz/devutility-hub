@@ -8,21 +8,32 @@ import {
   Typography,
   message,
 } from 'antd';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useSSHStore } from '../../SSHManager/store/sshStore';
 import { useBenchmarkStore } from '../store/benchmarkStore';
 import type { LogPathConfig, TracedTask } from '../types';
 import { generateId } from '../../../utils';
 
 const { Text, Title } = Typography;
+const LOG_POLL_INTERVAL_MS = 2000;
+const LOG_TAIL_LINE_COUNT = 200;
+
+function quoteShellArg(value: string): string {
+  return `'${String(value).replace(/'/g, `'"'"'`)}'`;
+}
+
+function splitLogLines(text: string): string[] {
+  if (!text) return [];
+  return text.replace(/\r/g, '').split('\n').slice(-500);
+}
 
 interface Props {
   task: TracedTask | null;
 }
 
 const TracingLogViewer: React.FC<Props> = ({ task }) => {
-  const { execCommandOnSession, subscribeToSessionLines, sendInputToSession } = useSSHStore();
-  const { appendLogBuffer, updateTracedTask } = useBenchmarkStore();
+  const { execCommandOnSession } = useSSHStore();
+  const { replaceLogBuffer, updateTracedTask } = useBenchmarkStore();
 
   const [newPath, setNewPath] = useState('');
   const [newLabel, setNewLabel] = useState('');
@@ -30,7 +41,8 @@ const TracingLogViewer: React.FC<Props> = ({ task }) => {
   const [paused, setPaused] = useState(false);
 
   const bufferEndRef = useRef<HTMLDivElement | null>(null);
-  const streamUnsubsRef = useRef<Record<string, () => void>>({});
+  const pollTimersRef = useRef<Record<string, ReturnType<typeof window.setInterval>>>({});
+  const pollInFlightRef = useRef<Record<string, boolean>>({});
 
   // Auto-scroll to bottom when buffer changes (unless paused)
   useEffect(() => {
@@ -39,13 +51,61 @@ const TracingLogViewer: React.FC<Props> = ({ task }) => {
     }
   }, [task?.logPaths, paused]);
 
-  // Cleanup stream subscriptions when task changes or unmounts
+  const stopPolling = useCallback((pathId: string) => {
+    const timer = pollTimersRef.current[pathId];
+    if (timer !== undefined) {
+      window.clearInterval(timer);
+      delete pollTimersRef.current[pathId];
+    }
+    delete pollInFlightRef.current[pathId];
+  }, []);
+
+  const stopAllPolling = useCallback(() => {
+    Object.keys(pollTimersRef.current).forEach((pathId) => stopPolling(pathId));
+  }, [stopPolling]);
+
+  const refreshLogPath = useCallback(async (taskId: string, pathId: string, nodeId: string, path: string) => {
+    if (pollInFlightRef.current[pathId]) return;
+    pollInFlightRef.current[pathId] = true;
+    try {
+      const res = await execCommandOnSession(
+        nodeId,
+        `tail -n ${LOG_TAIL_LINE_COUNT} -- ${quoteShellArg(path)}`,
+        15000,
+        { journal: false }
+      );
+
+      if (res.exitCode !== 0) {
+        replaceLogBuffer(taskId, pathId, [`[ERROR] ${res.stderr || `无法读取日志，exit=${res.exitCode}`}`]);
+        return;
+      }
+
+      replaceLogBuffer(taskId, pathId, splitLogLines(res.stdout));
+    } finally {
+      pollInFlightRef.current[pathId] = false;
+    }
+  }, [execCommandOnSession, replaceLogBuffer]);
+
+  const startPolling = useCallback((taskId: string, pathId: string, nodeId: string, path: string) => {
+    if (pollTimersRef.current[pathId] !== undefined) return;
+
+    void refreshLogPath(taskId, pathId, nodeId, path);
+    pollTimersRef.current[pathId] = window.setInterval(() => {
+      void refreshLogPath(taskId, pathId, nodeId, path);
+    }, LOG_POLL_INTERVAL_MS);
+  }, [refreshLogPath]);
+
   useEffect(() => {
+    if (!task) return undefined;
+
+    task.logPaths
+      .filter((lp) => lp.mode === 'stream')
+      .forEach((lp) => startPolling(task.id, lp.id, task.nodeId, lp.path));
+
     return () => {
-      Object.values(streamUnsubsRef.current).forEach((unsub) => unsub());
-      streamUnsubsRef.current = {};
+      stopAllPolling();
     };
-  }, [task?.id]);
+  }, [task?.id, startPolling, stopAllPolling]);
 
   const handleAddLogPath = async () => {
     if (!task) {
@@ -75,20 +135,9 @@ const TracingLogViewer: React.FC<Props> = ({ task }) => {
     });
 
     if (newMode === 'snapshot') {
-      try {
-        const res = await execCommandOnSession(task.nodeId, `tail -n 200 "${newPath.trim()}"`, 15000);
-        const lines = res.stdout.split('\n');
-        appendLogBuffer(task.id, pathId, lines);
-      } catch {
-        appendLogBuffer(task.id, pathId, ['[ERROR] 无法读取快照日志']);
-      }
+      await refreshLogPath(task.id, pathId, task.nodeId, newPath.trim());
     } else {
-      // Stream mode: send tail -F via shell PTY
-      sendInputToSession(task.nodeId, `tail -n 100 -F "${newPath.trim()}"\n`);
-      const unsub = subscribeToSessionLines(task.nodeId, (line: string) => {
-        appendLogBuffer(task.id, pathId, [line]);
-      });
-      streamUnsubsRef.current[pathId] = unsub;
+      startPolling(task.id, pathId, task.nodeId, newPath.trim());
     }
 
     setNewPath('');
@@ -98,11 +147,7 @@ const TracingLogViewer: React.FC<Props> = ({ task }) => {
 
   const handleRemoveLogPath = (pathId: string) => {
     if (!task) return;
-    const unsub = streamUnsubsRef.current[pathId];
-    if (unsub) {
-      unsub();
-      delete streamUnsubsRef.current[pathId];
-    }
+    stopPolling(pathId);
     updateTracedTask(task.id, {
       logPaths: task.logPaths.filter((lp) => lp.id !== pathId),
     });

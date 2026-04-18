@@ -142,7 +142,10 @@ export const BackgroundJobMonitor: React.FC = () => {
       try {
         if (job.pid) {
           const aliveRes = await execCommandOnSession(
-            job.sessionId, `kill -0 ${job.pid} 2>/dev/null && echo alive || echo dead`, 3000
+            job.sessionId,
+            `kill -0 ${job.pid} 2>/dev/null && echo alive || echo dead`,
+            3000,
+            { journal: false }
           );
           if (aliveRes.stdout.trim() === 'dead') {
             updateJobStatus(job.id, 'done');
@@ -151,7 +154,10 @@ export const BackgroundJobMonitor: React.FC = () => {
         }
 
         const tailRes = await execCommandOnSession(
-          job.sessionId, `tail -n ${TAIL_LINES} "${job.logPath}" 2>/dev/null`, 4000
+          job.sessionId,
+          `tail -n ${TAIL_LINES} "${job.logPath}" 2>/dev/null`,
+          4000,
+          { journal: false }
         );
         const output = tailRes.stdout || '（无输出）';
         updateJobOutput(job.id, output);

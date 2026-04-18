@@ -317,7 +317,7 @@ const BusinessTemplateEditor: React.FC = () => {
                         title={
                           <Space>
                             <Text strong>{index + 1}. {step.name}</Text>
-                            {step.blocking ? <Tag size="small">阻塞</Tag> : <Tag size="small" color="orange">非阻塞</Tag>}
+                            {step.blocking ? <Tag>阻塞</Tag> : <Tag color="orange">非阻塞</Tag>}
                           </Space>
                         }
                         description={
@@ -328,7 +328,7 @@ const BusinessTemplateEditor: React.FC = () => {
                                 目标: {Array.isArray(step.target) ? step.target.join(', ') : 'all'} | 超时: {step.timeout}ms
                               </Text>
                               {step.captureVar && (
-                                <Tag size="small" color="blue" style={{ marginLeft: 8 }}>
+                                <Tag color="blue" style={{ marginLeft: 8 }}>
                                   捕获: {step.captureVar.name}
                                 </Tag>
                               )}

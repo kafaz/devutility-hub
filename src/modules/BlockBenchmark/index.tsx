@@ -17,16 +17,17 @@ const { Title, Text } = Typography;
 
 const BlockBenchmark: React.FC = () => {
   const isDark = useGlobalStore(s => s.theme === 'dark');
-  const { fetchAgents, agents } = useBenchmarkStore();
+  const { fetchAgents, fetchTasks, agents } = useBenchmarkStore();
   
   useEffect(() => {
-    fetchAgents();
+    void fetchAgents();
+    void fetchTasks();
     const timer = setInterval(() => {
-      fetchAgents();
+      void fetchAgents();
+      void fetchTasks();
     }, 5000);
     return () => clearInterval(timer);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [fetchAgents, fetchTasks]);
 
   const onlineAgentsCount = agents.filter(a => a.status === 'online').length;
 

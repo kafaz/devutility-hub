@@ -5,18 +5,24 @@ import { useBenchmarkStore } from '../store/benchmarkStore';
 
 const { Text } = Typography;
 
+type AgentStatusLabel = 'online' | 'offline' | 'unmapped';
+
+function quoteShellArg(value: string): string {
+  return `'${String(value).replace(/'/g, `'"'"'`)}'`;
+}
+
 const DeploymentManager: React.FC = () => {
   const { sessions, execCommandOnSession } = useSSHStore();
-  const { agents } = useBenchmarkStore();
+  const { agents, agentMappings } = useBenchmarkStore();
   
   const [controllerIp, setControllerIp] = useState('127.0.0.1:9090');
   const [agentPath, setAgentPath] = useState('/usr/local/bin/agent.bin');
 
-  const handleStartAgent = async (sessionId: string, nodeName: string) => {
+  const handleStartAgent = async (sessionId: string, nodeName: string, agentId: string) => {
     try {
-      const cmd = `nohup ${agentPath} --id ${nodeName} --controller ${controllerIp} > /tmp/agent.log 2>&1 &`;
+      const cmd = `nohup ${quoteShellArg(agentPath)} --id ${quoteShellArg(agentId)} --controller ${quoteShellArg(controllerIp)} > /tmp/agent.log 2>&1 &`;
       await execCommandOnSession(sessionId, cmd);
-      message.success(`Start command sent to ${nodeName}`);
+      message.success(`Start command sent to ${nodeName} (${agentId})`);
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       message.error(`Failed to start agent on ${nodeName}: ${msg}`);
@@ -24,15 +30,17 @@ const DeploymentManager: React.FC = () => {
   };
 
   const tableData = sessions.map(sess => {
-    // try to match SSH session to BlockBenchmark Agent
-    // since agent uses nodeName (or we force it to use nodeName)
-    const agent = agents.find(a => a.id === sess.name);
+    const mapping = agentMappings.find((item) => item.sshSessionId === sess.id);
+    const agentId = mapping?.bbAgentId ?? sess.name;
+    const agent = agents.find((item) => item.id === agentId);
+    const agentStatus: AgentStatusLabel = mapping ? (agent?.status ?? 'offline') : 'unmapped';
     return {
       key: sess.id,
       sessionId: sess.id,
       name: sess.name,
+      agentId,
       status: sess.status, // SSH status
-      agentStatus: agent?.status || 'offline',
+      agentStatus,
       agentIp: agent?.ip || '-',
     };
   });
@@ -41,13 +49,15 @@ const DeploymentManager: React.FC = () => {
     key: string;
     sessionId: string;
     name: string;
+    agentId: string;
     status: string;
-    agentStatus: string;
+    agentStatus: AgentStatusLabel;
     agentIp: string;
   }
 
   const columns = [
     { title: '节点名称', dataIndex: 'name', key: 'name' },
+    { title: 'Agent ID', dataIndex: 'agentId', key: 'agentId' },
     {
       title: 'SSH 连接状态',
       dataIndex: 'status',
@@ -60,9 +70,12 @@ const DeploymentManager: React.FC = () => {
       title: 'Agent 注册状态',
       dataIndex: 'agentStatus',
       key: 'agentStatus',
-      render: (val: string) => (
-        <Tag color={val === 'online' ? 'blue' : 'default'} style={{ fontWeight: 'bold' }}>
-          {val.toUpperCase()}
+      render: (val: AgentStatusLabel) => (
+        <Tag
+          color={val === 'online' ? 'blue' : val === 'offline' ? 'default' : 'warning'}
+          style={{ fontWeight: 'bold' }}
+        >
+          {val === 'unmapped' ? '未绑定' : val.toUpperCase()}
         </Tag>
       )
     },
@@ -76,7 +89,7 @@ const DeploymentManager: React.FC = () => {
             size="small"
             type="primary"
             disabled={record.status !== 'connected'}
-            onClick={() => handleStartAgent(record.sessionId, record.name)}
+            onClick={() => handleStartAgent(record.sessionId, record.name, record.agentId)}
           >
             启动 Agent
           </Button>

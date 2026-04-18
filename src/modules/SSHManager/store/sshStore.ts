@@ -127,6 +127,7 @@ interface SessionRuntime {
     startIndex: number;
     debounceTimer: ReturnType<typeof setTimeout> | null;
   } | null;
+  disconnectRequested: boolean;
   // 14-E: asciinema 录像数据
   recordingFrames:    { t: number; data: string }[];
   recordingStartedAt: number | null;
@@ -143,11 +144,102 @@ function getRT(sessionId: string): SessionRuntime {
       execResolvers: new Map(),
       planNodeResolve: null, planAborted: false,
       pendingManualCmd: null,
+      disconnectRequested: false,
       recordingFrames: [], recordingStartedAt: null,
       lineBuffer: '',
     });
   }
   return runtimes.get(sessionId)!;
+}
+
+function sanitizeTerminalText(text: string): string {
+  /* eslint-disable no-control-regex */
+  return text
+    .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
+    .replace(/\x1b\][^\x07]*\x07/g, '')
+    .replace(/\x1b[()][0-9A-Za-z]/g, '')
+    .replace(/\x1b[=>]/g, '')
+    .trim();
+  /* eslint-enable no-control-regex */
+}
+
+function addSessionJournalEvent(sessionId: string, eventTitle: string, content: string): void {
+  const { sessions } = useSSHStore.getState();
+  const session = sessions.find((item) => item.id === sessionId);
+  if (!session) return;
+  useJournalStore.getState().addEntry({
+    sessionId,
+    sessionName: session.name,
+    type: 'session_evt',
+    timestamp: Date.now(),
+    eventTitle,
+    content,
+  });
+}
+
+function addQuickExecJournalEntry(
+  sessionId: string,
+  cmd: string,
+  result: { stdout: string; stderr: string; exitCode: number; durationMs: number },
+  timestamp: number
+): void {
+  const { sessions, profiles } = useSSHStore.getState();
+  const session = sessions.find((item) => item.id === sessionId);
+  if (!session) return;
+  const profile = profiles.find((item) => item.id === session.profileId);
+
+  useJournalStore.getState().addEntry({
+    sessionId,
+    sessionName: session.name,
+    type: 'quick_exec',
+    timestamp,
+    command: cmd,
+    output: [result.stdout, result.stderr].filter(Boolean).join('\n').trim(),
+    exitCode: result.exitCode,
+    durationMs: result.durationMs,
+    nodeHost: profile?.host,
+    nodePort: profile?.port,
+    nodeUser: profile?.username,
+  });
+}
+
+function flushPendingManualCommand(sessionId: string, endIndex?: number): void {
+  const rt = getRT(sessionId);
+  const pending = rt.pendingManualCmd;
+  if (!pending) return;
+
+  if (pending.debounceTimer) {
+    clearTimeout(pending.debounceTimer);
+  }
+
+  const safeEndIndex = Math.max(
+    pending.startIndex,
+    Math.min(endIndex ?? rt.terminalBuffer.length, rt.terminalBuffer.length)
+  );
+  const outputBin = rt.terminalBuffer.slice(pending.startIndex, safeEndIndex);
+  const bytes = new Uint8Array(outputBin.length);
+  for (let i = 0; i < outputBin.length; i++) bytes[i] = outputBin.charCodeAt(i);
+  const outputUtf8 = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+  const cleanOutput = sanitizeTerminalText(outputUtf8);
+
+  const { sessions, profiles } = useSSHStore.getState();
+  const session = sessions.find((item) => item.id === sessionId);
+  if (session) {
+    const profile = profiles.find((item) => item.id === session.profileId);
+    useJournalStore.getState().addEntry({
+      sessionId,
+      sessionName: session.name,
+      type: 'manual_cmd',
+      timestamp: pending.startTime,
+      command: pending.cmd,
+      output: cleanOutput,
+      nodeHost: profile?.host,
+      nodePort: profile?.port,
+      nodeUser: profile?.username,
+    });
+  }
+
+  rt.pendingManualCmd = null;
 }
 
 // 14-E: 开始/清空录像
@@ -166,10 +258,13 @@ export function getTerminalBuffer(sessionId: string): string {
   return getRT(sessionId).terminalBuffer;
 }
 
-export function recordManualCommandStart(sessionId: string, cmd: string) {
+export function recordManualCommandStart(sessionId: string, cmd: string, currentLine = '') {
   const rt = getRT(sessionId);
-  if (rt.pendingManualCmd?.debounceTimer) {
-    clearTimeout(rt.pendingManualCmd.debounceTimer);
+  if (rt.pendingManualCmd) {
+    const boundaryIndex = currentLine
+      ? Math.max(rt.pendingManualCmd.startIndex, rt.terminalBuffer.length - currentLine.length)
+      : rt.terminalBuffer.length;
+    flushPendingManualCommand(sessionId, boundaryIndex);
   }
   rt.pendingManualCmd = {
     cmd,
@@ -183,6 +278,10 @@ export function recordManualCommandStart(sessionId: string, cmd: string) {
 
 const PROXY_HTTP = 'http://127.0.0.1:3001';
 const PROXY_WS   = 'ws://127.0.0.1:3001/terminal';
+
+interface ExecCommandOptions {
+  journal?: boolean;
+}
 
 // ─── Store ─────────────────────────────────────────────────────────────────
 
@@ -219,7 +318,12 @@ interface SSHStore {
   setSessionTermCallback: (sessionId: string, cb: ((b64: string) => void) | null) => void;
 
   // 单会话命令执行（exec 通道，独立环境）
-  execCommandOnSession: (sessionId: string, cmd: string, timeout?: number) => Promise<{ stdout: string; stderr: string; exitCode: number; durationMs: number }>;
+  execCommandOnSession: (
+    sessionId: string,
+    cmd: string,
+    timeout?: number,
+    options?: ExecCommandOptions
+  ) => Promise<{ stdout: string; stderr: string; exitCode: number; durationMs: number }>;
 
   // 多节点执行
   multiNodeRun:    MultiNodeRun | null;
@@ -251,18 +355,29 @@ function makeWSHandler(
 
     switch (msg.type) {
 
-      case 'status':
+      case 'status': {
+        const nextStatus = msg.status as ConnStatus;
+        const nextStatusMsg = (msg.msg as string) ?? '';
+        const prevSession = get().sessions.find((sess) => sess.id === sessionId);
         set((s) => ({
           sessions: s.sessions.map((sess) =>
             sess.id !== sessionId ? sess : {
               ...sess,
-              status:      (msg.status as ConnStatus),
-              statusMsg:   (msg.msg as string) ?? '',
-              connectedAt: msg.status === 'connected' ? Date.now() : sess.connectedAt,
+              status:      nextStatus,
+              statusMsg:   nextStatusMsg,
+              connectedAt: nextStatus === 'connected' ? Date.now() : sess.connectedAt,
             }
           ),
         }));
+        if (prevSession?.status !== nextStatus) {
+          if (nextStatus === 'connected') {
+            addSessionJournalEvent(sessionId, '连接已建立', nextStatusMsg || 'SSH 会话已连接');
+          } else if (nextStatus === 'error') {
+            addSessionJournalEvent(sessionId, '连接异常', nextStatusMsg || 'SSH 会话连接失败');
+          }
+        }
         break;
+      }
 
       case 'data': {
         const payload = msg.data as string;
@@ -295,14 +410,7 @@ function makeWSHandler(
             const lineListeners = get().termLineListeners[sessionId] || [];
 
             for (const line of lines) {
-              /* eslint-disable no-control-regex */
-              const cleanLine = line
-                .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
-                .replace(/\x1b\][^\x07]*\x07/g, '')
-                .replace(/\x1b[()][0-9A-Za-z]/g, '')
-                .replace(/\x1b[=>]/g, '')
-                .trim();
-              /* eslint-enable no-control-regex */
+              const cleanLine = sanitizeTerminalText(line);
               
               if (lineListeners.length > 0) {
                 lineListeners.forEach(cb => cb(cleanLine));
@@ -340,43 +448,10 @@ function makeWSHandler(
 
         // 处理输出记录 debounce
         if (rt.pendingManualCmd) {
-           if (rt.pendingManualCmd.debounceTimer) clearTimeout(rt.pendingManualCmd.debounceTimer);
-           rt.pendingManualCmd.debounceTimer = setTimeout(() => {
-              const pending = rt.pendingManualCmd;
-              if (!pending) return;
-              const outputBin = rt.terminalBuffer.slice(pending.startIndex);
-              
-              // 转 UTF-8 并去除 ANSI，作为纯文本 output 保存到 Journal
-              const bytes = new Uint8Array(outputBin.length);
-              for (let i = 0; i < outputBin.length; i++) bytes[i] = outputBin.charCodeAt(i);
-              const outputUtf8 = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-              
-              /* eslint-disable no-control-regex */
-              const cleanOutput = outputUtf8
-                .replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '')
-                .replace(/\x1b\][^\x07]*\x07/g, '')
-                .replace(/\x1b[()][0-9A-Za-z]/g, '')
-                .replace(/\x1b[=>]/g, '')
-              /* eslint-enable no-control-regex */
-                .trim();
-              
-              const sess = get().sessions.find(s => s.id === sessionId);
-              if (sess) {
-                const profile = get().profiles.find(p => p.id === sess.profileId);
-                useJournalStore.getState().addEntry({
-                   sessionId,
-                   sessionName: sess.name,
-                   type: 'manual_cmd',
-                   timestamp: pending.startTime,
-                   command: pending.cmd,
-                   output: cleanOutput,
-                   nodeHost: profile?.host,
-                   nodePort: profile?.port,
-                   nodeUser: profile?.username,
-                });
-              }
-              rt.pendingManualCmd = null;
-           }, 500);
+          if (rt.pendingManualCmd.debounceTimer) clearTimeout(rt.pendingManualCmd.debounceTimer);
+          rt.pendingManualCmd.debounceTimer = setTimeout(() => {
+            flushPendingManualCommand(sessionId);
+          }, 500);
         }
         break;
       }
@@ -510,6 +585,7 @@ export const useSSHStore = create<SSHStore>()(
 
       removeSession: (sessionId) => {
         const rt = runtimes.get(sessionId);
+        flushPendingManualCommand(sessionId);
         rt?.ws?.close();
         runtimes.delete(sessionId);
         set((s) => ({
@@ -604,12 +680,15 @@ export const useSSHStore = create<SSHStore>()(
         }
 
         const rt = getRT(sessionId);
+        flushPendingManualCommand(sessionId);
+        rt.disconnectRequested = false;
         rt.ws?.close();
 
         const socket = new WebSocket(PROXY_WS);
         rt.ws = socket;
 
         socket.onopen = () => {
+          rt.disconnectRequested = false;
           socket.send(JSON.stringify({
             type: 'connect',
             sessionId,
@@ -621,16 +700,30 @@ export const useSSHStore = create<SSHStore>()(
         };
 
         socket.onmessage = makeWSHandler(sessionId, set as Parameters<typeof makeWSHandler>[1], get);
-        socket.onclose   = () => set((s) => ({
-          sessions: s.sessions.map((x) =>
-            x.id === sessionId ? { ...x, status: 'disconnected', statusMsg: '' } : x
-          ),
-        }));
-        socket.onerror = () => set((s) => ({
-          sessions: s.sessions.map((x) =>
-            x.id === sessionId ? { ...x, status: 'error', statusMsg: '无法连接到 SSH Proxy' } : x
-          ),
-        }));
+        socket.onclose   = () => {
+          const prevSession = get().sessions.find((x) => x.id === sessionId);
+          const wasRequested = rt.disconnectRequested;
+          rt.disconnectRequested = false;
+          set((s) => ({
+            sessions: s.sessions.map((x) =>
+              x.id === sessionId ? { ...x, status: 'disconnected', statusMsg: '' } : x
+            ),
+          }));
+          if (!wasRequested && prevSession?.status === 'connected') {
+            addSessionJournalEvent(sessionId, '连接已关闭', 'SSH 会话连接已断开');
+          }
+        };
+        socket.onerror = () => {
+          const prevSession = get().sessions.find((x) => x.id === sessionId);
+          set((s) => ({
+            sessions: s.sessions.map((x) =>
+              x.id === sessionId ? { ...x, status: 'error', statusMsg: '无法连接到 SSH Proxy' } : x
+            ),
+          }));
+          if (prevSession?.status !== 'error') {
+            addSessionJournalEvent(sessionId, '连接异常', '无法连接到 SSH Proxy');
+          }
+        };
 
         set((s) => ({
           sessions: s.sessions.map((x) =>
@@ -641,6 +734,8 @@ export const useSSHStore = create<SSHStore>()(
 
       disconnectSession: (sessionId) => {
         const rt = runtimes.get(sessionId);
+        flushPendingManualCommand(sessionId);
+        if (rt) rt.disconnectRequested = true;
         rt?.ws?.send(JSON.stringify({ type: 'disconnect' }));
         rt?.ws?.close();
         if (rt) rt.ws = null;
@@ -649,6 +744,7 @@ export const useSSHStore = create<SSHStore>()(
             x.id === sessionId ? { ...x, status: 'idle', statusMsg: '' } : x
           ),
         }));
+        addSessionJournalEvent(sessionId, '用户主动断开', '会话已主动断开');
       },
 
       sendInputToSession:  (sessionId, data) =>
@@ -659,21 +755,39 @@ export const useSSHStore = create<SSHStore>()(
 
       // ── 单会话独立命令（exec 通道） ───────────────────────────────────────
 
-      execCommandOnSession: (sessionId, cmd, timeout = 30000) =>
+      execCommandOnSession: (sessionId, cmd, timeout = 30000, options) =>
         new Promise((resolve) => {
           const rt  = getRT(sessionId);
           const id  = generateId();
+          const startTime = Date.now();
+          const shouldJournal = options?.journal !== false;
+          let settled = false;
+
+          const settle = (result: { stdout: string; stderr: string; exitCode: number; durationMs: number }) => {
+            if (settled) return;
+            settled = true;
+            if (shouldJournal) {
+              addQuickExecJournalEntry(sessionId, cmd, result, startTime);
+            }
+            resolve(result);
+          };
+
+          if (!rt.ws || rt.ws.readyState !== WebSocket.OPEN) {
+            settle({ stdout: '', stderr: '[DISCONNECTED]', exitCode: -1, durationMs: 0 });
+            return;
+          }
+
           const timer = setTimeout(() => {
             rt.execResolvers.delete(id);
-            resolve({ stdout: '', stderr: '[TIMEOUT]', exitCode: -1, durationMs: timeout });
+            settle({ stdout: '', stderr: '[TIMEOUT]', exitCode: -1, durationMs: Date.now() - startTime });
           }, timeout + 1000);
 
           rt.execResolvers.set(id, (r) => {
             clearTimeout(timer);
-            resolve(r);
+            settle(r);
           });
 
-          rt.ws?.send(JSON.stringify({ type: 'exec', cmd, id, timeout }));
+          rt.ws.send(JSON.stringify({ type: 'exec', cmd, id, timeout }));
         }),
 
       // ── 多节点执行 ────────────────────────────────────────────────────────

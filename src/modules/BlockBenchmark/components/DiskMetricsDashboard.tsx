@@ -9,13 +9,15 @@ import IOMonitorGrid from './IOMonitorGrid';
 import IOMonitorDetail from './IOMonitorDetail';
 
 const { Title, Text } = Typography;
+const IOSTAT_POLL_INTERVAL_MS = 3000;
+const IOSTAT_TIMEOUT_MS = 5000;
 
 // Parse a single line of `iostat -xd` output for a given device basename (e.g. "sdb")
 // Column order (iostat -xd): Device r/s rkB/s rrqm/s %rrqm r_await rareq-sz w/s wkB/s wrqm/s %wrqm w_await wareq-sz ... %util
 function parseIostatLine(line: string, deviceBase: string): IostatMetrics | null {
   const trimmed = line.trim();
-  if (!trimmed.startsWith(deviceBase)) return null;
   const parts = trimmed.split(/\s+/);
+  if (parts[0] !== deviceBase) return null;
   // Minimum columns check
   if (parts.length < 22) return null;
   try {
@@ -40,14 +42,34 @@ function parseIostatLine(line: string, deviceBase: string): IostatMetrics | null
   }
 }
 
+function parseIostatOutput(output: string): Record<string, IostatMetrics> {
+  const metricsByDevice: Record<string, IostatMetrics> = {};
+
+  output.replace(/\r/g, '').split('\n').forEach((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('Linux') || trimmed.startsWith('avg-cpu') || trimmed.startsWith('Device')) {
+      return;
+    }
+
+    const deviceBase = trimmed.split(/\s+/, 1)[0];
+    const parsed = parseIostatLine(trimmed, deviceBase);
+    if (parsed) {
+      metricsByDevice[deviceBase] = parsed;
+    }
+  });
+
+  return metricsByDevice;
+}
+
 export const DiskMetricsDashboard: React.FC = () => {
   const { discoveredNodes } = useDiskDiscovery();
   const { ioSnapshots, updateIOSnapshot, clearIOSnapshots, tasks } = useBenchmarkStore();
-  const { subscribeToSessionLines, sendInputToSession, sessions } = useSSHStore();
+  const { execCommandOnSession, sessions } = useSSHStore();
 
   const [selectedDiskKey, setSelectedDiskKey] = useState<string | null>(null);
   const [isMonitoring, setIsMonitoring] = useState(false);
-  const unsubRef = useRef<(() => void)[]>([]);
+  const pollTimersRef = useRef<Record<string, ReturnType<typeof window.setInterval>>>({});
+  const pollInFlightRef = useRef<Record<string, boolean>>({});
 
   // Flat list of all discovered disks across all sessions
   const flatDisks = useMemo(() => {
@@ -69,9 +91,7 @@ export const DiskMetricsDashboard: React.FC = () => {
     const map: Record<string, { model: string; taskId: string }> = {};
     for (const task of tasks) {
       if (task.status === 'running' || task.status === 'RUNNING') {
-        // Try to infer disk from task params if available; fallback to agent_id mapping
-        // The key format is sessionId::device
-        const sessionId = task.agent_id;
+        const sessionId = task.session_id ?? task.agent_id;
         // Best-effort: we mark all disks on that session with the active model
         // A more precise mapping would require device in task payload
         const disksForSession = flatDisks.filter((d) => d.sessionId === sessionId);
@@ -109,6 +129,39 @@ export const DiskMetricsDashboard: React.FC = () => {
     }
   }, [flatDisks, selectedDiskKey]);
 
+  const clearMonitoringTimers = useCallback(() => {
+    Object.values(pollTimersRef.current).forEach((timer) => window.clearInterval(timer));
+    pollTimersRef.current = {};
+    pollInFlightRef.current = {};
+  }, []);
+
+  const pollSessionMetrics = useCallback(async (sessionId: string, diskNames: string[]) => {
+    if (pollInFlightRef.current[sessionId]) return;
+    const session = sessions.find((item) => item.id === sessionId);
+    if (session?.status !== 'connected') return;
+
+    pollInFlightRef.current[sessionId] = true;
+    try {
+      const res = await execCommandOnSession(
+        sessionId,
+        'LC_ALL=C iostat -xd 1 2',
+        IOSTAT_TIMEOUT_MS,
+        { journal: false }
+      );
+      if (res.exitCode !== 0) return;
+
+      const metricsByDevice = parseIostatOutput(res.stdout);
+      diskNames.forEach((diskName) => {
+        const deviceBase = diskName.replace('/dev/', '');
+        const metrics = metricsByDevice[deviceBase];
+        if (!metrics) return;
+        updateIOSnapshot(`${sessionId}::${diskName}`, metrics);
+      });
+    } finally {
+      pollInFlightRef.current[sessionId] = false;
+    }
+  }, [execCommandOnSession, sessions, updateIOSnapshot]);
+
   // Start monitoring all discovered disks across all sessions
   const startMonitoring = useCallback(() => {
     if (flatDisks.length === 0) {
@@ -116,9 +169,7 @@ export const DiskMetricsDashboard: React.FC = () => {
       return;
     }
 
-    // Clear previous unsubs
-    unsubRef.current.forEach((unsub) => unsub());
-    unsubRef.current = [];
+    clearMonitoringTimers();
 
     const sessionDiskMap = new Map<string, string[]>();
     for (const d of flatDisks) {
@@ -128,49 +179,28 @@ export const DiskMetricsDashboard: React.FC = () => {
     }
 
     for (const [sessionId, diskNames] of sessionDiskMap.entries()) {
-      const deviceBases = diskNames.map((n) => n.replace('/dev/', ''));
-      // Start a single iostat for all devices on this session
-      const cmd = `iostat -xd 1 ${deviceBases.join(' ')}\n`;
-      sendInputToSession(sessionId, cmd);
-
-      for (const diskName of diskNames) {
-        const deviceBase = diskName.replace('/dev/', '');
-        const key = `${sessionId}::${diskName}`;
-
-        const unsub = subscribeToSessionLines(sessionId, (line: string) => {
-          const parsed = parseIostatLine(line, deviceBase);
-          if (!parsed) return;
-          updateIOSnapshot(key, parsed);
-        });
-
-        unsubRef.current.push(unsub);
-      }
+      void pollSessionMetrics(sessionId, diskNames);
+      pollTimersRef.current[sessionId] = window.setInterval(() => {
+        void pollSessionMetrics(sessionId, diskNames);
+      }, IOSTAT_POLL_INTERVAL_MS);
     }
 
     setIsMonitoring(true);
     message.success(`已启动 ${flatDisks.length} 个磁盘的 iostat 监控`);
-  }, [flatDisks, subscribeToSessionLines, sendInputToSession, updateIOSnapshot]);
+  }, [clearMonitoringTimers, flatDisks, pollSessionMetrics]);
 
-  // Stop all iostat processes
   const stopMonitoring = useCallback(() => {
-    const sessionIds = new Set(flatDisks.map((d) => d.sessionId));
-    for (const sessionId of sessionIds) {
-      sendInputToSession(sessionId, '\x03');
-    }
-
-    unsubRef.current.forEach((unsub) => unsub());
-    unsubRef.current = [];
+    clearMonitoringTimers();
     setIsMonitoring(false);
     message.info('已停止所有 iostat 监控。');
-  }, [flatDisks, sendInputToSession]);
+  }, [clearMonitoringTimers]);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      unsubRef.current.forEach((unsub) => unsub());
-      unsubRef.current = [];
+      clearMonitoringTimers();
     };
-  }, []);
+  }, [clearMonitoringTimers]);
 
   if (flatDisks.length === 0) {
     return <Empty description="暂无扫描到的数据盘，请先在「矩阵调度」页面扫描拓扑" />;

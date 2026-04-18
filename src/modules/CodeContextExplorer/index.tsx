@@ -26,6 +26,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import ResizableOutput from '../../components/shared/ResizableOutput';
 import { useLocalStorage } from '../../hooks/useLocalStorage';
 import { useGlobalStore } from '../../store/globalStore';
+import { extractFunctionCandidates, type FunctionCandidateToken } from '../../utils/sourceLookupHints';
 import { highlightCLines } from './cHighlight';
 
 const { Title, Text, Paragraph } = Typography;
@@ -44,23 +45,6 @@ const SPLIT_HANDLE_WIDTH = 18;
 const MIN_LEFT_PANEL_WIDTH = 420;
 const MIN_RIGHT_PANEL_WIDTH = 560;
 const STACK_LAYOUT_BREAKPOINT = 1120;
-
-const FUNCTION_CANDIDATE_BLACKLIST = new Set([
-  'and',
-  'catch',
-  'else',
-  'for',
-  'func',
-  'function',
-  'if',
-  'map',
-  'new',
-  'return',
-  'switch',
-  'throw',
-  'try',
-  'while',
-]);
 
 const SYMBOL_KIND_LABEL: Record<string, string> = {
   function: '函数',
@@ -136,13 +120,6 @@ interface SessionOption {
   username: string;
 }
 
-interface FunctionCandidateToken {
-  token: string;
-  query: string;
-  hits: number;
-  sampleLine: string;
-}
-
 interface CommandRunRecord {
   id: string;
   ts: number;
@@ -159,89 +136,6 @@ interface CommandRunRecord {
 
 function makeClientId(prefix = 'ctx') {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function normalizeFunctionQuery(rawToken: string) {
-  const cleaned = String(rawToken || '')
-    .trim()
-    .replace(/^[`'"[\](){}]+|[`'"[\](){}:,;]+$/g, '');
-  if (!cleaned) return '';
-
-  const segments = cleaned.split(/::|->|\./g).filter(Boolean);
-  return (segments[segments.length - 1] || cleaned).trim();
-}
-
-function isLikelyFunctionToken(rawToken: string) {
-  const normalized = normalizeFunctionQuery(rawToken);
-  if (normalized.length < 3) return false;
-  if (FUNCTION_CANDIDATE_BLACKLIST.has(normalized.toLowerCase())) return false;
-  if (/^\d+$/.test(normalized)) return false;
-
-  return (
-    rawToken.includes('::') ||
-    rawToken.includes('->') ||
-    rawToken.includes('.') ||
-    /[A-Z]/.test(normalized) ||
-    normalized.includes('_')
-  );
-}
-
-function extractFunctionCandidates(text: string) {
-  const exactPatterns = [
-    /\[([A-Za-z_][A-Za-z0-9_:]*):\d+\]/g,
-  ];
-
-  const fuzzyPatterns = [
-    /\b([A-Za-z_][A-Za-z0-9_$]*(?:(?:::|->|\.)[A-Za-z_][A-Za-z0-9_$]+)+)\b/g,
-    /\b([A-Za-z_][A-Za-z0-9_$]*)\s*(?=\()/g,
-    /\b([a-z]+(?:[A-Z][A-Za-z0-9_$]*)+)\b/g,
-    /\b([a-z]+_[a-z0-9_]+)\b/g,
-  ];
-
-  const candidateMap = new Map<string, FunctionCandidateToken>();
-  const lines = String(text || '')
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .slice(0, 500);
-
-  const processToken = (match: RegExpMatchArray, line: string, isExact: boolean) => {
-    const token = String(match[1] || '').trim();
-    if (!token) return;
-
-    if (!isExact && !isLikelyFunctionToken(token)) return;
-
-    const query = normalizeFunctionQuery(token);
-    if (!query || query.length < 2 || FUNCTION_CANDIDATE_BLACKLIST.has(query.toLowerCase())) return;
-
-    const existing = candidateMap.get(token);
-    if (existing) {
-      existing.hits += 1;
-    } else {
-      candidateMap.set(token, {
-        token,
-        query,
-        hits: 1,
-        sampleLine: line.slice(0, 220),
-      });
-    }
-  };
-
-  lines.forEach((line) => {
-    exactPatterns.forEach((pattern) => {
-      for (const match of line.matchAll(pattern)) processToken(match, line, true);
-    });
-    fuzzyPatterns.forEach((pattern) => {
-      for (const match of line.matchAll(pattern)) processToken(match, line, false);
-    });
-  });
-
-  return Array.from(candidateMap.values())
-    .sort((left, right) =>
-      right.hits - left.hits ||
-      left.query.localeCompare(right.query)
-    )
-    .slice(0, 24);
 }
 
 function clampPaneRatio(rawRatio: number, containerWidth: number) {
@@ -459,9 +353,9 @@ const CodeContextExplorer: React.FC = () => {
       setAfterContext(DEFAULT_AFTER_CONTEXT);
       setKnownFunctions(new Set());
       if (typeof nextContext.symbolCount === 'number') {
-        messageApi.success(`已绑定代码版本，索引符号 ${nextContext.symbolCount} 个`);
+        messageApi.success(`已绑定 C 代码版本，索引符号 ${nextContext.symbolCount} 个`);
       } else {
-        messageApi.success('已绑定代码版本，大仓库将按需检索符号定义');
+        messageApi.success('已绑定 C 代码版本，大仓库将按需检索符号定义');
       }
     } catch {
       messageApi.error('代码上下文绑定失败');
@@ -497,7 +391,7 @@ const CodeContextExplorer: React.FC = () => {
   async function searchFunctions(nextQuery?: string) {
     const effectiveQuery = String(nextQuery ?? query).trim();
     if (!activeContext) {
-      messageApi.warning('请先绑定 repo / branch / commit');
+      messageApi.warning('请先绑定 repo / branch / commit，对 C 代码建立上下文');
       return;
     }
 
@@ -809,14 +703,14 @@ const CodeContextExplorer: React.FC = () => {
       {contextHolder}
 
       <div style={{ marginBottom: 20 }}>
-        <Title level={2} style={{ margin: 0 }}>源码上下文</Title>
+        <Title level={2} style={{ margin: 0 }}>C 符号/源码定位</Title>
         <Paragraph type="secondary" style={{ margin: '8px 0 0' }}>
-          多代码库符号检索、调用链可视化与节点命令联动。绑定 repo / branch / commit 后，左侧执行命令提取符号，右侧渲染源码并支持点击跳转。
+          面向 C 代码库的符号检索、调用链可视化与节点命令联动。绑定 repo / branch / commit 后，左侧执行命令提取 C 符号，右侧渲染源码并支持点击跳转。
         </Paragraph>
       </div>
 
       <Card
-        title="代码版本绑定"
+        title="C 代码版本绑定"
         style={{ background: cardBg, border: `1px solid ${borderColor}`, marginBottom: 16 }}
       >
         <div
@@ -862,7 +756,7 @@ const CodeContextExplorer: React.FC = () => {
               onClick={() => void openContext()}
               style={{ width: '100%' }}
             >
-              绑定并准备代码
+              绑定并准备 C 代码
             </Button>
           </div>
         </div>
@@ -911,7 +805,7 @@ const CodeContextExplorer: React.FC = () => {
       >
         <div style={{ minWidth: 0, paddingRight: leftPaneWidth ? 8 : 0 }}>
           <Space direction="vertical" size={16} style={{ width: '100%' }}>
-          <Card title="节点执行与符号提取" style={{ background: cardBg, border: `1px solid ${borderColor}` }}>
+          <Card title="节点执行与 C 符号提取" style={{ background: cardBg, border: `1px solid ${borderColor}` }}>
             <Space direction="vertical" size={12} style={{ width: '100%' }}>
               <div
                 style={{
@@ -976,7 +870,7 @@ const CodeContextExplorer: React.FC = () => {
                 value={commandText}
                 onChange={(event) => setCommandText(event.target.value)}
                 autoSize={{ minRows: 3, maxRows: 6 }}
-                placeholder="输入排障命令，例如 tail -200 /path/to/log | grep -E 'panic|Exception|CreateOrder'"
+                placeholder="输入排障命令，例如 tail -200 /path/to/log | grep -E 'panic|BUG|submit_bio|nvme_reset_work'"
               />
 
               <Space wrap>
@@ -994,7 +888,7 @@ const CodeContextExplorer: React.FC = () => {
               </Space>
 
               {commandRuns.length === 0 ? (
-                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="节点执行结果会出现在这里，并自动抽取函数候选" />
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="节点执行结果会出现在这里，并自动抽取 C 函数候选" />
               ) : (
                 <List
                   size="small"
@@ -1017,10 +911,10 @@ const CodeContextExplorer: React.FC = () => {
                           <Text code>{item.command}</Text>
 
                           <div>
-                            <Text type="secondary">函数候选</Text>
+                            <Text type="secondary">C 函数候选</Text>
                             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
                               {item.functionCandidates.length === 0 ? (
-                                <Text type="secondary">未从本次输出里识别到明显函数名</Text>
+                                <Text type="secondary">未从本次输出里识别到明显 C 函数名</Text>
                               ) : (
                                 item.functionCandidates.map((candidate) => (
                                   <Tooltip key={`${item.id}-${candidate.token}`} title={candidate.sampleLine}>
@@ -1067,10 +961,10 @@ const CodeContextExplorer: React.FC = () => {
             </Space>
           </Card>
 
-          <Card title="符号检索" style={{ background: cardBg, border: `1px solid ${borderColor}` }}>
+          <Card title="C 符号检索" style={{ background: cardBg, border: `1px solid ${borderColor}` }}>
             <Space direction="vertical" size={12} style={{ width: '100%' }}>
               <Search
-                placeholder="可手动补充符号名搜索，例如 CreateOrder 或 struct page"
+                placeholder="可手动补充 C 函数/类型名搜索，例如 submit_bio 或 struct request_queue"
                 value={query}
                 enterButton={compactSearchButton ? <SearchOutlined /> : <><SearchOutlined /> 搜索</>}
                 onChange={(event) => setQuery(event.target.value)}
@@ -1080,9 +974,9 @@ const CodeContextExplorer: React.FC = () => {
               />
 
               {!activeContext ? (
-                <Alert type="warning" showIcon message="请先绑定代码版本，再执行节点命令或搜索符号" />
+                <Alert type="warning" showIcon message="请先绑定 C 代码版本，再执行节点命令或搜索符号" />
               ) : results.length === 0 ? (
-                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="点击左侧抽取出的函数候选后，匹配结果会列在这里" />
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="点击左侧抽取出的 C 函数候选后，匹配结果会列在这里" />
               ) : (
                 <List
                   size="small"

@@ -1,7 +1,7 @@
 import { Button, Checkbox, Collapse, Input, Progress, Space, Tag, Typography, message } from 'antd';
 import React, { useMemo, useState } from 'react';
 import { useSSHStore } from '../../SSHManager/store/sshStore';
-import type { BusinessExecution, BusinessTemplate } from '../types';
+import type { BusinessExecution, BusinessTemplate, StepResult } from '../types';
 import { replaceTemplateVars, validateExecutionVars, makeExecution } from '../engine/businessEngine';
 import { useBenchmarkStore } from '../store/benchmarkStore';
 
@@ -13,8 +13,14 @@ interface Props {
 }
 
 const BusinessExecutionPanel: React.FC<Props> = ({ template }) => {
-  const { sessions } = useSSHStore();
-  const { addBusinessExecution, updateBusinessExecution, addTracedTask } = useBenchmarkStore();
+  const { sessions, profiles } = useSSHStore();
+  const {
+    addBusinessExecution,
+    updateBusinessExecution,
+    addTracedTask,
+    updateTracedTask,
+    upsertBusinessExecutionStepResult,
+  } = useBenchmarkStore();
 
   const connectedSessions = sessions.filter((s) => s.status === 'connected');
   const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
@@ -53,11 +59,12 @@ const BusinessExecutionPanel: React.FC<Props> = ({ template }) => {
     addBusinessExecution(exec);
     setCurrentExecution(exec);
     setRunning(true);
+    const tracedTaskIds = new Map<string, string>();
 
     // Register traced tasks for each node
     selectedNodeIds.forEach((nodeId) => {
       const sess = connectedSessions.find((s) => s.id === nodeId);
-      addTracedTask({
+      const tracedTaskId = addTracedTask({
         name: `${template.name} @ ${sess?.name ?? nodeId}`,
         nodeId,
         nodeName: sess?.name ?? nodeId,
@@ -66,118 +73,136 @@ const BusinessExecutionPanel: React.FC<Props> = ({ template }) => {
         logPaths: [],
         startedAt: Date.now(),
       });
+      tracedTaskIds.set(nodeId, tracedTaskId);
     });
 
     const { execCommandOnSession } = useSSHStore.getState();
     const sharedVars: Record<string, string> = {};
+    const nonBlockingBatches: Array<Promise<PromiseSettledResult<void>[]>> = [];
 
-    for (const step of template.steps) {
-      const targetNodes = step.target === 'all' ? selectedNodeIds : step.target;
-      const validTargets = targetNodes.filter((id) => selectedNodeIds.includes(id));
+    try {
+      for (const step of template.steps) {
+        const targetNodes = step.target === 'all' ? selectedNodeIds : step.target;
+        const validTargets = targetNodes.filter((id) => selectedNodeIds.includes(id));
 
-      updateBusinessExecution(exec.id, { status: 'running' });
+        updateBusinessExecution(exec.id, { status: 'running' });
 
-      const stepPromises = validTargets.map(async (nodeId) => {
-        const session = connectedSessions.find((s) => s.id === nodeId);
-        if (!session) return;
+        const stepPromises = validTargets.map(async (nodeId) => {
+          const session = connectedSessions.find((s) => s.id === nodeId);
+          if (!session) return;
+          const profile = profiles.find((item) => item.id === session.profileId);
 
-        const nodeVars = perNodeVars[nodeId] ?? {};
-        const resolvedCmd = replaceTemplateVars(
-          step.cmd,
-          globalVars,
-          nodeVars,
-          sharedVars,
-          { name: session.name, ip: '' }
-        );
+          const nodeVars = perNodeVars[nodeId] ?? {};
+          const resolvedCmd = replaceTemplateVars(
+            step.cmd,
+            globalVars,
+            nodeVars,
+            sharedVars,
+            { name: session.name, ip: profile?.host ?? '' }
+          );
 
-        const stepResult = {
-          stepId: step.id,
-          stepName: step.name,
-          stdout: '',
-          stderr: '',
-          exitCode: 0,
-          durationMs: 0,
-          status: 'running' as const,
-        };
+          const stepResult: StepResult = {
+            stepId: step.id,
+            stepName: step.name,
+            stdout: '',
+            stderr: '',
+            exitCode: 0,
+            durationMs: 0,
+            status: 'running',
+          };
 
-        // Update to running
-        updateBusinessExecution(exec.id, {
-          stepResults: {
-            ...exec.stepResults,
-            [nodeId]: [...(exec.stepResults[nodeId] ?? []), stepResult],
-          },
+          upsertBusinessExecutionStepResult(exec.id, nodeId, stepResult);
+
+          const start = Date.now();
+          try {
+            const res = await execCommandOnSession(nodeId, resolvedCmd, step.timeout);
+            const durationMs = Date.now() - start;
+            let capturedVarUpdate: Record<string, string> | undefined;
+
+            if (step.captureVar) {
+              const match = res.stdout.match(new RegExp(step.captureVar.pattern));
+              if (match && match[1]) {
+                sharedVars[step.captureVar.name] = match[1];
+                capturedVarUpdate = { [step.captureVar.name]: match[1] };
+              }
+            }
+
+            const finalResult: StepResult = {
+              ...stepResult,
+              stdout: res.stdout,
+              stderr: res.stderr,
+              exitCode: res.exitCode,
+              durationMs,
+              status: res.exitCode === 0 ? 'done' : 'fail',
+              capturedVar: step.captureVar && sharedVars[step.captureVar.name]
+                ? { name: step.captureVar.name, value: sharedVars[step.captureVar.name] }
+                : undefined,
+            };
+
+            upsertBusinessExecutionStepResult(exec.id, nodeId, finalResult, capturedVarUpdate);
+          } catch (e: unknown) {
+            const finalResult: StepResult = {
+              ...stepResult,
+              stderr: e instanceof Error ? e.message : String(e),
+              exitCode: -1,
+              durationMs: Date.now() - start,
+              status: 'fail',
+            };
+            upsertBusinessExecutionStepResult(exec.id, nodeId, finalResult);
+          }
         });
 
-        const start = Date.now();
-        try {
-          const res = await execCommandOnSession(nodeId, resolvedCmd, step.timeout);
-          const durationMs = Date.now() - start;
-
-          if (step.captureVar) {
-            const match = res.stdout.match(new RegExp(step.captureVar.pattern));
-            if (match && match[1]) {
-              sharedVars[step.captureVar.name] = match[1];
-            }
-          }
-
-          const finalResult = {
-            ...stepResult,
-            stdout: res.stdout,
-            stderr: res.stderr,
-            exitCode: res.exitCode,
-            durationMs,
-            status: res.exitCode === 0 ? ('done' as const) : ('fail' as const),
-            capturedVar: step.captureVar && sharedVars[step.captureVar.name]
-              ? { name: step.captureVar.name, value: sharedVars[step.captureVar.name] }
-              : undefined,
-          };
-
-          updateBusinessExecution(exec.id, {
-            stepResults: {
-              ...exec.stepResults,
-              [nodeId]: [...(exec.stepResults[nodeId] ?? []).slice(0, -1), finalResult],
-            },
-            sharedVars: { ...sharedVars },
-          });
-        } catch (e: unknown) {
-          const finalResult = {
-            ...stepResult,
-            stderr: e instanceof Error ? e.message : String(e),
-            exitCode: -1,
-            durationMs: Date.now() - start,
-            status: 'fail' as const,
-          };
-          updateBusinessExecution(exec.id, {
-            stepResults: {
-              ...exec.stepResults,
-              [nodeId]: [...(exec.stepResults[nodeId] ?? []).slice(0, -1), finalResult],
-            },
-          });
+        const batch = Promise.allSettled(stepPromises);
+        if (step.blocking) {
+          await batch;
+        } else {
+          nonBlockingBatches.push(batch);
         }
+      }
+
+      if (nonBlockingBatches.length > 0) {
+        await Promise.allSettled(nonBlockingBatches);
+      }
+
+      const finalExecution =
+        useBenchmarkStore.getState().businessExecutions.find((item) => item.id === exec.id) ?? exec;
+      const allResults = Object.values(finalExecution.stepResults).flat();
+      const hasFail = allResults.some((result) => result.status === 'fail');
+      const hasDone = allResults.some((result) => result.status === 'done');
+      const finalStatus: BusinessExecution['status'] = hasFail
+        ? hasDone
+          ? 'partial_fail'
+          : 'fail'
+        : 'done';
+
+      updateBusinessExecution(exec.id, { status: finalStatus, doneAt: Date.now() });
+
+      selectedNodeIds.forEach((nodeId) => {
+        const tracedTaskId = tracedTaskIds.get(nodeId);
+        if (!tracedTaskId) return;
+
+        const nodeResults = finalExecution.stepResults[nodeId] ?? [];
+        updateTracedTask(tracedTaskId, {
+          status: nodeResults.some((result) => result.status === 'fail') ? 'failed' : 'completed',
+        });
       });
 
-      if (step.blocking) {
-        await Promise.allSettled(stepPromises);
+      if (finalStatus === 'done') {
+        message.success('业务执行完成');
+      } else if (finalStatus === 'partial_fail') {
+        message.warning('业务执行完成，但存在失败步骤');
       } else {
-        Promise.allSettled(stepPromises);
+        message.error('业务执行失败');
       }
+    } catch (e: unknown) {
+      updateBusinessExecution(exec.id, { status: 'fail', doneAt: Date.now() });
+      tracedTaskIds.forEach((taskId) => {
+        updateTracedTask(taskId, { status: 'failed' });
+      });
+      message.error(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRunning(false);
     }
-
-    // Determine final status
-    const allResults = Object.values(
-      useBenchmarkStore.getState().businessExecutions.find((e) => e.id === exec.id)?.stepResults ?? {}
-    ).flat();
-    const hasFail = allResults.some((r) => r.status === 'fail');
-    const hasDone = allResults.some((r) => r.status === 'done');
-    const finalStatus: BusinessExecution['status'] = hasFail
-      ? hasDone
-        ? 'partial_fail'
-        : 'fail'
-      : 'done';
-
-    updateBusinessExecution(exec.id, { status: finalStatus, doneAt: Date.now() });
-    setRunning(false);
-    message.success(`业务执行完成: ${finalStatus}`);
   };
 
   const liveExec = useBenchmarkStore(

@@ -15,9 +15,12 @@ import {
   message,
 } from 'antd';
 import {
+  CopyOutlined,
+  CodeOutlined,
   DeleteOutlined,
   HistoryOutlined,
   PlusOutlined,
+  PushpinOutlined,
   RadarChartOutlined,
   ReloadOutlined,
   RobotOutlined,
@@ -25,15 +28,33 @@ import {
   SearchOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import ResizableOutput from '../../components/shared/ResizableOutput';
+import { useClipboard } from '../../hooks/useClipboard';
+import { useLocalStorage } from '../../hooks/useLocalStorage';
 import { useGlobalStore } from '../../store/globalStore';
+import { useCommandStore } from '../CommandBuilder/store/commandStore';
+import {
+  extractCLookupHints,
+  type FunctionCandidateToken,
+  type SourceLocationCandidate,
+} from '../../utils/sourceLookupHints';
 import { generateId } from '../../utils';
+import {
+  buildCollectionStepFromLibraryItem,
+  buildCommandTemplateFromLibraryItem,
+  buildEvidenceMarkdown,
+  getScenarioCommandLibraryItems,
+  SCENARIO_META,
+  STEP_PHASE_META,
+} from './scenarioLibrary';
+import { useEvidenceStore } from './store/evidenceStore';
 import {
   type DiagnosticAnalysisRule,
   type DiagnosticBusinessAction,
   type DiagnosticCollectionStep,
   type DiagnosticPlaybook,
+  type DiagnosticScenarioType,
   useDiagnosticStore,
 } from './store/diagnosticStore';
 
@@ -78,6 +99,7 @@ interface DiagnosticFinding {
   severity: 'info' | 'warning' | 'critical';
   summary: string;
   evidence: string;
+  sourceStepId?: string;
   sourceStepName: string;
 }
 
@@ -90,11 +112,25 @@ interface DiagnosticReport {
   notes?: string;
 }
 
+interface DiagnosticContextSnapshot {
+  impactScope: string;
+  triggerAction: string;
+  recentChange: string;
+  expectedBehavior: string;
+  observationWindow: string;
+  logKeywords: string;
+}
+
 interface DiagnosticRunRecord {
   id: string;
   title: string;
   symptom: string;
   notes?: string;
+  scenarioType?: DiagnosticScenarioType;
+  objective?: string;
+  successCriteria?: string;
+  tags?: string[];
+  contextSnapshot?: Partial<DiagnosticContextSnapshot>;
   status: string;
   startedAt: number;
   finishedAt?: number;
@@ -110,6 +146,11 @@ interface DiagnosticRunRecord {
     stderr: string;
     exitCode: number;
     durationMs: number;
+    startedAt?: number;
+    finishedAt?: number;
+    phase?: string;
+    expectedSignal?: string;
+    continueOnFailure?: boolean;
     status: string;
     conclusion?: string;
   }>;
@@ -125,6 +166,8 @@ interface DiagnosticRunRecord {
     stderr: string;
     exitCode: number;
     durationMs: number;
+    startedAt?: number;
+    finishedAt?: number;
     status: string;
   }>;
   findings?: DiagnosticFinding[];
@@ -142,6 +185,115 @@ interface CommandPolicySnapshot {
     id: string;
     reason: string;
   }>;
+}
+
+interface DerivedAnomaly {
+  sourceType: 'finding' | 'collection_step' | 'business_action' | 'session_log';
+  sourceId?: string;
+  title: string;
+  severity: 'info' | 'warning' | 'critical';
+  summary: string;
+  evidence: string;
+  lookupText?: string;
+  command?: string;
+  sessionLabel?: string;
+  tags: string[];
+}
+
+interface TimelineEvent {
+  id: string;
+  ts: number;
+  title: string;
+  source: 'run' | 'business_action' | 'collection_step' | 'session_log';
+  status: string;
+  severity: 'info' | 'warning' | 'critical';
+  detail: string;
+  command?: string;
+  durationMs?: number;
+}
+
+interface EffectiveErrorLog {
+  id: string;
+  source: 'session_log' | 'collection_step' | 'business_action' | 'finding';
+  title: string;
+  reason: string;
+  excerpt: string;
+  lookupText?: string;
+  ts?: number;
+  severity: 'info' | 'warning' | 'critical';
+  command?: string;
+  tags: string[];
+}
+
+interface CodeContextBindingDraft {
+  repo: string;
+  branch: string;
+  commit: string;
+}
+
+interface CodeContextBindingResult {
+  contextId: string;
+  repo: string;
+  repoDisplayName: string;
+  branch: string;
+  branchRef: string;
+  commit: string;
+  worktreePath: string;
+  symbolCount: number | null;
+  searchStrategy?: 'on-demand' | 'indexed';
+}
+
+interface SymbolCandidate {
+  id: string;
+  name: string;
+  path: string;
+  line: number;
+  language: string;
+  kind?: string;
+  signature: string;
+  matchType: 'exact' | 'fuzzy';
+  score: number;
+}
+
+interface RenderedSourceLine {
+  lineNumber: number;
+  text: string;
+  inFunction: boolean;
+  isDeclaration: boolean;
+  isAnchor?: boolean;
+}
+
+interface RenderedSourcePayload {
+  mode: 'symbol' | 'location';
+  path: string;
+  line: number;
+  matchedBy?: string;
+  symbol?: SymbolCandidate | null;
+  signature: string;
+  functionStartLine?: number | null;
+  functionEndLine?: number | null;
+  snippetStartLine: number;
+  snippetEndLine: number;
+  beforeContext: number;
+  afterContext: number;
+  totalLines: number;
+  lines: RenderedSourceLine[];
+}
+
+interface SourceLookupRequest {
+  title: string;
+  summary: string;
+  text: string;
+  sourceType: string;
+  command?: string;
+}
+
+interface SourcePreviewState {
+  request: SourceLookupRequest;
+  payload: RenderedSourcePayload;
+  lookupMode: 'location' | 'function';
+  locations: SourceLocationCandidate[];
+  functions: FunctionCandidateToken[];
 }
 
 function normalizeCommandPolicySnapshot(snapshot: Partial<CommandPolicySnapshot> | null | undefined): CommandPolicySnapshot {
@@ -175,6 +327,7 @@ const statusColorMap: Record<string, string> = {
   attention: 'warning',
   failed: 'error',
   done: 'success',
+  skipped: 'default',
 };
 
 const severityColorMap: Record<string, string> = {
@@ -183,15 +336,459 @@ const severityColorMap: Record<string, string> = {
   critical: 'red',
 };
 
+const RISK_SIGNAL_RE = /timeout|timed out|超时|refused|拒绝|panic|fatal|exception|异常|failed|失败|error|reset|segfault|readonly|read-only|unreachable|i\/o|oom/i;
+const SOURCE_PREVIEW_BEFORE_CONTEXT = 12;
+const SOURCE_PREVIEW_AFTER_CONTEXT = 28;
+const DEFAULT_CONTEXT_SNAPSHOT: DiagnosticContextSnapshot = {
+  impactScope: '',
+  triggerAction: '',
+  recentChange: '',
+  expectedBehavior: '',
+  observationWindow: '',
+  logKeywords: '',
+};
+
+function clipText(value: string | undefined, limit = 240) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  return text.length > limit ? `${text.slice(0, limit)}...` : text;
+}
+
+function toTagList(rawValue: string) {
+  return Array.from(
+    new Set(
+      String(rawValue || '')
+        .split(/[,\n，]+/g)
+        .map((item) => item.trim())
+        .filter(Boolean)
+    )
+  );
+}
+
+function formatTagInput(tags?: string[]) {
+  return Array.isArray(tags) ? tags.join(', ') : '';
+}
+
+function normalizeContextSnapshot(snapshot?: Partial<DiagnosticContextSnapshot>): DiagnosticContextSnapshot {
+  return {
+    impactScope: String(snapshot?.impactScope || ''),
+    triggerAction: String(snapshot?.triggerAction || ''),
+    recentChange: String(snapshot?.recentChange || ''),
+    expectedBehavior: String(snapshot?.expectedBehavior || ''),
+    observationWindow: String(snapshot?.observationWindow || ''),
+    logKeywords: String(snapshot?.logKeywords || ''),
+  };
+}
+
+function buildContextSummary(context: DiagnosticContextSnapshot) {
+  return [
+    context.impactScope ? `影响范围: ${context.impactScope}` : '',
+    context.triggerAction ? `触发动作: ${context.triggerAction}` : '',
+    context.recentChange ? `最近变更: ${context.recentChange}` : '',
+    context.expectedBehavior ? `期望行为: ${context.expectedBehavior}` : '',
+    context.observationWindow ? `观察窗口: ${context.observationWindow}` : '',
+    context.logKeywords ? `日志关键词: ${context.logKeywords}` : '',
+  ].filter(Boolean).join('；');
+}
+
+function toKeywordList(rawValue: string) {
+  return Array.from(
+    new Set(
+      String(rawValue || '')
+        .split(/[\s,\n，]+/g)
+        .map((item) => item.trim().toLowerCase())
+        .filter((item) => item.length >= 2)
+    )
+  );
+}
+
+function inferSeverityFromText(text: string, fallback: EffectiveErrorLog['severity'] = 'warning') {
+  if (/panic|fatal|segfault|oom|readonly|read-only|i\/o error|connection refused|timed out|timeout|超时|拒绝/i.test(text)) {
+    return 'critical';
+  }
+  if (/error|failed|failure|warning|异常|失败|reset|unreachable/i.test(text)) {
+    return 'warning';
+  }
+  return fallback;
+}
+
+function buildFocusedExcerpt(text: string, focusKeywords: string[], maxLines = 3) {
+  const lines = String(text || '')
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter(Boolean);
+
+  if (lines.length === 0) return '';
+
+  const loweredKeywords = focusKeywords.map((item) => item.toLowerCase());
+  const matchIndex = lines.findIndex((line) => {
+    const lowered = line.toLowerCase();
+    return loweredKeywords.some((keyword) => lowered.includes(keyword)) || RISK_SIGNAL_RE.test(line);
+  });
+
+  if (matchIndex < 0) {
+    return clipText(lines.slice(0, maxLines).join('\n'), 520);
+  }
+
+  const start = Math.max(0, matchIndex - 1);
+  const end = Math.min(lines.length, matchIndex + 2);
+  return clipText(lines.slice(start, end).join('\n'), 520);
+}
+
+function collectEvidenceTags(texts: Array<string | undefined>, seedTags: string[] = []) {
+  const bucket = new Set(seedTags.filter(Boolean));
+  const joined = texts.join('\n').toLowerCase();
+  const pairs: Array<[string, RegExp]> = [
+    ['timeout', /timeout|timed out|超时/],
+    ['refused', /refused|拒绝|unreachable/],
+    ['io', /\bi\/o\b|nvme|scsi|blk|await|util/],
+    ['network', /network|socket|tcp|port|connection/],
+    ['crash', /panic|fatal|segfault|exception|assert/],
+    ['recovery', /recover|rollback|恢复/],
+  ];
+
+  pairs.forEach(([tag, pattern]) => {
+    if (pattern.test(joined)) bucket.add(tag);
+  });
+
+  return Array.from(bucket);
+}
+
+function isSuspiciousSessionLog(log: AgentSessionLogItem) {
+  const text = [log.message, log.stdout, log.stderr, log.cmd].join('\n');
+  return log.level === 'error' || log.level === 'warning' || (typeof log.exitCode === 'number' && log.exitCode !== 0) || RISK_SIGNAL_RE.test(text);
+}
+
+function buildSessionLogEvidence(log: AgentSessionLogItem) {
+  return [log.message, log.stdout, log.stderr].filter(Boolean).join('\n').trim();
+}
+
+function inferFirstAnomaly(run: DiagnosticRunRecord | null, sessionLogs: AgentSessionLogItem[]): DerivedAnomaly | null {
+  const candidates: Array<{ order: number; anomaly: DerivedAnomaly }> = [];
+
+  if (run) {
+    (run.collectionSteps || []).forEach((step, index) => {
+      const combined = [step.stderr, step.stdout].filter(Boolean).join('\n');
+      if ((step.exitCode ?? 0) === 0 && !RISK_SIGNAL_RE.test(combined)) return;
+
+      candidates.push({
+        order: 100 + index,
+        anomaly: {
+          sourceType: 'collection_step',
+          sourceId: step.id,
+          title: `采集步骤异常: ${step.name}`,
+          severity: (step.exitCode ?? 0) !== 0 ? 'critical' : 'warning',
+          summary: step.conclusion || step.expectedSignal || '采集输出出现异常信号',
+          evidence: clipText(combined, 520),
+          lookupText: buildLookupText([step.name, step.expectedSignal, step.conclusion, combined]),
+          command: step.resolvedCommand || step.command,
+          sessionLabel: run.sessionLabel,
+          tags: collectEvidenceTags([combined, step.name, step.expectedSignal]),
+        },
+      });
+    });
+
+    (run.businessActions || []).forEach((action, index) => {
+      const combined = [action.stderr, action.stdout].filter(Boolean).join('\n');
+      if ((action.exitCode ?? 0) === 0 && !RISK_SIGNAL_RE.test(combined)) return;
+
+      candidates.push({
+        order: 200 + index,
+        anomaly: {
+          sourceType: 'business_action',
+          sourceId: action.id,
+          title: `业务动作异常: ${action.name}`,
+          severity: (action.exitCode ?? 0) !== 0 ? 'critical' : 'warning',
+          summary: `业务动作 ${action.runMode} 阶段输出了异常信号`,
+          evidence: clipText(combined, 520),
+          lookupText: buildLookupText([action.name, action.runMode, combined]),
+          command: action.scriptPath,
+          sessionLabel: run.sessionLabel,
+          tags: collectEvidenceTags([combined, action.name, action.runMode]),
+        },
+      });
+    });
+
+    (run.findings || []).forEach((finding, index) => {
+      candidates.push({
+        order: 300 + index,
+        anomaly: {
+          sourceType: 'finding',
+          sourceId: finding.id,
+          title: finding.title,
+          severity: finding.severity,
+          summary: finding.summary,
+          evidence: clipText(finding.evidence, 520),
+          lookupText: buildLookupText([finding.title, finding.summary, finding.evidence]),
+          sessionLabel: run.sessionLabel,
+          tags: collectEvidenceTags([finding.title, finding.summary, finding.evidence]),
+        },
+      });
+    });
+  }
+
+  const runFinishedAt = run?.finishedAt;
+  const relevantLogs = run && typeof runFinishedAt === 'number'
+    ? sessionLogs.filter((log) => log.ts >= run.startedAt - 60_000 && log.ts <= runFinishedAt + 60_000)
+    : sessionLogs;
+
+  relevantLogs
+    .slice()
+    .sort((left, right) => left.ts - right.ts)
+    .forEach((log, index) => {
+      if (!isSuspiciousSessionLog(log)) return;
+      const content = buildSessionLogEvidence(log);
+      candidates.push({
+        order: 50 + index,
+        anomaly: {
+          sourceType: 'session_log',
+          sourceId: log.id,
+          title: `会话日志异常: ${log.type}`,
+          severity: log.level === 'error' || (typeof log.exitCode === 'number' && log.exitCode !== 0) ? 'critical' : 'warning',
+          summary: log.message || '会话运行日志出现 warning / error / 非零退出码',
+          evidence: clipText(content, 520),
+          lookupText: buildLookupText([log.type, log.message, log.stdout, log.stderr]),
+          command: log.cmd,
+          tags: collectEvidenceTags([content, log.type, log.cmd]),
+        },
+      });
+    });
+
+  if (candidates.length === 0) return null;
+
+  candidates.sort((left, right) => {
+    if (left.order !== right.order) return left.order - right.order;
+    return ['critical', 'warning', 'info'].indexOf(left.anomaly.severity) - ['critical', 'warning', 'info'].indexOf(right.anomaly.severity);
+  });
+
+  return candidates[0].anomaly;
+}
+
+function buildExecutionTimeline(run: DiagnosticRunRecord | null, sessionLogs: AgentSessionLogItem[]) {
+  if (!run) return [] as TimelineEvent[];
+
+  const events: TimelineEvent[] = [
+    {
+      id: `${run.id}-start`,
+      ts: run.startedAt,
+      title: '诊断 Run 开始',
+      source: 'run',
+      status: 'started',
+      severity: 'info',
+      detail: run.title,
+    },
+  ];
+
+  (run.businessActions || []).forEach((action) => {
+    events.push({
+      id: `biz-${action.id}`,
+      ts: action.startedAt || run.startedAt,
+      title: `业务动作: ${action.name}`,
+      source: 'business_action',
+      status: action.status,
+      severity: (action.exitCode ?? 0) !== 0 ? 'critical' : inferSeverityFromText([action.stdout, action.stderr].join('\n'), 'info'),
+      detail: `阶段=${action.runMode} / exit=${action.exitCode} / ${clipText(action.stderr || action.stdout, 180)}`,
+      command: action.scriptPath,
+      durationMs: action.durationMs,
+    });
+  });
+
+  (run.collectionSteps || []).forEach((step) => {
+    const combined = [step.stderr, step.stdout].filter(Boolean).join('\n');
+    events.push({
+      id: `step-${step.id}`,
+      ts: step.startedAt || run.startedAt,
+      title: `采集步骤: ${step.name}`,
+      source: 'collection_step',
+      status: step.status,
+      severity: step.status === 'failed'
+        ? 'critical'
+        : step.status === 'skipped'
+          ? 'info'
+          : inferSeverityFromText(combined, 'info'),
+      detail: `${step.phase ? `${STEP_PHASE_META[step.phase as keyof typeof STEP_PHASE_META]?.label || step.phase} / ` : ''}${step.conclusion || clipText(combined, 180) || '无异常输出'}`,
+      command: step.resolvedCommand || step.command,
+      durationMs: step.durationMs,
+    });
+  });
+
+  const runEnd = run.finishedAt || Date.now();
+  sessionLogs
+    .filter((log) => log.ts >= run.startedAt - 60_000 && log.ts <= runEnd + 60_000)
+    .filter((log) => isSuspiciousSessionLog(log))
+    .slice()
+    .sort((left, right) => left.ts - right.ts)
+    .slice(0, 20)
+    .forEach((log) => {
+      const content = buildSessionLogEvidence(log);
+      events.push({
+        id: `log-${log.id}`,
+        ts: log.ts,
+        title: `会话日志: ${log.type}`,
+        source: 'session_log',
+        status: log.level || (typeof log.exitCode === 'number' ? `exit ${log.exitCode}` : 'info'),
+        severity: inferSeverityFromText(content, log.level === 'error' ? 'critical' : 'warning'),
+        detail: clipText(log.message || content, 180) || '命中风险日志',
+        command: log.cmd,
+        durationMs: log.durationMs,
+      });
+    });
+
+  events.push({
+    id: `${run.id}-end`,
+    ts: run.finishedAt || run.startedAt,
+    title: '诊断 Run 结束',
+    source: 'run',
+    status: run.status,
+    severity: run.status === 'attention' ? 'warning' : 'info',
+    detail: run.report?.summary || run.symptom,
+  });
+
+  return events.sort((left, right) => left.ts - right.ts);
+}
+
+function extractEffectiveErrorLogs(
+  run: DiagnosticRunRecord | null,
+  sessionLogs: AgentSessionLogItem[],
+  context: DiagnosticContextSnapshot
+) {
+  if (!run) return [] as EffectiveErrorLog[];
+
+  const focusKeywords = [
+    ...toKeywordList(context.logKeywords),
+    ...(run.tags || []).map((item) => item.toLowerCase()),
+  ];
+  const seen = new Set<string>();
+  const items: EffectiveErrorLog[] = [];
+
+  const pushItem = (item: EffectiveErrorLog) => {
+    const fingerprint = `${item.source}::${item.excerpt.toLowerCase()}`;
+    if (!item.excerpt || seen.has(fingerprint)) return;
+    seen.add(fingerprint);
+    items.push(item);
+  };
+
+  (run.collectionSteps || []).forEach((step) => {
+    const combined = [step.stderr, step.stdout].filter(Boolean).join('\n');
+    if (!combined || (step.status === 'done' && !RISK_SIGNAL_RE.test(combined) && focusKeywords.every((keyword) => !combined.toLowerCase().includes(keyword)))) {
+      return;
+    }
+    pushItem({
+      id: `effective-step-${step.id}`,
+      source: 'collection_step',
+      title: step.name,
+      reason: step.expectedSignal || step.conclusion || '采集步骤输出命中风险信号',
+      excerpt: buildFocusedExcerpt(combined, focusKeywords),
+      lookupText: buildLookupText([step.name, step.expectedSignal, step.conclusion, combined]),
+      ts: step.startedAt,
+      severity: step.status === 'failed' ? 'critical' : inferSeverityFromText(combined, 'warning'),
+      command: step.resolvedCommand || step.command,
+      tags: collectEvidenceTags([combined, step.name, step.expectedSignal], run.tags || []),
+    });
+  });
+
+  (run.businessActions || []).forEach((action) => {
+    const combined = [action.stderr, action.stdout].filter(Boolean).join('\n');
+    if (!combined || ((action.exitCode ?? 0) === 0 && !RISK_SIGNAL_RE.test(combined) && focusKeywords.every((keyword) => !combined.toLowerCase().includes(keyword)))) {
+      return;
+    }
+    pushItem({
+      id: `effective-biz-${action.id}`,
+      source: 'business_action',
+      title: action.name,
+      reason: `业务动作 ${action.runMode} 阶段输出了高风险信号`,
+      excerpt: buildFocusedExcerpt(combined, focusKeywords),
+      lookupText: buildLookupText([action.name, action.runMode, combined]),
+      ts: action.startedAt,
+      severity: (action.exitCode ?? 0) !== 0 ? 'critical' : inferSeverityFromText(combined, 'warning'),
+      command: action.scriptPath,
+      tags: collectEvidenceTags([combined, action.name, action.runMode], run.tags || []),
+    });
+  });
+
+  (run.findings || []).forEach((finding) => {
+    pushItem({
+      id: `effective-finding-${finding.id}`,
+      source: 'finding',
+      title: finding.title,
+      reason: finding.summary,
+      excerpt: buildFocusedExcerpt(finding.evidence, focusKeywords),
+      lookupText: buildLookupText([finding.title, finding.summary, finding.evidence]),
+      severity: finding.severity,
+      tags: collectEvidenceTags([finding.title, finding.summary, finding.evidence], run.tags || []),
+    });
+  });
+
+  const runEnd = run.finishedAt || Date.now();
+  sessionLogs
+    .filter((log) => log.ts >= run.startedAt - 60_000 && log.ts <= runEnd + 60_000)
+    .filter((log) => isSuspiciousSessionLog(log))
+    .forEach((log) => {
+      const content = buildSessionLogEvidence(log);
+      pushItem({
+        id: `effective-log-${log.id}`,
+        source: 'session_log',
+        title: log.type,
+        reason: log.message || '会话日志命中 warning / error / 非零退出码',
+        excerpt: buildFocusedExcerpt(content, focusKeywords),
+        lookupText: buildLookupText([log.type, log.message, log.stdout, log.stderr]),
+        ts: log.ts,
+        severity: inferSeverityFromText(content, log.level === 'error' ? 'critical' : 'warning'),
+        command: log.cmd,
+        tags: collectEvidenceTags([content, log.type, log.cmd], run.tags || []),
+      });
+    });
+
+  return items
+    .sort((left, right) => {
+      const severityRank = { critical: 0, warning: 1, info: 2 };
+      const severityDiff = severityRank[left.severity] - severityRank[right.severity];
+      if (severityDiff !== 0) return severityDiff;
+      return (left.ts || 0) - (right.ts || 0);
+    })
+    .slice(0, 12);
+}
+
 function formatTs(ts?: number) {
   if (!ts) return '-';
   return new Date(ts).toLocaleString('zh-CN');
+}
+
+function buildLookupText(parts: Array<string | undefined>) {
+  return parts
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+    .join('\n');
+}
+
+function formatSourceMatchLabel(matchedBy?: string) {
+  const labels: Record<string, string> = {
+    exact: '精确匹配',
+    symbol: '函数定义',
+    worktree: '本地工作树路径',
+    absolute: '绝对路径',
+    'repo-name': '仓库名裁剪',
+    suffix: '路径后缀匹配',
+  };
+  return labels[String(matchedBy || '')] || '源码定位';
+}
+
+function hasCLookupText(text?: string) {
+  return extractCLookupHints(String(text || '')).hasHints;
 }
 
 const DiagnosticWorkbench: React.FC = () => {
   const { theme } = useGlobalStore();
   const isDark = theme === 'dark';
   const { playbooks, activePlaybookId, setActivePlaybook, addPlaybook, updatePlaybook, deletePlaybook } = useDiagnosticStore();
+  const addTemplate = useCommandStore((state) => state.addTemplate);
+  const { lockedEvidence, addEvidence, removeEvidence, clearEvidence } = useEvidenceStore();
+  const { copy: copyEvidenceMarkdown } = useClipboard();
+  const [savedCodeBinding, setSavedCodeBinding] = useLocalStorage<CodeContextBindingDraft>('devutility-code-context-binding', {
+    repo: '',
+    branch: '',
+    commit: '',
+  });
   const [messageApi, contextHolder] = message.useMessage();
 
   const safePlaybooks = Array.isArray(playbooks) ? playbooks : [];
@@ -200,6 +797,7 @@ const DiagnosticWorkbench: React.FC = () => {
   const [title, setTitle] = useState(activePlaybook?.name || '');
   const [symptom, setSymptom] = useState(activePlaybook?.symptomTemplate || '');
   const [notes, setNotes] = useState('');
+  const [contextSnapshot, setContextSnapshot] = useState<DiagnosticContextSnapshot>(DEFAULT_CONTEXT_SNAPSHOT);
   const [selectedSessionId, setSelectedSessionId] = useState<string | undefined>(undefined);
   const [sessions, setSessions] = useState<SessionOption[]>([]);
   const [historyRuns, setHistoryRuns] = useState<DiagnosticRunRecord[]>([]);
@@ -215,6 +813,13 @@ const DiagnosticWorkbench: React.FC = () => {
   const [policyEditorValue, setPolicyEditorValue] = useState('');
   const [sessionLogs, setSessionLogs] = useState<AgentSessionLogItem[]>([]);
   const [loadingSessionLogs, setLoadingSessionLogs] = useState(false);
+  const [librarySearch, setLibrarySearch] = useState('');
+  const [codeBinding, setCodeBinding] = useState<CodeContextBindingDraft>(savedCodeBinding);
+  const [codeToken, setCodeToken] = useState('');
+  const [activeCodeContext, setActiveCodeContext] = useState<CodeContextBindingResult | null>(null);
+  const [openingCodeContext, setOpeningCodeContext] = useState(false);
+  const [locatingSource, setLocatingSource] = useState(false);
+  const [sourcePreview, setSourcePreview] = useState<SourcePreviewState | null>(null);
 
   useEffect(() => {
     if (!activePlaybook) return;
@@ -223,10 +828,49 @@ const DiagnosticWorkbench: React.FC = () => {
     setMatches([]);
   }, [activePlaybook?.id]);
 
+  const scenarioMeta = activePlaybook ? SCENARIO_META[activePlaybook.scenarioType] : null;
+  const detailRun = activeRun;
+  const detailContextSnapshot = useMemo(
+    () => normalizeContextSnapshot(detailRun?.contextSnapshot),
+    [detailRun?.contextSnapshot]
+  );
+  const firstAnomaly = useMemo(() => inferFirstAnomaly(detailRun, sessionLogs), [detailRun, sessionLogs]);
+  const executionTimeline = useMemo(() => buildExecutionTimeline(detailRun, sessionLogs), [detailRun, sessionLogs]);
+  const effectiveErrorLogs = useMemo(
+    () => extractEffectiveErrorLogs(detailRun, sessionLogs, detailRun ? detailContextSnapshot : contextSnapshot),
+    [contextSnapshot, detailContextSnapshot, detailRun, sessionLogs]
+  );
+  const commandLibraryItems = useMemo(
+    () => getScenarioCommandLibraryItems(
+      activePlaybook?.scenarioType,
+      [
+        librarySearch,
+        title,
+        symptom,
+        buildContextSummary(contextSnapshot),
+        firstAnomaly?.summary,
+        firstAnomaly?.evidence,
+      ].filter(Boolean).join(' ')
+    ).slice(0, 8),
+    [activePlaybook?.scenarioType, contextSnapshot, firstAnomaly?.evidence, firstAnomaly?.summary, librarySearch, symptom, title]
+  );
+  const phaseCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    (activePlaybook?.collectionPlan || []).forEach((step) => {
+      counts.set(step.phase, (counts.get(step.phase) || 0) + 1);
+    });
+    return Array.from(counts.entries());
+  }, [activePlaybook?.collectionPlan]);
+
   useEffect(() => {
     void fetchSessions();
     void fetchRuns();
     void fetchCommandPolicy();
+  }, []);
+
+  useEffect(() => {
+    if (!savedCodeBinding.repo || !savedCodeBinding.branch || !savedCodeBinding.commit) return;
+    void openCodeContext(savedCodeBinding, true);
   }, []);
 
   useEffect(() => {
@@ -287,6 +931,231 @@ const DiagnosticWorkbench: React.FC = () => {
     } finally {
       if (withLoading) setLoadingSessionLogs(false);
     }
+  }
+
+  function patchCodeBinding(field: keyof CodeContextBindingDraft, value: string) {
+    setCodeBinding((current) => ({
+      ...current,
+      [field]: value,
+    }));
+  }
+
+  async function openCodeContext(bindingOverride?: Partial<CodeContextBindingDraft>, silent = false) {
+    const nextBinding = {
+      repo: String(bindingOverride?.repo ?? codeBinding.repo).trim(),
+      branch: String(bindingOverride?.branch ?? codeBinding.branch).trim(),
+      commit: String(bindingOverride?.commit ?? codeBinding.commit).trim(),
+    };
+
+    if (!nextBinding.repo || !nextBinding.branch || !nextBinding.commit) {
+      if (!silent) {
+        messageApi.warning('请先绑定 repo、branch 和 commit，C 源码定位才能工作');
+      }
+      return null;
+    }
+
+    if (
+      activeCodeContext &&
+      activeCodeContext.repo === nextBinding.repo &&
+      activeCodeContext.branch === nextBinding.branch &&
+      activeCodeContext.commit === nextBinding.commit
+    ) {
+      return activeCodeContext;
+    }
+
+    setOpeningCodeContext(true);
+    try {
+      const response = await fetch(`${PROXY_HTTP}/api/code-context/open`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          repo: nextBinding.repo,
+          branch: nextBinding.branch,
+          commit: nextBinding.commit,
+          token: codeToken.trim(),
+        }),
+      });
+      const data = await response.json();
+      if (!data.ok) {
+        if (!silent) {
+          messageApi.error(data.error || '代码上下文绑定失败');
+        }
+        return null;
+      }
+
+      const nextContext = data.data as CodeContextBindingResult;
+      const normalizedBinding = {
+        repo: nextContext.repo || nextBinding.repo,
+        branch: nextContext.branch || nextBinding.branch,
+        commit: nextContext.commit || nextBinding.commit,
+      };
+
+      setActiveCodeContext(nextContext);
+      if (activeCodeContext?.contextId !== nextContext.contextId) {
+        setSourcePreview(null);
+      }
+      setCodeBinding(normalizedBinding);
+      setSavedCodeBinding(normalizedBinding);
+
+      if (!silent) {
+        messageApi.success(
+          typeof nextContext.symbolCount === 'number'
+            ? `已绑定 C 代码版本，符号索引 ${nextContext.symbolCount} 个`
+            : '已绑定 C 代码版本，可直接从日志定位源码'
+        );
+      }
+      return nextContext;
+    } catch {
+      if (!silent) {
+        messageApi.error('代码上下文绑定失败');
+      }
+      return null;
+    } finally {
+      setOpeningCodeContext(false);
+    }
+  }
+
+  async function searchSymbolCandidates(contextId: string, query: string) {
+    const response = await fetch(
+      `${PROXY_HTTP}/api/code-context/${encodeURIComponent(contextId)}/symbols?q=${encodeURIComponent(query)}&limit=20`
+    );
+    const data = await response.json();
+    if (!data.ok) {
+      throw new Error(data.error || `符号搜索失败: ${query}`);
+    }
+    return Array.isArray(data.data) ? (data.data as SymbolCandidate[]) : [];
+  }
+
+  async function renderSymbolPreview(contextId: string, symbolId: string) {
+    const response = await fetch(`${PROXY_HTTP}/api/code-context/${encodeURIComponent(contextId)}/render`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        symbolId,
+        beforeContext: SOURCE_PREVIEW_BEFORE_CONTEXT,
+        afterContext: SOURCE_PREVIEW_AFTER_CONTEXT,
+      }),
+    });
+    const data = await response.json();
+    if (!data.ok) {
+      throw new Error(data.error || '函数源码渲染失败');
+    }
+    return data.data as RenderedSourcePayload;
+  }
+
+  async function renderLocationPreview(contextId: string, candidate: SourceLocationCandidate) {
+    const response = await fetch(`${PROXY_HTTP}/api/code-context/${encodeURIComponent(contextId)}/render-location`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sourcePath: candidate.path,
+        line: candidate.line,
+        beforeContext: SOURCE_PREVIEW_BEFORE_CONTEXT,
+        afterContext: SOURCE_PREVIEW_AFTER_CONTEXT,
+      }),
+    });
+    const data = await response.json();
+    if (!data.ok) {
+      throw new Error(data.error || `源码位置渲染失败: ${candidate.path}:${candidate.line}`);
+    }
+    return data.data as RenderedSourcePayload;
+  }
+
+  async function locateSourceFromRequest(
+    request: SourceLookupRequest,
+    preferred?: {
+      location?: SourceLocationCandidate;
+      functionCandidate?: FunctionCandidateToken;
+    }
+  ) {
+    const lookupText = String(request.text || '').trim();
+    const { locations, functions, hasHints } = extractCLookupHints(lookupText);
+    const orderedLocations = preferred?.location
+      ? [preferred.location, ...locations.filter((item) => `${item.path}:${item.line}` !== `${preferred.location?.path}:${preferred.location?.line}`)]
+      : locations;
+    const orderedFunctions = preferred?.functionCandidate
+      ? [preferred.functionCandidate, ...functions.filter((item) => item.query !== preferred.functionCandidate?.query)]
+      : functions;
+
+    if (!hasHints || (orderedLocations.length === 0 && orderedFunctions.length === 0)) {
+      messageApi.warning('当前异常片段里没有提取到 C 源码路径或 C 函数名');
+      return;
+    }
+
+    const context = await openCodeContext(undefined, false);
+    if (!context) return;
+
+    setLocatingSource(true);
+    let lastError = '';
+
+    try {
+      for (const candidate of orderedLocations.slice(0, 6)) {
+        try {
+          const payload = await renderLocationPreview(context.contextId, candidate);
+          setSourcePreview({
+            request,
+            payload,
+            lookupMode: 'location',
+            locations: orderedLocations,
+            functions: orderedFunctions,
+          });
+          return;
+        } catch (error) {
+          lastError = error instanceof Error ? error.message : '源码位置渲染失败';
+        }
+      }
+
+      for (const candidate of orderedFunctions.slice(0, 6)) {
+        try {
+          const matches = await searchSymbolCandidates(context.contextId, candidate.query);
+          if (matches.length === 0) {
+            lastError = `没有找到函数定义: ${candidate.query}`;
+            continue;
+          }
+
+          const payload = await renderSymbolPreview(context.contextId, matches[0].id);
+          setSourcePreview({
+            request,
+            payload,
+            lookupMode: 'function',
+            locations: orderedLocations,
+            functions: orderedFunctions,
+          });
+          return;
+        } catch (error) {
+          lastError = error instanceof Error ? error.message : '函数源码渲染失败';
+        }
+      }
+
+      messageApi.warning(lastError || '未能从当前证据里定位到 C 源码上下文');
+    } finally {
+      setLocatingSource(false);
+    }
+  }
+
+  function locateSourceFromParts(
+    request: Omit<SourceLookupRequest, 'text'> & { text?: string; parts?: Array<string | undefined> },
+    preferred?: {
+      location?: SourceLocationCandidate;
+      functionCandidate?: FunctionCandidateToken;
+    }
+  ) {
+    const lookupText = String(request.text || buildLookupText(request.parts || [])).trim();
+    if (!lookupText) {
+      messageApi.warning('当前内容为空，无法做 C 源码定位');
+      return;
+    }
+
+    void locateSourceFromRequest(
+      {
+        title: request.title,
+        summary: request.summary,
+        sourceType: request.sourceType,
+        command: request.command,
+        text: lookupText,
+      },
+      preferred
+    );
   }
 
   function syncPolicyState(snapshot: CommandPolicySnapshot) {
@@ -437,6 +1306,13 @@ const DiagnosticWorkbench: React.FC = () => {
     updatePlaybook(activePlaybook.id, data);
   }
 
+  function patchContextSnapshot(field: keyof DiagnosticContextSnapshot, value: string) {
+    setContextSnapshot((current) => ({
+      ...current,
+      [field]: value,
+    }));
+  }
+
   function updateCollectionStep(stepId: string, patch: Partial<DiagnosticCollectionStep>) {
     if (!activePlaybook) return;
     patchPlaybook({
@@ -469,7 +1345,15 @@ const DiagnosticWorkbench: React.FC = () => {
     patchPlaybook({
       collectionPlan: [
         ...activePlaybook.collectionPlan,
-        { id: generateId(), name: '新采集步骤', command: 'echo "replace me"', timeoutMs: 15000 },
+        {
+          id: generateId(),
+          name: '新采集步骤',
+          command: 'echo "replace me"',
+          timeoutMs: 15000,
+          phase: 'prepare',
+          expectedSignal: '',
+          continueOnFailure: false,
+        },
       ],
     });
   }
@@ -523,6 +1407,71 @@ const DiagnosticWorkbench: React.FC = () => {
     });
   }
 
+  function addLibraryItemToPlaybook(commandId: string) {
+    if (!activePlaybook) return;
+    const item = commandLibraryItems.find((entry) => entry.id === commandId);
+    if (!item) return;
+
+    patchPlaybook({
+      collectionPlan: [...activePlaybook.collectionPlan, buildCollectionStepFromLibraryItem(item)],
+    });
+    messageApi.success(`已把「${item.name}」加入当前 Playbook`);
+  }
+
+  function saveLibraryItemToCommandBuilder(commandId: string) {
+    const item = commandLibraryItems.find((entry) => entry.id === commandId);
+    if (!item) return;
+
+    addTemplate(buildCommandTemplateFromLibraryItem(item));
+    messageApi.success(`已把「${item.name}」保存到命令生成器`);
+  }
+
+  function saveCommandAsTemplate(name: string, command: string, description: string, category = '诊断/现场命令') {
+    if (!command.trim()) {
+      messageApi.warning('当前没有可保存的命令');
+      return;
+    }
+    addTemplate({
+      name,
+      category,
+      description,
+      template: command,
+      variables: [],
+    });
+    messageApi.success(`已保存命令模板「${name}」`);
+  }
+
+  function lockEvidence(payload: {
+    sourceType: 'first_anomaly' | 'finding' | 'collection_step' | 'business_action' | 'session_log';
+    sourceId?: string;
+    title: string;
+    summary: string;
+    content: string;
+    lookupText?: string;
+    command?: string;
+    sessionLabel?: string;
+    tags?: string[];
+  }) {
+    addEvidence({
+      ...payload,
+      tags: payload.tags || [],
+    });
+    messageApi.success(`已锁定证据：${payload.title}`);
+  }
+
+  async function copyEvidencePanel() {
+    if (lockedEvidence.length === 0) {
+      messageApi.warning('证据锁定面板还是空的');
+      return;
+    }
+    const ok = await copyEvidenceMarkdown(buildEvidenceMarkdown(lockedEvidence));
+    if (ok) {
+      messageApi.success('证据面板已复制为 Markdown');
+    } else {
+      messageApi.error('证据面板复制失败');
+    }
+  }
+
   async function runRecall() {
     if (!activePlaybook) return;
     if (!title.trim() || !symptom.trim()) {
@@ -538,6 +1487,11 @@ const DiagnosticWorkbench: React.FC = () => {
           title,
           symptom,
           notes,
+          contextSnapshot,
+          scenarioType: activePlaybook.scenarioType,
+          objective: activePlaybook.objective,
+          successCriteria: activePlaybook.successCriteria,
+          tags: activePlaybook.tags,
           collectionPlan: activePlaybook.collectionPlan,
           businessActions: activePlaybook.businessActions.map((action) => ({
             ...action,
@@ -578,7 +1532,12 @@ const DiagnosticWorkbench: React.FC = () => {
           title,
           symptom,
           notes,
+          contextSnapshot,
           sessionId: selectedSessionId,
+          scenarioType: activePlaybook.scenarioType,
+          objective: activePlaybook.objective,
+          successCriteria: activePlaybook.successCriteria,
+          tags: activePlaybook.tags,
           collectionPlan: activePlaybook.collectionPlan,
           analysisRules: activePlaybook.analysisRules,
           businessActions: activePlaybook.businessActions.map((action) => ({
@@ -604,7 +1563,6 @@ const DiagnosticWorkbench: React.FC = () => {
   }
 
   const currentSession = sessions.find((item) => item.sessionId === selectedSessionId);
-  const detailRun = activeRun;
 
   return (
     <div style={{ padding: 24 }}>
@@ -649,6 +1607,24 @@ const DiagnosticWorkbench: React.FC = () => {
             </div>
 
             <div>
+              <Text type="secondary">场景类型</Text>
+              <Select
+                style={{ width: '100%', marginTop: 8 }}
+                value={activePlaybook?.scenarioType}
+                options={Object.entries(SCENARIO_META).map(([value, meta]) => ({
+                  value,
+                  label: meta.label,
+                }))}
+                onChange={(value) => patchPlaybook({ scenarioType: value as DiagnosticScenarioType })}
+              />
+              {scenarioMeta && (
+                <Text type="secondary" style={{ display: 'block', marginTop: 8 }}>
+                  {scenarioMeta.description}
+                </Text>
+              )}
+            </div>
+
+            <div>
               <Text type="secondary">Playbook 描述</Text>
               <Input
                 value={activePlaybook?.description}
@@ -656,6 +1632,37 @@ const DiagnosticWorkbench: React.FC = () => {
                 placeholder="描述这套诊断编排适用于什么故障"
                 style={{ marginTop: 8 }}
                 suffix={<SaveOutlined />}
+              />
+            </div>
+
+            <div>
+              <Text type="secondary">目标</Text>
+              <Input
+                value={activePlaybook?.objective}
+                onChange={(e) => patchPlaybook({ objective: e.target.value })}
+                placeholder="例如：先锁定首个异常，再明确下一跳验证命令"
+                style={{ marginTop: 8 }}
+              />
+            </div>
+
+            <div>
+              <Text type="secondary">成功判据</Text>
+              <TextArea
+                value={activePlaybook?.successCriteria}
+                onChange={(e) => patchPlaybook({ successCriteria: e.target.value })}
+                autoSize={{ minRows: 2, maxRows: 4 }}
+                style={{ marginTop: 8 }}
+                placeholder="例如：抓到 timeout 日志、确认端口/进程状态、回滚后业务恢复"
+              />
+            </div>
+
+            <div>
+              <Text type="secondary">标签</Text>
+              <Input
+                value={formatTagInput(activePlaybook?.tags)}
+                onChange={(e) => patchPlaybook({ tags: toTagList(e.target.value) })}
+                placeholder="例如：timeout, io, journalctl"
+                style={{ marginTop: 8 }}
               />
             </div>
 
@@ -686,6 +1693,44 @@ const DiagnosticWorkbench: React.FC = () => {
               />
             </div>
 
+            <Card size="small" title="定位上下文" styles={{ body: { padding: 12 } }}>
+              <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                <Input
+                  value={contextSnapshot.impactScope}
+                  onChange={(e) => patchContextSnapshot('impactScope', e.target.value)}
+                  placeholder="影响范围，例如：仅某 AZ、某租户、某节点、某卷"
+                />
+                <Input
+                  value={contextSnapshot.triggerAction}
+                  onChange={(e) => patchContextSnapshot('triggerAction', e.target.value)}
+                  placeholder="执行时序起点，例如：发布后 / 注入后 / 压测第 3 分钟开始异常"
+                />
+                <Input
+                  value={contextSnapshot.recentChange}
+                  onChange={(e) => patchContextSnapshot('recentChange', e.target.value)}
+                  placeholder="最近变更，例如：发布、参数修改、节点重启、限流调整"
+                />
+                <Input
+                  value={contextSnapshot.expectedBehavior}
+                  onChange={(e) => patchContextSnapshot('expectedBehavior', e.target.value)}
+                  placeholder="期望行为，例如：请求 200、IO 延迟稳定、回滚后恢复"
+                />
+                <Input
+                  value={contextSnapshot.observationWindow}
+                  onChange={(e) => patchContextSnapshot('observationWindow', e.target.value)}
+                  placeholder="观察窗口，例如：10:21-10:25 / 注入后 60s"
+                />
+                <Input
+                  value={contextSnapshot.logKeywords}
+                  onChange={(e) => patchContextSnapshot('logKeywords', e.target.value)}
+                  placeholder="关键日志词，例如：timeout refused nvme reset"
+                />
+                <Text type="secondary">
+                  {buildContextSummary(contextSnapshot) || '上下文越清晰，时序和有效错误日志提纯越准。'}
+                </Text>
+              </Space>
+            </Card>
+
             <div>
               <Text type="secondary">目标 SSH 会话</Text>
               <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
@@ -715,6 +1760,19 @@ const DiagnosticWorkbench: React.FC = () => {
               message="编排阶段"
               description="业务脚本会先执行 before_collection，再执行远程采集，最后执行 after_collection。日志分析与报告归纳在全部动作结束后统一生成。"
             />
+
+            {phaseCounts.length > 0 && (
+              <div>
+                <Text type="secondary">当前阶段分布</Text>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
+                  {phaseCounts.map(([phase, count]) => (
+                    <Tag key={phase} color={STEP_PHASE_META[phase as keyof typeof STEP_PHASE_META]?.color || 'default'}>
+                      {STEP_PHASE_META[phase as keyof typeof STEP_PHASE_META]?.label || phase}: {count}
+                    </Tag>
+                  ))}
+                </div>
+              </div>
+            )}
           </Space>
         </Card>
 
@@ -757,6 +1815,583 @@ const DiagnosticWorkbench: React.FC = () => {
         </Card>
       </div>
 
+      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(380px, 1.1fr) minmax(360px, 0.9fr)', gap: 16, marginTop: 16, alignItems: 'start' }}>
+        <Card
+          title="场景命令库"
+          extra={scenarioMeta ? <Tag color={scenarioMeta.color}>{scenarioMeta.label}</Tag> : null}
+        >
+          <Space direction="vertical" size={14} style={{ width: '100%' }}>
+            <Input
+              value={librarySearch}
+              onChange={(e) => setLibrarySearch(e.target.value)}
+              placeholder="按 timeout / io / recovery / network 等关键字过滤建议命令"
+              suffix={<SearchOutlined />}
+            />
+            {commandLibraryItems.length === 0 ? (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前场景下没有命中的建议命令" />
+            ) : (
+              <List
+                dataSource={commandLibraryItems}
+                renderItem={(item) => (
+                  <List.Item
+                    actions={[
+                      <Button key="playbook" type="link" onClick={() => addLibraryItemToPlaybook(item.id)}>
+                        加入 Playbook
+                      </Button>,
+                      <Button key="builder" type="link" onClick={() => saveLibraryItemToCommandBuilder(item.id)}>
+                        存到命令生成器
+                      </Button>,
+                    ]}
+                  >
+                    <List.Item.Meta
+                      title={
+                        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                          <Text strong>{item.name}</Text>
+                          <Tag color={STEP_PHASE_META[item.phase].color}>{STEP_PHASE_META[item.phase].label}</Tag>
+                          <Tag color={item.riskLevel === 'mutation' ? 'orange' : 'green'}>
+                            {item.riskLevel === 'mutation' ? '变更型命令' : '只读命令'}
+                          </Tag>
+                        </div>
+                      }
+                      description={
+                        <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                          <Text type="secondary">{item.description}</Text>
+                          <Text code>{item.command}</Text>
+                          <Text type="secondary">预期信号：{item.expectedSignal}</Text>
+                          <div>
+                            {item.tags.map((tag) => (
+                              <Tag key={tag}>{tag}</Tag>
+                            ))}
+                          </div>
+                        </Space>
+                      }
+                    />
+                  </List.Item>
+                )}
+              />
+            )}
+          </Space>
+        </Card>
+
+        <Space direction="vertical" size={16} style={{ width: '100%' }}>
+          <Card
+            title="C 代码定位上下文"
+            extra={activeCodeContext ? <Tag color="success">已绑定</Tag> : <Tag color="default">未绑定</Tag>}
+          >
+            <Space direction="vertical" size={12} style={{ width: '100%' }}>
+              <Text type="secondary">
+                绑定一次 repo / branch / commit 后，下面命中 C 线索的异常、有效错误日志和证据都可以直接跳到源码上下文。
+              </Text>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 8 }}>
+                <Input
+                  value={codeBinding.repo}
+                  onChange={(e) => patchCodeBinding('repo', e.target.value)}
+                  placeholder="repo，本地路径或远端 Git URL"
+                />
+                <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: 8 }}>
+                  <Input
+                    value={codeBinding.branch}
+                    onChange={(e) => patchCodeBinding('branch', e.target.value)}
+                    placeholder="branch"
+                  />
+                  <Input
+                    value={codeBinding.commit}
+                    onChange={(e) => patchCodeBinding('commit', e.target.value)}
+                    placeholder="commit"
+                  />
+                </div>
+                <Input
+                  value={codeToken}
+                  onChange={(e) => setCodeToken(e.target.value)}
+                  placeholder="可选 Git token，私有仓库需要时再填"
+                />
+              </div>
+              <Space wrap>
+                <Button type="primary" icon={<CodeOutlined />} loading={openingCodeContext} onClick={() => void openCodeContext()}>
+                  绑定 C 代码版本
+                </Button>
+                {activeCodeContext && (
+                  <>
+                    <Tag color="processing">{activeCodeContext.repoDisplayName}</Tag>
+                    <Tag>{activeCodeContext.branch}</Tag>
+                    <Tag>{activeCodeContext.commit.slice(0, 12)}</Tag>
+                    <Tag color={activeCodeContext.searchStrategy === 'indexed' ? 'blue' : 'gold'}>
+                      {activeCodeContext.searchStrategy === 'indexed' ? '已索引' : '按需检索'}
+                    </Tag>
+                  </>
+                )}
+              </Space>
+              {activeCodeContext && (
+                <Text type="secondary">
+                  当前工作树：{activeCodeContext.worktreePath}
+                </Text>
+              )}
+            </Space>
+          </Card>
+
+          <Card
+            title="C 源码上下文预览"
+            extra={
+              locatingSource
+                ? <Tag color="processing">定位中</Tag>
+                : sourcePreview
+                  ? <Tag color="blue">{sourcePreview.lookupMode === 'location' ? 'path:line' : 'function'}</Tag>
+                  : null
+            }
+          >
+            {!sourcePreview ? (
+              <Alert
+                type="info"
+                showIcon
+                message="这里会显示异常关联的 C 源码片段"
+                description="先绑定 C 代码版本，然后在首个异常、有效错误日志、证据面板或会话日志里点击“看源码”。工作台只会处理 C 源码路径和 C 函数线索。"
+              />
+            ) : (
+              <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <Text strong>{sourcePreview.request.title}</Text>
+                  <Tag>{sourcePreview.request.sourceType}</Tag>
+                  <Tag color={sourcePreview.lookupMode === 'location' ? 'processing' : 'geekblue'}>
+                    {sourcePreview.lookupMode === 'location' ? '路径定位' : '函数定位'}
+                  </Tag>
+                  <Tag color="default">{formatSourceMatchLabel(sourcePreview.payload.matchedBy)}</Tag>
+                </div>
+                <Text type="secondary">{sourcePreview.request.summary}</Text>
+                <Text code>{sourcePreview.payload.path}:{sourcePreview.payload.line}</Text>
+                {sourcePreview.request.command && <Text code>{sourcePreview.request.command}</Text>}
+                {sourcePreview.payload.signature && (
+                  <Alert
+                    type="info"
+                    showIcon
+                    message={sourcePreview.payload.signature}
+                    description={
+                      sourcePreview.payload.functionStartLine && sourcePreview.payload.functionEndLine
+                        ? `函数范围 ${sourcePreview.payload.functionStartLine}-${sourcePreview.payload.functionEndLine}`
+                        : '当前按日志命中的 C 代码位置展示上下文'
+                    }
+                  />
+                )}
+                {sourcePreview.locations.length > 1 && (
+                  <div>
+                    <Text type="secondary">备选路径线索</Text>
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
+                      {sourcePreview.locations.slice(0, 6).map((candidate) => (
+                        <Tag
+                          key={`${candidate.path}:${candidate.line}`}
+                          color={sourcePreview.payload.mode === 'location' && sourcePreview.payload.path === candidate.path && sourcePreview.payload.line === candidate.line ? 'processing' : 'default'}
+                          onClick={() => locateSourceFromParts(sourcePreview.request, { location: candidate })}
+                          style={{ cursor: 'pointer' }}
+                        >
+                          {candidate.path}:{candidate.line}
+                        </Tag>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {sourcePreview.functions.length > 0 && (
+                  <div>
+                    <Text type="secondary">函数线索</Text>
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
+                      {sourcePreview.functions.slice(0, 8).map((candidate) => (
+                        <Tag
+                          key={`${candidate.query}-${candidate.hits}`}
+                          color={sourcePreview.payload.symbol?.name === candidate.query ? 'geekblue' : 'default'}
+                          onClick={() => locateSourceFromParts(sourcePreview.request, { functionCandidate: candidate })}
+                          style={{ cursor: 'pointer' }}
+                        >
+                          {candidate.query}
+                        </Tag>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div
+                  style={{
+                    maxHeight: 440,
+                    overflow: 'auto',
+                    borderRadius: 8,
+                    border: `1px solid ${isDark ? '#334155' : '#dbe2ea'}`,
+                    background: isDark ? '#0f172a' : '#f8fafc',
+                    padding: '8px 0',
+                  }}
+                >
+                  {sourcePreview.payload.lines.map((line) => (
+                    <div
+                      key={`${line.lineNumber}-${line.text}`}
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: '72px 1fr',
+                        gap: 12,
+                        padding: '0 16px',
+                        minHeight: 20,
+                        lineHeight: '20px',
+                        background: line.isAnchor
+                          ? (isDark ? 'rgba(59, 130, 246, 0.26)' : 'rgba(59, 130, 246, 0.12)')
+                          : line.isDeclaration
+                            ? (isDark ? 'rgba(14, 116, 144, 0.24)' : 'rgba(14, 116, 144, 0.10)')
+                            : line.inFunction
+                              ? (isDark ? 'rgba(15, 23, 42, 0.42)' : 'rgba(226, 232, 240, 0.65)')
+                              : 'transparent',
+                      }}
+                    >
+                      <Text
+                        type="secondary"
+                        style={{
+                          userSelect: 'none',
+                          textAlign: 'right',
+                          fontFamily: 'JetBrains Mono, Fira Code, monospace',
+                          fontSize: 12,
+                        }}
+                      >
+                        {line.lineNumber}
+                      </Text>
+                      <pre
+                        style={{
+                          margin: 0,
+                          whiteSpace: 'pre-wrap',
+                          wordBreak: 'break-word',
+                          fontFamily: 'JetBrains Mono, Fira Code, monospace',
+                          fontSize: 12,
+                          color: isDark ? '#e5e7eb' : '#111827',
+                        }}
+                      >
+                        {line.text || ' '}
+                      </pre>
+                    </div>
+                  ))}
+                </div>
+              </Space>
+            )}
+          </Card>
+
+          <Card
+            title="首个异常定位"
+            extra={firstAnomaly ? <Tag color={severityColorMap[firstAnomaly.severity] || 'default'}>{firstAnomaly.severity}</Tag> : null}
+          >
+            {!firstAnomaly ? (
+              <Alert
+                type="info"
+                showIcon
+                message="还没有明确的首个异常"
+                description="执行一次编排或等待会话日志出现 warning / error / 非零退出码后，这里会自动收敛最先出现的高风险异常。"
+              />
+            ) : (
+              <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                <Text strong>{firstAnomaly.title}</Text>
+                <Text type="secondary">{firstAnomaly.summary}</Text>
+                {firstAnomaly.command && <Text code>{firstAnomaly.command}</Text>}
+                <ResizableOutput
+                  content={firstAnomaly.evidence}
+                  isDark={isDark}
+                  minHeight={72}
+                  maxHeight={220}
+                  onTextSelect={(text) => locateSourceFromParts({
+                    title: `${firstAnomaly.title} - 手动选词`,
+                    summary: firstAnomaly.summary,
+                    sourceType: `${firstAnomaly.sourceType}_selection`,
+                    text,
+                    command: firstAnomaly.command,
+                  })}
+                />
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {firstAnomaly.tags.map((tag) => (
+                    <Tag key={tag}>{tag}</Tag>
+                  ))}
+                </div>
+                <Space wrap>
+                  {hasCLookupText(firstAnomaly.lookupText) && (
+                    <Button
+                      icon={<CodeOutlined />}
+                      loading={locatingSource}
+                      onClick={() => locateSourceFromParts({
+                        title: firstAnomaly.title,
+                        summary: firstAnomaly.summary,
+                        sourceType: firstAnomaly.sourceType,
+                        text: firstAnomaly.lookupText,
+                        parts: [firstAnomaly.title, firstAnomaly.summary, firstAnomaly.evidence],
+                        command: firstAnomaly.command,
+                      })}
+                    >
+                      看源码
+                    </Button>
+                  )}
+                  <Button
+                    icon={<PushpinOutlined />}
+                    onClick={() => lockEvidence({
+                      sourceType: 'first_anomaly',
+                      sourceId: firstAnomaly.sourceId,
+                      title: firstAnomaly.title,
+                      summary: firstAnomaly.summary,
+                      content: firstAnomaly.evidence,
+                      lookupText: firstAnomaly.lookupText,
+                      command: firstAnomaly.command,
+                      sessionLabel: firstAnomaly.sessionLabel,
+                      tags: firstAnomaly.tags,
+                    })}
+                  >
+                    锁定首个异常
+                  </Button>
+                  {firstAnomaly.command && (
+                    <Button
+                      icon={<SaveOutlined />}
+                      onClick={() => saveCommandAsTemplate(
+                        `${firstAnomaly.title} - 现场命令`,
+                        firstAnomaly.command || '',
+                        firstAnomaly.summary,
+                        '诊断/异常定位'
+                      )}
+                    >
+                      保存命令模板
+                    </Button>
+                  )}
+                </Space>
+              </Space>
+            )}
+          </Card>
+
+          <Card
+            title="有效错误日志"
+            extra={<Tag color={effectiveErrorLogs.length > 0 ? 'warning' : 'default'}>{effectiveErrorLogs.length} 条</Tag>}
+          >
+            {effectiveErrorLogs.length === 0 ? (
+              <Alert
+                type="info"
+                showIcon
+                message="还没有提纯出关键日志"
+                description="补充定位上下文里的观察窗口和关键日志词，或执行一次编排后，这里会优先给出真正影响定位的错误日志片段。"
+              />
+            ) : (
+              <List
+                dataSource={effectiveErrorLogs}
+                renderItem={(item) => {
+                  const canLocate = hasCLookupText(item.lookupText);
+                  return (
+                    <List.Item
+                      actions={[
+                        ...(canLocate
+                          ? [
+                              <Button
+                                key="source"
+                                type="link"
+                                icon={<CodeOutlined />}
+                                onClick={() => locateSourceFromParts({
+                                  title: `${item.title} - 有效日志`,
+                                  summary: item.reason,
+                                  sourceType: item.source,
+                                  text: item.lookupText,
+                                  parts: [item.title, item.reason, item.excerpt],
+                                  command: item.command,
+                                })}
+                              >
+                                看源码
+                              </Button>,
+                            ]
+                          : []),
+                        <Button
+                          key="lock"
+                          type="link"
+                          icon={<PushpinOutlined />}
+                          onClick={() => lockEvidence({
+                            sourceType: item.source === 'finding'
+                              ? 'finding'
+                              : item.source === 'business_action'
+                                ? 'business_action'
+                                : item.source === 'collection_step'
+                                  ? 'collection_step'
+                                  : 'session_log',
+                            sourceId: item.id,
+                            title: `${item.title} - 有效日志`,
+                            summary: item.reason,
+                            content: item.excerpt,
+                            lookupText: item.lookupText,
+                            command: item.command,
+                            sessionLabel: detailRun?.sessionLabel,
+                            tags: item.tags,
+                          })}
+                        >
+                          锁定
+                        </Button>,
+                      ]}
+                    >
+                      <List.Item.Meta
+                        title={
+                          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                            <Text strong>{item.title}</Text>
+                            <Tag color={severityColorMap[item.severity] || 'default'}>{item.severity}</Tag>
+                            <Tag>{item.source}</Tag>
+                            {item.ts && <Text type="secondary">{formatTs(item.ts)}</Text>}
+                          </div>
+                        }
+                        description={
+                          <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                            <Text type="secondary">{item.reason}</Text>
+                            {item.command && <Text code>{item.command}</Text>}
+                            <ResizableOutput
+                              content={item.excerpt}
+                              isDark={isDark}
+                              minHeight={56}
+                              maxHeight={160}
+                              onTextSelect={(text) => locateSourceFromParts({
+                                title: `${item.title} - 手动选词`,
+                                summary: item.reason,
+                                sourceType: `${item.source}_selection`,
+                                text,
+                                command: item.command,
+                              })}
+                            />
+                            <div>
+                              {item.tags.map((tag) => (
+                                <Tag key={tag}>{tag}</Tag>
+                              ))}
+                            </div>
+                          </Space>
+                        }
+                      />
+                    </List.Item>
+                  );
+                }}
+              />
+            )}
+          </Card>
+
+          <Card
+            title="执行时序"
+            extra={<Tag color={executionTimeline.length > 0 ? 'processing' : 'default'}>{executionTimeline.length} 个事件</Tag>}
+          >
+            {executionTimeline.length === 0 ? (
+              <Alert
+                type="info"
+                showIcon
+                message="执行后这里会生成统一时序"
+                description="会把业务动作、采集步骤和关键会话日志按时间统一展开，帮助用户理解异常是在哪个动作之后、哪一步之前出现的。"
+              />
+            ) : (
+              <List
+                size="small"
+                dataSource={executionTimeline}
+                renderItem={(item) => (
+                  <List.Item>
+                    <List.Item.Meta
+                      title={
+                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                          <Text strong>{item.title}</Text>
+                          <Tag color={severityColorMap[item.severity] || 'default'}>{item.severity}</Tag>
+                          <Tag>{item.source}</Tag>
+                          <Text type="secondary">{formatTs(item.ts)}</Text>
+                          {typeof item.durationMs === 'number' && item.durationMs > 0 && <Tag>{item.durationMs}ms</Tag>}
+                        </div>
+                      }
+                      description={
+                        <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                          <Text type="secondary">状态：{item.status}</Text>
+                          <Text>{item.detail}</Text>
+                          {item.command && <Text code>{item.command}</Text>}
+                        </Space>
+                      }
+                    />
+                  </List.Item>
+                )}
+              />
+            )}
+          </Card>
+
+          <Card
+            title="证据锁定面板"
+            extra={<Tag color={lockedEvidence.length > 0 ? 'processing' : 'default'}>{lockedEvidence.length} 条</Tag>}
+          >
+            <Space direction="vertical" size={12} style={{ width: '100%' }}>
+              <Space wrap>
+                <Button icon={<CopyOutlined />} disabled={lockedEvidence.length === 0} onClick={() => void copyEvidencePanel()}>
+                  复制 Markdown
+                </Button>
+                <Popconfirm title="清空所有锁定证据？" onConfirm={() => clearEvidence()}>
+                  <Button danger disabled={lockedEvidence.length === 0}>
+                    清空证据
+                  </Button>
+                </Popconfirm>
+              </Space>
+              {lockedEvidence.length === 0 ? (
+                <Alert
+                  type="info"
+                  showIcon
+                  message="还没有锁定证据"
+                  description="可以从会话日志、分析 Finding、采集输出和首个异常卡片中，把关键现场固定到这里，后续直接导出给人或 Agent。"
+                />
+              ) : (
+                <List
+                  dataSource={lockedEvidence}
+                  renderItem={(item) => {
+                    const canLocate = hasCLookupText(item.lookupText);
+                    return (
+                      <List.Item
+                        actions={[
+                          ...(canLocate
+                            ? [
+                                <Button
+                                  key="source"
+                                  type="link"
+                                  icon={<CodeOutlined />}
+                                  onClick={() => locateSourceFromParts({
+                                    title: item.title,
+                                    summary: item.summary,
+                                    sourceType: item.sourceType,
+                                    text: item.lookupText,
+                                    parts: [item.title, item.summary, item.content],
+                                    command: item.command,
+                                  })}
+                                >
+                                  看源码
+                                </Button>,
+                              ]
+                            : []),
+                          <Button key="remove" type="link" danger onClick={() => removeEvidence(item.id)}>
+                            删除
+                          </Button>,
+                        ]}
+                      >
+                        <List.Item.Meta
+                          title={
+                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                              <Text strong>{item.title}</Text>
+                              <Tag>{item.sourceType}</Tag>
+                              {item.sessionLabel && <Tag color="processing">{item.sessionLabel}</Tag>}
+                            </div>
+                          }
+                          description={
+                            <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                              <Text type="secondary">{item.summary}</Text>
+                              {item.command && <Text code>{item.command}</Text>}
+                              <ResizableOutput
+                                content={item.content}
+                                isDark={isDark}
+                                minHeight={56}
+                                maxHeight={180}
+                                onTextSelect={(text) => locateSourceFromParts({
+                                  title: `${item.title} - 手动选词`,
+                                  summary: item.summary,
+                                  sourceType: `${item.sourceType}_selection`,
+                                  text,
+                                  command: item.command,
+                                })}
+                              />
+                              <div>
+                                {item.tags.map((tag) => (
+                                  <Tag key={tag}>{tag}</Tag>
+                                ))}
+                              </div>
+                            </Space>
+                          }
+                        />
+                      </List.Item>
+                    );
+                  }}
+                />
+              )}
+            </Space>
+          </Card>
+        </Space>
+      </div>
+
       <div style={{ marginTop: 16 }}>
         <Card
           title="Agent 会话监控"
@@ -786,40 +2421,108 @@ const DiagnosticWorkbench: React.FC = () => {
             <List
               size="small"
               dataSource={[...sessionLogs].reverse()}
-              renderItem={(item) => (
-                <List.Item>
-                  <List.Item.Meta
-                    title={
-                      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                        <Text strong>{item.type}</Text>
-                        <Tag color={item.level === 'error' ? 'red' : item.level === 'warning' ? 'orange' : 'blue'}>{item.level || 'info'}</Tag>
-                        <Text type="secondary">{formatTs(item.ts)}</Text>
-                        {typeof item.exitCode === 'number' && <Tag color={item.exitCode === 0 ? 'green' : 'red'}>exit {item.exitCode}</Tag>}
-                        {typeof item.durationMs === 'number' && <Tag>{item.durationMs}ms</Tag>}
-                        {item.mode && <Tag>{item.mode}</Tag>}
-                      </div>
-                    }
-                    description={
-                      <Space direction="vertical" size={6} style={{ width: '100%' }}>
+              renderItem={(item) => {
+                const lookupText = buildLookupText([item.type, item.message, item.stdout, item.stderr]);
+                const canLocate = hasCLookupText(lookupText);
+                return (
+                  <List.Item
+                    actions={[
+                      ...(canLocate
+                        ? [
+                            <Button
+                              key="source"
+                              type="link"
+                              icon={<CodeOutlined />}
+                              onClick={() => locateSourceFromParts({
+                                title: `会话日志: ${item.type}`,
+                                summary: item.message || `exit=${item.exitCode ?? '-'} / duration=${item.durationMs ?? '-'}ms`,
+                                sourceType: 'session_log',
+                                text: lookupText,
+                                parts: [item.type, item.message, item.stdout, item.stderr],
+                                command: item.cmd,
+                              })}
+                            >
+                              看源码
+                            </Button>,
+                          ]
+                        : []),
+                      <Button
+                        key="lock"
+                        type="link"
+                        icon={<PushpinOutlined />}
+                        onClick={() => lockEvidence({
+                          sourceType: 'session_log',
+                          sourceId: item.id,
+                          title: `会话日志: ${item.type}`,
+                          summary: item.message || `exit=${item.exitCode ?? '-'} / duration=${item.durationMs ?? '-'}ms`,
+                          content: buildSessionLogEvidence(item),
+                          lookupText,
+                          command: item.cmd,
+                          sessionLabel: currentSession ? `${currentSession.username}@${currentSession.host}` : undefined,
+                          tags: collectEvidenceTags([item.message, item.stdout, item.stderr, item.cmd, item.type]),
+                        })}
+                      >
+                        锁定
+                      </Button>,
+                    ]}
+                  >
+                    <List.Item.Meta
+                      title={
+                        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                          <Text strong>{item.type}</Text>
+                          <Tag color={item.level === 'error' ? 'red' : item.level === 'warning' ? 'orange' : 'blue'}>{item.level || 'info'}</Tag>
+                          <Text type="secondary">{formatTs(item.ts)}</Text>
+                          {typeof item.exitCode === 'number' && <Tag color={item.exitCode === 0 ? 'green' : 'red'}>exit {item.exitCode}</Tag>}
+                          {typeof item.durationMs === 'number' && <Tag>{item.durationMs}ms</Tag>}
+                          {item.mode && <Tag>{item.mode}</Tag>}
+                        </div>
+                      }
+                      description={
+                        <Space direction="vertical" size={6} style={{ width: '100%' }}>
                         {item.cmd && <Text code>{item.cmd}</Text>}
                         {item.message && <Text>{item.message}</Text>}
                         {item.stdout && (
                           <div>
                             <Text strong>stdout</Text>
-                            <ResizableOutput content={item.stdout} isDark={isDark} minHeight={56} maxHeight={180} />
+                            <ResizableOutput
+                              content={item.stdout}
+                              isDark={isDark}
+                              minHeight={56}
+                              maxHeight={180}
+                              onTextSelect={(text) => locateSourceFromParts({
+                                title: `会话日志 stdout: ${item.type}`,
+                                summary: item.message || '手动选取 stdout 中的线索',
+                                sourceType: 'session_log_selection',
+                                text,
+                                command: item.cmd,
+                              })}
+                            />
                           </div>
                         )}
                         {item.stderr && (
                           <div>
                             <Text strong>stderr</Text>
-                            <ResizableOutput content={item.stderr} isDark={isDark} minHeight={56} maxHeight={180} />
+                            <ResizableOutput
+                              content={item.stderr}
+                              isDark={isDark}
+                              minHeight={56}
+                              maxHeight={180}
+                              onTextSelect={(text) => locateSourceFromParts({
+                                title: `会话日志 stderr: ${item.type}`,
+                                summary: item.message || '手动选取 stderr 中的线索',
+                                sourceType: 'session_log_selection',
+                                text,
+                                command: item.cmd,
+                              })}
+                            />
                           </div>
                         )}
-                      </Space>
-                    }
-                  />
-                </List.Item>
-              )}
+                        </Space>
+                      }
+                    />
+                  </List.Item>
+                );
+              }}
             />
           )}
         </Card>
@@ -994,16 +2697,44 @@ const DiagnosticWorkbench: React.FC = () => {
                         <Card
                           key={step.id}
                           size="small"
-                          title={step.name}
+                          title={
+                            <Space wrap>
+                              <Text strong>{step.name}</Text>
+                              <Tag color={STEP_PHASE_META[step.phase].color}>{STEP_PHASE_META[step.phase].label}</Tag>
+                            </Space>
+                          }
                           extra={<Button size="small" danger icon={<DeleteOutlined />} onClick={() => removeCollectionStep(step.id)} />}
                         >
                           <Space direction="vertical" size={8} style={{ width: '100%' }}>
                             <Input value={step.name} onChange={(e) => updateCollectionStep(step.id, { name: e.target.value })} placeholder="步骤名" />
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                              <Select
+                                value={step.phase}
+                                options={Object.entries(STEP_PHASE_META).map(([value, meta]) => ({
+                                  value,
+                                  label: meta.label,
+                                }))}
+                                onChange={(value) => updateCollectionStep(step.id, { phase: value as DiagnosticCollectionStep['phase'] })}
+                              />
+                              <Select
+                                value={step.continueOnFailure ? 'continue' : 'stop'}
+                                options={[
+                                  { label: '失败继续', value: 'continue' },
+                                  { label: '失败停下', value: 'stop' },
+                                ]}
+                                onChange={(value) => updateCollectionStep(step.id, { continueOnFailure: value === 'continue' })}
+                              />
+                            </div>
                             <TextArea
                               value={step.command}
                               onChange={(e) => updateCollectionStep(step.id, { command: e.target.value })}
                               autoSize={{ minRows: 2, maxRows: 4 }}
                               placeholder="填写远程采集命令"
+                            />
+                            <Input
+                              value={step.expectedSignal}
+                              onChange={(e) => updateCollectionStep(step.id, { expectedSignal: e.target.value })}
+                              placeholder="预期抓到什么信号，例如 timeout / iostat util 飙升 / 恢复完成"
                             />
                             <Input
                               value={String(step.timeoutMs)}
@@ -1165,7 +2896,22 @@ const DiagnosticWorkbench: React.FC = () => {
               <Space direction="vertical" size={16} style={{ width: '100%' }}>
                 <Card size="small" title={detailRun.title} extra={<Tag color={statusColorMap[detailRun.status] || 'default'}>{detailRun.status}</Tag>}>
                   <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                    {detailRun.scenarioType && (
+                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                        <Tag color={SCENARIO_META[detailRun.scenarioType]?.color || 'default'}>
+                          {SCENARIO_META[detailRun.scenarioType]?.label || detailRun.scenarioType}
+                        </Tag>
+                        {(detailRun.tags || []).map((tag) => (
+                          <Tag key={tag}>{tag}</Tag>
+                        ))}
+                      </div>
+                    )}
                     <Text type="secondary">故障现象：{detailRun.symptom}</Text>
+                    {detailRun.objective && <Text type="secondary">目标：{detailRun.objective}</Text>}
+                    {detailRun.successCriteria && <Text type="secondary">成功判据：{detailRun.successCriteria}</Text>}
+                    {buildContextSummary(detailContextSnapshot) && (
+                      <Text type="secondary">定位上下文：{buildContextSummary(detailContextSnapshot)}</Text>
+                    )}
                     <Text type="secondary">运行时间：{formatTs(detailRun.startedAt)} {detailRun.finishedAt ? `- ${formatTs(detailRun.finishedAt)}` : ''}</Text>
                     <Text type="secondary">目标会话：{detailRun.sessionLabel || '未绑定 SSH 会话'}</Text>
                   </Space>
@@ -1213,7 +2959,26 @@ const DiagnosticWorkbench: React.FC = () => {
                     <List
                       dataSource={detailRun.findings || []}
                       renderItem={(finding) => (
-                        <List.Item>
+                        <List.Item
+                          actions={[
+                            <Button
+                              key="lock"
+                              type="link"
+                              icon={<PushpinOutlined />}
+                              onClick={() => lockEvidence({
+                                sourceType: 'finding',
+                                sourceId: finding.id,
+                                title: finding.title,
+                                summary: finding.summary,
+                                content: finding.evidence || '',
+                                sessionLabel: detailRun.sessionLabel,
+                                tags: collectEvidenceTags([finding.title, finding.summary, finding.evidence]),
+                              })}
+                            >
+                              锁定证据
+                            </Button>,
+                          ]}
+                        >
                           <List.Item.Meta
                             title={
                               <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -1246,10 +3011,30 @@ const DiagnosticWorkbench: React.FC = () => {
                       ) : (
                         <Space direction="vertical" size={12} style={{ width: '100%' }}>
                           {(detailRun.collectionSteps || []).map((step) => (
-                            <Card key={step.id} size="small" title={step.name} extra={<Tag color={statusColorMap[step.status] || 'default'}>{step.status}</Tag>}>
+                            <Card
+                              key={step.id}
+                              size="small"
+                              title={
+                                <Space wrap>
+                                  <Text strong>{step.name}</Text>
+                                  {step.phase && (
+                                    <Tag color={STEP_PHASE_META[step.phase as keyof typeof STEP_PHASE_META]?.color || 'default'}>
+                                      {STEP_PHASE_META[step.phase as keyof typeof STEP_PHASE_META]?.label || step.phase}
+                                    </Tag>
+                                  )}
+                                </Space>
+                              }
+                              extra={<Tag color={statusColorMap[step.status] || 'default'}>{step.status}</Tag>}
+                            >
                               <Space direction="vertical" size={8} style={{ width: '100%' }}>
                                 <Text code>{step.resolvedCommand || step.command}</Text>
-                                <Text type="secondary">exit={step.exitCode} / duration={step.durationMs}ms</Text>
+                                <Text type="secondary">
+                                  exit={step.exitCode} / duration={step.durationMs}ms
+                                  {step.startedAt ? ` / start=${formatTs(step.startedAt)}` : ''}
+                                </Text>
+                                {step.expectedSignal && (
+                                  <Text type="secondary">预期信号：{step.expectedSignal}</Text>
+                                )}
                                 <ResizableOutput content={step.stdout || step.stderr || ''} isDark={isDark} minHeight={84} maxHeight={260} />
                                 {step.stderr && (
                                   <>
@@ -1257,6 +3042,36 @@ const DiagnosticWorkbench: React.FC = () => {
                                     <ResizableOutput content={step.stderr} isDark={isDark} minHeight={60} maxHeight={200} />
                                   </>
                                 )}
+                                <Space wrap>
+                                  <Button
+                                    size="small"
+                                    icon={<PushpinOutlined />}
+                                    onClick={() => lockEvidence({
+                                      sourceType: 'collection_step',
+                                      sourceId: step.id,
+                                      title: `采集步骤: ${step.name}`,
+                                      summary: step.conclusion || step.expectedSignal || '采集输出已锁定',
+                                      content: [step.stdout, step.stderr].filter(Boolean).join('\n'),
+                                      command: step.resolvedCommand || step.command,
+                                      sessionLabel: detailRun.sessionLabel,
+                                      tags: collectEvidenceTags([step.name, step.expectedSignal, step.stdout, step.stderr]),
+                                    })}
+                                  >
+                                    锁定输出
+                                  </Button>
+                                  <Button
+                                    size="small"
+                                    icon={<SaveOutlined />}
+                                    onClick={() => saveCommandAsTemplate(
+                                      `${step.name} - 采集命令`,
+                                      step.resolvedCommand || step.command,
+                                      step.expectedSignal || step.conclusion || '来自诊断工作台的采集步骤',
+                                      '诊断/采集步骤'
+                                    )}
+                                  >
+                                    保存命令模板
+                                  </Button>
+                                </Space>
                               </Space>
                             </Card>
                           ))}
@@ -1276,6 +3091,7 @@ const DiagnosticWorkbench: React.FC = () => {
                                 <Text code>{action.scriptPath}</Text>
                                 <Text type="secondary">
                                   phase={action.runMode} / exit={action.exitCode} / duration={action.durationMs}ms
+                                  {action.startedAt ? ` / start=${formatTs(action.startedAt)}` : ''}
                                 </Text>
                                 <ResizableOutput content={action.stdout || action.stderr || ''} isDark={isDark} minHeight={72} maxHeight={240} />
                                 {action.stdinPayload && (
@@ -1284,6 +3100,22 @@ const DiagnosticWorkbench: React.FC = () => {
                                     <ResizableOutput content={action.stdinPayload} isDark={isDark} minHeight={52} maxHeight={180} />
                                   </>
                                 )}
+                                <Button
+                                  size="small"
+                                  icon={<PushpinOutlined />}
+                                  onClick={() => lockEvidence({
+                                    sourceType: 'business_action',
+                                    sourceId: action.id,
+                                    title: `业务动作: ${action.name}`,
+                                    summary: `phase=${action.runMode} / exit=${action.exitCode}`,
+                                    content: [action.stdout, action.stderr].filter(Boolean).join('\n'),
+                                    command: action.scriptPath,
+                                    sessionLabel: detailRun.sessionLabel,
+                                    tags: collectEvidenceTags([action.name, action.runMode, action.stdout, action.stderr]),
+                                  })}
+                                >
+                                  锁定输出
+                                </Button>
                               </Space>
                             </Card>
                           ))}

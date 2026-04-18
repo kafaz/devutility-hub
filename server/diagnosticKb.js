@@ -81,6 +81,15 @@ function buildSignals(runLike) {
     runLike.symptom,
     runLike.title,
     runLike.notes,
+    runLike.objective,
+    runLike.successCriteria,
+    ...(runLike.tags || []),
+    runLike.contextSnapshot?.impactScope,
+    runLike.contextSnapshot?.triggerAction,
+    runLike.contextSnapshot?.recentChange,
+    runLike.contextSnapshot?.expectedBehavior,
+    runLike.contextSnapshot?.observationWindow,
+    runLike.contextSnapshot?.logKeywords,
   ].join('\n'));
 
   const findingKeywords = tokenizeText([
@@ -99,6 +108,8 @@ function buildSignals(runLike) {
       step.name,
       step.command,
       step.resolvedCommand,
+      step.phase,
+      step.expectedSignal,
     ].join('\n')),
     ...(runLike.businessActions || []).map((action) => [
       action.name,

@@ -13,15 +13,6 @@ export default defineConfig({
       '@store': path.resolve(__dirname, './src/store'),
     },
   },
-  server: {
-    proxy: {
-      '/benchmark-api': {
-        target: 'http://127.0.0.1:8080',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/benchmark-api/, '/api')
-      }
-    }
-  },
   build: {
     rollupOptions: {
       output: {

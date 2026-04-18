@@ -1401,7 +1401,7 @@ const SSHManager: React.FC = () => {
                               const currentLine = getLine();
                               const cleanCmd = currentLine.replace(/^.*?[#$]\s+/, '').trim();
                               if (cleanCmd) {
-                                recordManualCommandStart(sess.id, cleanCmd);
+                                recordManualCommandStart(sess.id, cleanCmd, currentLine);
                               }
                             }
                           }

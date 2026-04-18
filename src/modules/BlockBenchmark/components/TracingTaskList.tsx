@@ -37,7 +37,7 @@ const TracingTaskList: React.FC<Props> = ({ selectedTaskId, onSelect }) => {
       );
 
       for (const task of runningTasks) {
-        execCommandOnSession(task.nodeId, `ps -p ${task.pid} > /dev/null; echo $?`, 10000)
+        execCommandOnSession(task.nodeId, `ps -p ${task.pid} > /dev/null; echo $?`, 10000, { journal: false })
           .then((res) => {
             const exitCode = parseInt(res.stdout.trim(), 10);
             if (exitCode !== 0) {

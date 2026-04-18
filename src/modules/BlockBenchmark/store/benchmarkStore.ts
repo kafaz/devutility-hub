@@ -1,9 +1,11 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { generateId } from '../../../utils';
+import { useSSHStore } from '../../SSHManager/store/sshStore';
 import type {
   BusinessTemplate,
   BusinessExecution,
+  StepResult,
   ChaosFault,
   ChaosInjection,
   TracedTask,
@@ -25,6 +27,13 @@ export interface BenchmarkTask {
   task_type: string;
   status: string;
   created_at: string;
+  session_id?: string;
+  pid?: string;
+  device?: string;
+  io_model?: string;
+  business_name?: string;
+  log_path?: string;
+  last_checked_at?: string;
 }
 
 export interface WriteTestPayload {
@@ -207,6 +216,89 @@ export const BUILTIN_CONSISTENCY_CHECKS: ConsistencyCheck[] = [
   },
 ];
 
+function quoteShellArg(value: string): string {
+  return `'${String(value).replace(/'/g, `'"'"'`)}'`;
+}
+
+function normalizeJobName(value: string): string {
+  const normalized = value.trim().replace(/[^a-zA-Z0-9_.-]+/g, '-');
+  return normalized || 'block-benchmark';
+}
+
+function resolveSessionIdForAgent(agentId: string, mappings: AgentMapping[]): string | null {
+  const { sessions } = useSSHStore.getState();
+  const mapped = mappings.find((item) => item.bbAgentId === agentId);
+  if (mapped) return mapped.sshSessionId;
+
+  const bySessionId = sessions.find((session) => session.id === agentId);
+  if (bySessionId) return bySessionId.id;
+
+  const bySessionName = sessions.find((session) => session.name === agentId);
+  return bySessionName?.id ?? null;
+}
+
+function buildAgentSnapshot(mappings: AgentMapping[]): AgentStatus[] {
+  const { sessions, profiles } = useSSHStore.getState();
+
+  return sessions.map((session) => {
+    const mapping = mappings.find((item) => item.sshSessionId === session.id);
+    const profile = profiles.find((item) => item.id === session.profileId);
+
+    return {
+      id: mapping?.bbAgentId ?? session.name,
+      ip: profile?.host ?? '',
+      status: session.status === 'connected' ? 'online' : 'offline',
+      last_heartbeat: new Date(session.connectedAt ?? Date.now()).toISOString(),
+    };
+  });
+}
+
+function buildBenchmarkCommand(payload: WriteTestPayload): string {
+  const { params } = payload;
+  const jobName = normalizeJobName(payload.business_name || `${payload.agent_id}-${params.device}`);
+
+  if (params.io_model === 'simulated') {
+    return [
+      'bash -lc',
+      quoteShellArg(
+        [
+          `echo "[simulated] ${jobName} -> ${params.device}"`,
+          'sleep 1',
+          'echo "[simulated] completed"',
+        ].join(' && ')
+      ),
+    ].join(' ');
+  }
+
+  const ioengine =
+    params.fio_engine ||
+    (params.io_model === 'sync' ? 'sync' : params.io_model === 'direct' ? 'libaio' : 'libaio');
+  const rw = params.workload_profile || 'write';
+  const direct = params.io_model === 'sync' ? '0' : '1';
+  const iodepth = params.iodepth || (params.io_model === 'sync' ? '1' : params.concurrency || '1');
+
+  const args = [
+    'fio',
+    `--name=${quoteShellArg(jobName)}`,
+    `--filename=${quoteShellArg(params.device)}`,
+    `--ioengine=${quoteShellArg(ioengine)}`,
+    `--rw=${quoteShellArg(rw)}`,
+    `--bs=${quoteShellArg(params.block_size || '4k')}`,
+    `--numjobs=${quoteShellArg(params.concurrency || '1')}`,
+    `--iodepth=${quoteShellArg(iodepth)}`,
+    `--number_ios=${quoteShellArg(params.iterations || '1')}`,
+    `--offset=${quoteShellArg(params.lba || '0')}`,
+    `--direct=${direct}`,
+    '--group_reporting=1',
+  ];
+
+  if (params.read_verify === 'true') {
+    args.push('--verify=md5', '--verify_fatal=1');
+  }
+
+  return args.join(' ');
+}
+
 interface BenchmarkStore {
   agents: AgentStatus[];
   fetchAgents: () => Promise<void>;
@@ -244,6 +336,12 @@ interface BenchmarkStore {
   businessExecutions: BusinessExecution[];
   addBusinessExecution: (execution: BusinessExecution) => void;
   updateBusinessExecution: (id: string, updates: Partial<BusinessExecution>) => void;
+  upsertBusinessExecutionStepResult: (
+    executionId: string,
+    nodeId: string,
+    result: StepResult,
+    sharedVars?: Record<string, string>
+  ) => void;
 
   // Chaos Injection
   chaosFaults: ChaosFault[];
@@ -259,6 +357,7 @@ interface BenchmarkStore {
   updateTracedTask: (id: string, updates: Partial<TracedTask>) => void;
   removeTracedTask: (id: string) => void;
   appendLogBuffer: (taskId: string, pathId: string, lines: string[]) => void;
+  replaceLogBuffer: (taskId: string, pathId: string, lines: string[]) => void;
 
   // IO Monitoring
   ioSnapshots: IOMetricsSnapshot[];
@@ -277,44 +376,92 @@ export const useBenchmarkStore = create<BenchmarkStore>()(
     (set, get) => ({
       agents: [],
       fetchAgents: async () => {
-        try {
-          const res = await fetch('/benchmark-api/agents');
-          if (!res.ok) return;
-          const data = await res.json();
-          set({ agents: Array.isArray(data) ? data : [] });
-        } catch {
-          // controller not reachable
-        }
+        set({ agents: buildAgentSnapshot(get().agentMappings) });
       },
 
       tasks: [],
       fetchTasks: async () => {
-        try {
-          const res = await fetch('/benchmark-api/dashboard');
-          if (!res.ok) return;
-          const data = await res.json();
-          set({ tasks: data.recent_tasks || [] });
-        } catch {
-          // ignore fetch errors
-        }
+        const { execCommandOnSession } = useSSHStore.getState();
+        const runningTasks = get().tasks.filter(
+          (task) => task.status === 'running' && task.session_id && task.pid
+        );
+
+        if (runningTasks.length === 0) return;
+
+        const updates = await Promise.all(
+          runningTasks.map(async (task) => {
+            try {
+              const res = await execCommandOnSession(
+                task.session_id!,
+                `ps -p ${task.pid} > /dev/null; echo $?`,
+                10000,
+                { journal: false }
+              );
+              const probe = res.stdout.trim().split(/\s+/).pop();
+              return {
+                id: task.id,
+                status: probe === '0' ? 'running' : 'completed',
+                last_checked_at: new Date().toISOString(),
+              };
+            } catch {
+              return {
+                id: task.id,
+                status: 'unknown',
+                last_checked_at: new Date().toISOString(),
+              };
+            }
+          })
+        );
+
+        set((state) => ({
+          tasks: state.tasks.map((task) => {
+            const update = updates.find((item) => item.id === task.id);
+            return update ? { ...task, ...update } : task;
+          }),
+        }));
       },
 
       startTask: async (payload) => {
-        const res = await fetch('/benchmark-api/tasks/start', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-        if (!res.ok) throw new Error('Task start failed');
+        const sessionId = resolveSessionIdForAgent(payload.agent_id, get().agentMappings);
+        if (!sessionId) {
+          throw new Error(`找不到 Agent ID ${payload.agent_id} 对应的 SSH 会话`);
+        }
+
+        const { execCommandOnSession } = useSSHStore.getState();
+        const taskId = generateId();
+        const logPath = `/tmp/devutility-benchmark-${taskId}.log`;
+        const launchCmd = `nohup sh -lc ${quoteShellArg(buildBenchmarkCommand(payload))} > ${quoteShellArg(logPath)} 2>&1 & echo $!`;
+        const res = await execCommandOnSession(sessionId, launchCmd, 15000);
+        const pid = res.stdout.trim().split(/\s+/).pop() ?? '';
+
+        if (!/^\d+$/.test(pid)) {
+          throw new Error(`任务启动失败，未返回有效 PID: ${res.stdout.trim() || '(empty stdout)'}`);
+        }
+
+        const createdAt = new Date().toISOString();
+        set((state) => ({
+          tasks: [
+            {
+              id: taskId,
+              agent_id: payload.agent_id,
+              task_type: payload.params.workload_profile || payload.params.io_model,
+              status: 'running',
+              created_at: createdAt,
+              session_id: sessionId,
+              pid,
+              device: payload.params.device,
+              io_model: payload.params.io_model,
+              business_name: payload.business_name,
+              log_path: logPath,
+              last_checked_at: createdAt,
+            },
+            ...state.tasks,
+          ],
+        }));
       },
 
       startIOSession: async (payload) => {
-        const res = await fetch('/benchmark-api/io/sessions/start', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        });
-        if (!res.ok) throw new Error('Session start failed');
+        await get().startTask(payload);
       },
 
       savedModels: [],
@@ -368,6 +515,30 @@ export const useBenchmarkStore = create<BenchmarkStore>()(
             e.id === id ? { ...e, ...updates } : e
           ),
         })),
+      upsertBusinessExecutionStepResult: (executionId, nodeId, result, sharedVars) =>
+        set((s) => ({
+          businessExecutions: s.businessExecutions.map((execution) => {
+            if (execution.id !== executionId) return execution;
+
+            const nodeResults = execution.stepResults[nodeId] ?? [];
+            const existingIndex = nodeResults.findIndex((item) => item.stepId === result.stepId);
+            const nextNodeResults =
+              existingIndex === -1
+                ? [...nodeResults, result]
+                : nodeResults.map((item, index) => (index === existingIndex ? result : item));
+
+            return {
+              ...execution,
+              stepResults: {
+                ...execution.stepResults,
+                [nodeId]: nextNodeResults,
+              },
+              ...(sharedVars
+                ? { sharedVars: { ...execution.sharedVars, ...sharedVars } }
+                : {}),
+            };
+          }),
+        })),
 
       // Chaos Injection
       chaosFaults: [...BUILTIN_CHAOS_FAULTS],
@@ -411,6 +582,18 @@ export const useBenchmarkStore = create<BenchmarkStore>()(
                 const combined = [...(lp.buffer || []), ...lines];
                 return { ...lp, buffer: combined.slice(-500) };
               }),
+            };
+          }),
+        })),
+      replaceLogBuffer: (taskId, pathId, lines) =>
+        set((s) => ({
+          tracedTasks: s.tracedTasks.map((t) => {
+            if (t.id !== taskId) return t;
+            return {
+              ...t,
+              logPaths: t.logPaths.map((lp) => (
+                lp.id === pathId ? { ...lp, buffer: lines.slice(-500) } : lp
+              )),
             };
           }),
         })),

@@ -76,6 +76,7 @@ const {
 } = require('./commandPolicy');
 const {
   openCodeContext,
+  renderLocation,
   renderSymbol,
   searchSymbols,
   getCallers,
@@ -588,6 +589,11 @@ function normalizeDiagnosticPayload(payload) {
     symptom,
     notes = '',
     sessionId = '',
+    scenarioType = 'problem_localization',
+    objective = '',
+    successCriteria = '',
+    tags = [],
+    contextSnapshot = {},
     collectionPlan = [],
     analysisRules = [],
     businessActions = [],
@@ -628,6 +634,18 @@ function normalizeDiagnosticPayload(payload) {
     symptom,
     notes,
     sessionId,
+    scenarioType: String(scenarioType || 'problem_localization'),
+    objective: String(objective || ''),
+    successCriteria: String(successCriteria || ''),
+    tags: Array.isArray(tags) ? tags.map((tag) => String(tag).trim()).filter(Boolean) : [],
+    contextSnapshot: {
+      impactScope: String(contextSnapshot?.impactScope || ''),
+      triggerAction: String(contextSnapshot?.triggerAction || ''),
+      recentChange: String(contextSnapshot?.recentChange || ''),
+      expectedBehavior: String(contextSnapshot?.expectedBehavior || ''),
+      observationWindow: String(contextSnapshot?.observationWindow || ''),
+      logKeywords: String(contextSnapshot?.logKeywords || ''),
+    },
     normalizedRules: Array.isArray(analysisRules)
       ? analysisRules.map((rule, index) => ({
         id: rule.id || `rule-${index + 1}`,
@@ -644,6 +662,9 @@ function normalizeDiagnosticPayload(payload) {
         name: step.name || `采集步骤 ${index + 1}`,
         command: String(step.command || step.cmd || ''),
         timeoutMs: Number(step.timeoutMs || step.timeout || 30000),
+        phase: String(step.phase || 'prepare'),
+        expectedSignal: String(step.expectedSignal || ''),
+        continueOnFailure: Boolean(step.continueOnFailure),
       }))
       : [],
     normalizedActions: Array.isArray(businessActions)
@@ -663,6 +684,7 @@ function normalizeDiagnosticPayload(payload) {
 async function executeBusinessStage(actions, runMode) {
   const results = [];
   for (const action of actions.filter((item) => item.runMode === runMode)) {
+    const actionStartedAt = Date.now();
     const output = await runPythonControlScript(
       action.scriptPath,
       action.args,
@@ -682,6 +704,8 @@ async function executeBusinessStage(actions, runMode) {
       stderr: output.stderr,
       exitCode: output.exitCode,
       durationMs: output.durationMs,
+      startedAt: actionStartedAt,
+      finishedAt: actionStartedAt + output.durationMs,
       status: output.exitCode === 0 ? 'done' : 'failed',
     });
   }
@@ -694,6 +718,11 @@ async function runDiagnosticOrchestration(payload) {
     symptom,
     notes,
     sessionId,
+    scenarioType,
+    objective,
+    successCriteria,
+    tags,
+    contextSnapshot,
     normalizedPlan,
     normalizedRules,
     normalizedActions,
@@ -708,9 +737,14 @@ async function runDiagnosticOrchestration(payload) {
   const beforeActions = await executeBusinessStage(normalizedActions, 'before_collection');
   const collectionSteps = [];
 
-  for (const step of normalizedPlan) {
+  for (let index = 0; index < normalizedPlan.length; index += 1) {
+    const step = normalizedPlan[index];
+    let shouldStop = false;
+    const stepStartedAt = Date.now();
+
     try {
       const result = await session.enqueueShellCmd(step.command, step.timeoutMs);
+      shouldStop = result.exitCode !== 0 && !step.continueOnFailure;
       collectionSteps.push({
         id: step.id,
         name: step.name,
@@ -720,11 +754,17 @@ async function runDiagnosticOrchestration(payload) {
         stderr: result.stderr,
         exitCode: result.exitCode,
         durationMs: result.durationMs,
+        startedAt: stepStartedAt,
+        finishedAt: stepStartedAt + result.durationMs,
+        phase: step.phase,
+        expectedSignal: step.expectedSignal,
+        continueOnFailure: step.continueOnFailure,
         status: result.exitCode === 0 ? 'done' : 'failed',
         conclusion: result.exitCode === 0 ? '命令执行完成' : `命令退出非零 (${result.exitCode})`,
         agent: 'collector',
       });
     } catch (e) {
+      shouldStop = !step.continueOnFailure;
       collectionSteps.push({
         id: step.id,
         name: step.name,
@@ -734,10 +774,40 @@ async function runDiagnosticOrchestration(payload) {
         stderr: e.message,
         exitCode: -1,
         durationMs: 0,
+        startedAt: stepStartedAt,
+        finishedAt: Date.now(),
+        phase: step.phase,
+        expectedSignal: step.expectedSignal,
+        continueOnFailure: step.continueOnFailure,
         status: 'failed',
         conclusion: `采集执行异常: ${e.message}`,
         agent: 'collector',
       });
+    }
+
+    if (shouldStop) {
+      normalizedPlan.slice(index + 1).forEach((pendingStep) => {
+        const skippedAt = Date.now();
+        collectionSteps.push({
+          id: pendingStep.id,
+          name: pendingStep.name,
+          command: pendingStep.command,
+          resolvedCommand: pendingStep.command,
+          stdout: '',
+          stderr: '',
+          exitCode: 0,
+          durationMs: 0,
+          startedAt: skippedAt,
+          finishedAt: skippedAt,
+          phase: pendingStep.phase,
+          expectedSignal: pendingStep.expectedSignal,
+          continueOnFailure: pendingStep.continueOnFailure,
+          status: 'skipped',
+          conclusion: `前置步骤「${step.name}」失败，且配置为失败停下`,
+          agent: 'collector',
+        });
+      });
+      break;
     }
   }
 
@@ -752,6 +822,7 @@ async function runDiagnosticOrchestration(payload) {
     title,
     symptom,
     notes,
+    contextSnapshot,
     collectionSteps,
     businessActions: allBusinessActions,
     findings,
@@ -761,6 +832,7 @@ async function runDiagnosticOrchestration(payload) {
     title,
     symptom,
     notes,
+    contextSnapshot,
     collectionSteps,
     businessActions: allBusinessActions,
     findings,
@@ -770,6 +842,7 @@ async function runDiagnosticOrchestration(payload) {
     title,
     symptom,
     notes,
+    contextSnapshot,
     collectionSteps,
     businessActions: allBusinessActions,
     findings,
@@ -781,6 +854,11 @@ async function runDiagnosticOrchestration(payload) {
     title,
     symptom,
     notes,
+    scenarioType,
+    objective,
+    successCriteria,
+    tags,
+    contextSnapshot,
     status:
       findings.some((finding) => finding.severity === 'critical') ||
       collectionSteps.some((step) => (step.exitCode ?? 0) !== 0) ||
@@ -1790,6 +1868,11 @@ app.post('/api/diagnostic/recall', (req, res) => {
     title = '',
     symptom = '',
     notes = '',
+    scenarioType = 'problem_localization',
+    objective = '',
+    successCriteria = '',
+    tags = [],
+    contextSnapshot = {},
     collectionPlan = [],
     businessActions = [],
     limit = 5,
@@ -1799,11 +1882,25 @@ app.post('/api/diagnostic/recall', (req, res) => {
     title,
     symptom,
     notes,
+    scenarioType,
+    objective,
+    successCriteria,
+    tags: Array.isArray(tags) ? tags.map((tag) => String(tag).trim()).filter(Boolean) : [],
+    contextSnapshot: {
+      impactScope: String(contextSnapshot?.impactScope || ''),
+      triggerAction: String(contextSnapshot?.triggerAction || ''),
+      recentChange: String(contextSnapshot?.recentChange || ''),
+      expectedBehavior: String(contextSnapshot?.expectedBehavior || ''),
+      observationWindow: String(contextSnapshot?.observationWindow || ''),
+      logKeywords: String(contextSnapshot?.logKeywords || ''),
+    },
     collectionSteps: Array.isArray(collectionPlan)
       ? collectionPlan.map((step) => ({
         name: step.name || '未命名步骤',
         command: step.command || step.cmd || '',
         resolvedCommand: step.command || step.cmd || '',
+        phase: step.phase || 'prepare',
+        expectedSignal: step.expectedSignal || '',
       }))
       : [],
     businessActions: Array.isArray(businessActions)
@@ -2050,6 +2147,18 @@ app.get('/api/code-context/:contextId/symbols', async (req, res) => {
 app.post('/api/code-context/:contextId/render', async (req, res) => {
   try {
     const data = await renderSymbol(req.params.contextId, req.body?.symbolId, {
+      beforeContext: req.body?.beforeContext,
+      afterContext: req.body?.afterContext,
+    });
+    res.json({ ok: true, data });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/api/code-context/:contextId/render-location', async (req, res) => {
+  try {
+    const data = await renderLocation(req.params.contextId, req.body?.sourcePath, req.body?.line, {
       beforeContext: req.body?.beforeContext,
       afterContext: req.body?.afterContext,
     });
