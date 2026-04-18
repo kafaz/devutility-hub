@@ -114,6 +114,26 @@ interface RenderedSymbolPayload {
   lines: RenderedLine[];
 }
 
+interface CallRelationPathNode {
+  name: string;
+  symbol: SymbolCandidate | null;
+  matchCount: number;
+}
+
+interface CallRelationPayload {
+  source: SymbolCandidate;
+  targetQuery: string;
+  target: SymbolCandidate | null;
+  relation: 'same' | 'direct' | 'indirect' | 'none';
+  reachable: boolean;
+  maxDepth: number;
+  hopCount: number;
+  visitedCount: number;
+  path: CallRelationPathNode[];
+  sourceMatchCount: number;
+  targetMatchCount: number;
+}
+
 interface SessionOption {
   sessionId: string;
   host: string;
@@ -198,7 +218,10 @@ const CodeContextExplorer: React.FC = () => {
   const [callers, setCallers] = useState<SymbolCandidate[]>([]);
   const [callees, setCallees] = useState<SymbolCandidate[]>([]);
   const [loadingCallChain, setLoadingCallChain] = useState(false);
-  const [knownFunctions, setKnownFunctions] = useState<Set<string>>(new Set());
+  const [relationTargetQuery, setRelationTargetQuery] = useState('');
+  const [relationMaxDepth, setRelationMaxDepth] = useState(8);
+  const [relationLoading, setRelationLoading] = useState(false);
+  const [relationResult, setRelationResult] = useState<CallRelationPayload | null>(null);
 
   const codePanelRef = useRef<HTMLDivElement>(null);
   const splitContainerRef = useRef<HTMLDivElement>(null);
@@ -224,6 +247,10 @@ const CodeContextExplorer: React.FC = () => {
   useEffect(() => {
     splitRatioRef.current = splitRatio;
   }, [splitRatio]);
+
+  useEffect(() => {
+    setRelationResult(null);
+  }, [activeContext?.contextId, selectedSymbol?.id]);
 
   useEffect(() => {
     const element = splitContainerRef.current;
@@ -351,7 +378,6 @@ const CodeContextExplorer: React.FC = () => {
       setActiveFunctionToken(null);
       setBeforeContext(DEFAULT_BEFORE_CONTEXT);
       setAfterContext(DEFAULT_AFTER_CONTEXT);
-      setKnownFunctions(new Set());
       if (typeof nextContext.symbolCount === 'number') {
         messageApi.success(`已绑定 C 代码版本，索引符号 ${nextContext.symbolCount} 个`);
       } else {
@@ -383,7 +409,6 @@ const CodeContextExplorer: React.FC = () => {
       setRendered(null);
       setCallers([]);
       setCallees([]);
-      setKnownFunctions(new Set());
     }
     setActiveContexts(nextContexts);
   }
@@ -438,7 +463,6 @@ const CodeContextExplorer: React.FC = () => {
     renderKeyRef.current += 1;
     const currentKey = renderKeyRef.current;
     setRendering(true);
-    setKnownFunctions(new Set());
     previousSnippetStartRef.current = rendered?.snippetStartLine ?? null;
 
     try {
@@ -461,26 +485,6 @@ const CodeContextExplorer: React.FC = () => {
       const payload = data.data as RenderedSymbolPayload;
       if (currentKey !== renderKeyRef.current) return;
       setRendered(payload);
-
-      // Build known functions set from symbol index for clickable highlighting
-      try {
-        const idxResponse = await fetch(
-          `${PROXY_HTTP}/api/code-context/${encodeURIComponent(contextId)}/symbols?q=${encodeURIComponent(payload.symbol.name)}&limit=200`
-        );
-        const idxData = await idxResponse.json();
-        if (currentKey !== renderKeyRef.current) return;
-        if (idxData.ok && Array.isArray(idxData.data)) {
-          const funcNames = new Set<string>();
-          (idxData.data as SymbolCandidate[]).forEach((s) => {
-            if ((s.kind || 'function') === 'function') {
-              funcNames.add(s.name);
-            }
-          });
-          setKnownFunctions(funcNames);
-        }
-      } catch {
-        // ignore index fetch errors
-      }
 
       // Load call chain
       void loadCallChain(contextId, symbolId, currentKey);
@@ -609,6 +613,50 @@ const CodeContextExplorer: React.FC = () => {
     pendingWheelExpandRef.current = null;
   }
 
+  async function analyzeCallRelation(nextTargetQuery?: string) {
+    const effectiveTargetQuery = String(nextTargetQuery ?? relationTargetQuery).trim();
+    if (!activeContext) {
+      messageApi.warning('请先绑定 repo / branch / commit，对 C 代码建立上下文');
+      return;
+    }
+    if (!selectedSymbol) {
+      messageApi.warning('请先选中一个起点函数');
+      return;
+    }
+    if (!effectiveTargetQuery) {
+      messageApi.warning('请输入目标函数名');
+      return;
+    }
+
+    setRelationLoading(true);
+    setRelationTargetQuery(effectiveTargetQuery);
+    try {
+      const response = await fetch(`${PROXY_HTTP}/api/code-context/${encodeURIComponent(activeContext.contextId)}/call-relation`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fromSymbolId: selectedSymbol.id,
+          targetQuery: effectiveTargetQuery,
+          maxDepth: relationMaxDepth,
+        }),
+      });
+      const data = await response.json();
+
+      if (!data.ok) {
+        messageApi.error(data.error || '调用关系分析失败');
+        setRelationResult(null);
+        return;
+      }
+
+      setRelationResult(data.data as CallRelationPayload);
+    } catch {
+      messageApi.error('调用关系分析失败');
+      setRelationResult(null);
+    } finally {
+      setRelationLoading(false);
+    }
+  }
+
   function handleCodeClick(event: React.MouseEvent<HTMLDivElement>) {
     const target = event.target as HTMLElement;
     const funcCall = target.closest('.code-func-call');
@@ -695,8 +743,8 @@ const CodeContextExplorer: React.FC = () => {
 
   const highlightedHtml = useMemo(() => {
     if (!rendered?.lines) return [];
-    return highlightCLines(rendered.lines, isDark, knownFunctions);
-  }, [rendered?.lines, isDark, knownFunctions]);
+    return highlightCLines(rendered.lines, isDark);
+  }, [rendered?.lines, isDark]);
 
   return (
     <div style={{ padding: 24 }}>
@@ -1108,6 +1156,107 @@ const CodeContextExplorer: React.FC = () => {
                   message={rendered.signature}
                   description="在代码面板顶部或底部继续滚轮，可以自动补更多上下文。点击代码中的函数调用可直接跳转定义。"
                 />
+
+                <div style={{ background: mutedBg, borderRadius: 8, padding: 12 }}>
+                  <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                    <div>
+                      <Text strong>间接调用关系分析</Text>
+                      <div>
+                        <Text type="secondary">
+                          以当前函数 <Text code>{rendered.symbol.name}</Text> 为起点，判断它是否会直接或间接调用另一个指定函数，并展开最短调用链。
+                        </Text>
+                      </div>
+                    </div>
+
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: leftPaneContentWidth > 0 && leftPaneContentWidth < 760
+                          ? 'minmax(0, 1fr)'
+                          : 'minmax(0, 1fr) 120px',
+                        gap: 10,
+                        alignItems: 'center',
+                      }}
+                    >
+                      <Search
+                        allowClear
+                        value={relationTargetQuery}
+                        onChange={(event) => setRelationTargetQuery(event.target.value)}
+                        onSearch={(value) => void analyzeCallRelation(value)}
+                        placeholder="输入目标函数名，例如 convert_thread_options_to_net"
+                        enterButton="分析链路"
+                        loading={relationLoading}
+                      />
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <Text type="secondary">最大深度</Text>
+                        <InputNumber
+                          min={1}
+                          max={24}
+                          value={relationMaxDepth}
+                          onChange={(value) => setRelationMaxDepth(Math.max(1, Math.min(Number(value) || 8, 24)))}
+                          style={{ width: '100%' }}
+                        />
+                      </div>
+                    </div>
+
+                    {relationLoading && <Spin size="small" />}
+
+                    {!relationLoading && relationResult && (
+                      <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                        <Alert
+                          type={relationResult.reachable ? 'success' : 'warning'}
+                          showIcon
+                          message={
+                            relationResult.reachable
+                              ? relationResult.relation === 'same'
+                                ? `${relationResult.source.name} 就是 ${relationResult.target?.name || relationResult.targetQuery}`
+                                : relationResult.relation === 'direct'
+                                  ? `发现直接调用: ${relationResult.source.name} -> ${relationResult.target?.name || relationResult.targetQuery}`
+                                  : `发现间接调用: ${relationResult.source.name} -> ${relationResult.target?.name || relationResult.targetQuery}`
+                              : `未发现 ${relationResult.source.name} 到 ${relationResult.target?.name || relationResult.targetQuery} 的可达调用链`
+                          }
+                          description={
+                            relationResult.reachable
+                              ? `共 ${relationResult.hopCount} 跳，搜索深度上限 ${relationResult.maxDepth}，遍历 ${relationResult.visitedCount} 个函数节点。`
+                              : `已在深度 ${relationResult.maxDepth} 内遍历 ${relationResult.visitedCount} 个函数节点，但没有找到到达目标函数的路径。`
+                          }
+                        />
+
+                        {(relationResult.sourceMatchCount > 1
+                          || relationResult.targetMatchCount > 1
+                          || relationResult.path.some((item) => item.matchCount > 1)) && (
+                          <Alert
+                            type="info"
+                            showIcon
+                            message="检测到同名函数"
+                            description="当前调用图按函数名建立；如果同名函数在多个文件里同时存在，链路判断会按函数名级别推断，点击节点时默认打开其中一个定义位置。"
+                          />
+                        )}
+
+                        {relationResult.reachable && relationResult.path.length > 0 && (
+                          <div>
+                            <Text type="secondary">最短调用链</Text>
+                            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8, alignItems: 'center' }}>
+                              {relationResult.path.map((item, index) => (
+                                <React.Fragment key={`${item.name}-${index}`}>
+                                  <Tag
+                                    color={index === 0 ? 'processing' : index === relationResult.path.length - 1 ? 'geekblue' : 'default'}
+                                    onClick={() => item.symbol && handleSelectSymbol(item.symbol)}
+                                    style={{ cursor: item.symbol ? 'pointer' : 'default', paddingInline: 10 }}
+                                  >
+                                    {item.name}
+                                    {item.matchCount > 1 ? ` (${item.matchCount})` : ''}
+                                  </Tag>
+                                  {index < relationResult.path.length - 1 && <Text type="secondary">→</Text>}
+                                </React.Fragment>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </Space>
+                    )}
+                  </Space>
+                </div>
 
                 <Collapse ghost defaultActiveKey={[]}>
                   <Panel

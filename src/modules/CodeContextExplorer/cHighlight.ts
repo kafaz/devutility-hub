@@ -185,7 +185,8 @@ export function highlightCLine(
       const fontWeight = t.type === 'keyword' ? ';font-weight:600' : '';
       const fontStyle = t.type === 'comment' ? ';font-style:italic' : '';
 
-      if (t.type === 'func' && knownFunctions?.has(t.text)) {
+      const canJumpToFunction = t.type === 'func' && (!knownFunctions || knownFunctions.has(t.text));
+      if (canJumpToFunction) {
         return `<span class="code-func-call" data-name="${escapeHtml(t.text)}" style="color:${palette[t.type]}${fontWeight};cursor:pointer;text-decoration:underline dotted">${escaped}</span>`;
       }
 

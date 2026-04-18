@@ -39,6 +39,7 @@ import {
   type FunctionCandidateToken,
   type SourceLocationCandidate,
 } from '../../utils/sourceLookupHints';
+import { highlightCLines } from '../CodeContextExplorer/cHighlight';
 import { generateId } from '../../utils';
 import {
   buildCollectionStepFromLibraryItem,
@@ -190,6 +191,7 @@ interface CommandPolicySnapshot {
 interface DerivedAnomaly {
   sourceType: 'finding' | 'collection_step' | 'business_action' | 'session_log';
   sourceId?: string;
+  ts?: number;
   title: string;
   severity: 'info' | 'warning' | 'critical';
   summary: string;
@@ -223,6 +225,47 @@ interface EffectiveErrorLog {
   severity: 'info' | 'warning' | 'critical';
   command?: string;
   tags: string[];
+}
+
+interface EffectiveErrorCluster {
+  id: string;
+  fingerprint: string;
+  representative: EffectiveErrorLog;
+  items: EffectiveErrorLog[];
+  severity: 'info' | 'warning' | 'critical';
+  count: number;
+  firstTs?: number;
+  lastTs?: number;
+  tags: string[];
+  sourceTypes: Array<EffectiveErrorLog['source']>;
+  keepReasons: string[];
+  score: number;
+  hasCLookup: boolean;
+  matchesFocusKeywords: string[];
+  baselineSeenCount: number;
+  baselineStatus: 'new' | 'known' | 'unknown';
+  matchedNoiseRules: NoiseSuppressionRule[];
+}
+
+interface EffectiveErrorNoiseView {
+  visibleClusters: EffectiveErrorCluster[];
+  foldedClusters: EffectiveErrorCluster[];
+  totalItems: number;
+  totalClusters: number;
+  foldedItems: number;
+}
+
+interface NoiseSuppressionRule {
+  id: string;
+  type: 'fingerprint' | 'keyword';
+  value: string;
+  reason: string;
+  createdAt: number;
+}
+
+interface BaselineReferenceSummary {
+  runs: DiagnosticRunRecord[];
+  fingerprintCounts: Map<string, number>;
 }
 
 interface CodeContextBindingDraft {
@@ -295,6 +338,20 @@ interface SourcePreviewState {
   locations: SourceLocationCandidate[];
   functions: FunctionCandidateToken[];
 }
+
+type SourcePreviewDisplayRow =
+  | {
+      type: 'line';
+      key: string;
+      line: RenderedSourceLine;
+      html: string;
+    }
+  | {
+      type: 'fold';
+      key: string;
+      label: string;
+      hiddenCount: number;
+    };
 
 function normalizeCommandPolicySnapshot(snapshot: Partial<CommandPolicySnapshot> | null | undefined): CommandPolicySnapshot {
   return {
@@ -435,6 +492,25 @@ function buildFocusedExcerpt(text: string, focusKeywords: string[], maxLines = 3
   return clipText(lines.slice(start, end).join('\n'), 520);
 }
 
+function normalizeNoiseFingerprint(value: string) {
+  const normalized = String(value || '')
+    .toLowerCase()
+    .replace(/\b\d{4}-\d{2}-\d{2}[t\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:z|[+-]\d{2}:?\d{2})?\b/g, '<ts>')
+    .replace(/\b\d{1,3}(?:\.\d{1,3}){3}\b/g, '<ip>')
+    .replace(/\b0x[0-9a-f]+\b/g, '<hex>')
+    .replace(/\b[a-f0-9]{8,}\b/g, '<id>')
+    .replace(/\/(?:[^/\s:]+\/)+[^/\s:]+/g, '<path>')
+    .replace(/\b\d+\b/g, '<n>')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return normalized.slice(0, 240);
+}
+
+function buildEffectiveErrorFingerprint(item: Pick<EffectiveErrorLog, 'id' | 'title' | 'reason' | 'excerpt'>) {
+  return normalizeNoiseFingerprint([item.title, item.reason, item.excerpt].filter(Boolean).join('\n')) || item.id;
+}
+
 function collectEvidenceTags(texts: Array<string | undefined>, seedTags: string[] = []) {
   const bucket = new Set(seedTags.filter(Boolean));
   const joined = texts.join('\n').toLowerCase();
@@ -463,6 +539,325 @@ function buildSessionLogEvidence(log: AgentSessionLogItem) {
   return [log.message, log.stdout, log.stderr].filter(Boolean).join('\n').trim();
 }
 
+function doesNoiseRuleMatchCluster(cluster: Pick<EffectiveErrorCluster, 'fingerprint' | 'representative' | 'tags'>, rule: NoiseSuppressionRule) {
+  const normalizedValue = String(rule.value || '').trim().toLowerCase();
+  if (!normalizedValue) return false;
+
+  if (rule.type === 'fingerprint') {
+    return cluster.fingerprint === normalizedValue;
+  }
+
+  const haystack = [
+    cluster.representative.title,
+    cluster.representative.reason,
+    cluster.representative.excerpt,
+    cluster.tags.join(' '),
+  ].join('\n').toLowerCase();
+
+  return haystack.includes(normalizedValue);
+}
+
+function pickBaselineRuns(historyRuns: DiagnosticRunRecord[], currentRun: DiagnosticRunRecord | null) {
+  if (!currentRun) return [] as DiagnosticRunRecord[];
+
+  const currentTags = new Set((currentRun.tags || []).map((item) => item.toLowerCase()));
+  const completedRuns = historyRuns.filter((run) => run.id !== currentRun.id && run.status === 'completed');
+  const ranked = completedRuns
+    .map((run) => {
+      let score = 0;
+      if (run.scenarioType && run.scenarioType === currentRun.scenarioType) score += 4;
+      if (run.sessionLabel && currentRun.sessionLabel && run.sessionLabel === currentRun.sessionLabel) score += 3;
+      if (run.title === currentRun.title) score += 2;
+      const overlap = (run.tags || []).reduce((sum, tag) => sum + (currentTags.has(String(tag).toLowerCase()) ? 1 : 0), 0);
+      score += Math.min(overlap, 3);
+      return { run, score };
+    })
+    .sort((left, right) => {
+      if (left.score !== right.score) return right.score - left.score;
+      return (right.run.startedAt || 0) - (left.run.startedAt || 0);
+    });
+
+  const scored = ranked.filter((item) => item.score > 0).slice(0, 5).map((item) => item.run);
+  if (scored.length > 0) return scored;
+  return ranked.slice(0, 3).map((item) => item.run);
+}
+
+function buildBaselineReferenceSummary(historyRuns: DiagnosticRunRecord[], currentRun: DiagnosticRunRecord | null) {
+  const baselineRuns = pickBaselineRuns(historyRuns, currentRun);
+  const fingerprintCounts = new Map<string, number>();
+
+  baselineRuns.forEach((run) => {
+    const context = normalizeContextSnapshot(run.contextSnapshot);
+    const seenInRun = new Set<string>();
+    extractEffectiveErrorLogs(run, [], context).forEach((item) => {
+      const fingerprint = buildEffectiveErrorFingerprint(item);
+      if (!fingerprint || seenInRun.has(fingerprint)) return;
+      seenInRun.add(fingerprint);
+      fingerprintCounts.set(fingerprint, (fingerprintCounts.get(fingerprint) || 0) + 1);
+    });
+  });
+
+  return {
+    runs: baselineRuns,
+    fingerprintCounts,
+  } satisfies BaselineReferenceSummary;
+}
+
+function chooseRepresentativeLog(items: EffectiveErrorLog[]) {
+  const severityRank: Record<EffectiveErrorLog['severity'], number> = {
+    critical: 0,
+    warning: 1,
+    info: 2,
+  };
+
+  return items
+    .slice()
+    .sort((left, right) => {
+      const severityDiff = severityRank[left.severity] - severityRank[right.severity];
+      if (severityDiff !== 0) return severityDiff;
+      const tsDiff = (left.ts || Number.MAX_SAFE_INTEGER) - (right.ts || Number.MAX_SAFE_INTEGER);
+      if (tsDiff !== 0) return tsDiff;
+      return right.excerpt.length - left.excerpt.length;
+    })[0];
+}
+
+function computeClusterScore(
+  cluster: Omit<EffectiveErrorCluster, 'keepReasons' | 'score'>,
+  anchorTs?: number
+) {
+  let score = 0;
+  const keepReasons: string[] = [];
+
+  if (cluster.severity === 'critical') {
+    score += 4;
+    keepReasons.push('包含 critical 级风险信号');
+  } else if (cluster.severity === 'warning') {
+    score += 2;
+    keepReasons.push('命中 warning/error 风险模式');
+  }
+
+  if (cluster.count > 1) {
+    score += 1;
+    keepReasons.push(`同类信号重复出现 ${cluster.count} 次`);
+  }
+
+  if (cluster.sourceTypes.length > 1) {
+    score += 1;
+    keepReasons.push(`跨 ${cluster.sourceTypes.length} 类来源重复出现`);
+  }
+
+  if (cluster.items.some((item) => item.source === 'finding')) {
+    score += 1;
+    keepReasons.push('诊断 Finding 已确认这个信号');
+  }
+
+  if (cluster.hasCLookup) {
+    score += 1;
+    keepReasons.push('带有 C 源码线索，可继续追代码');
+  }
+
+  if (cluster.matchesFocusKeywords.length > 0) {
+    score += 2;
+    keepReasons.push(`命中关键字: ${cluster.matchesFocusKeywords.slice(0, 3).join(', ')}`);
+  }
+
+  if (anchorTs && cluster.firstTs) {
+    const distance = Math.abs(cluster.firstTs - anchorTs);
+    if (distance <= 120_000) {
+      score += 2;
+      keepReasons.push('位于首个异常前后 2 分钟窗口');
+    } else if (distance <= 300_000) {
+      score += 1;
+      keepReasons.push('接近首个异常窗口');
+    }
+  }
+
+  return { score, keepReasons };
+}
+
+function buildEffectiveErrorNoiseView(
+  items: EffectiveErrorLog[],
+  focusKeywords: string[],
+  firstAnomaly?: DerivedAnomaly | null,
+  baselineSummary?: BaselineReferenceSummary,
+  noiseRules: NoiseSuppressionRule[] = []
+) {
+  if (items.length === 0) {
+    return {
+      visibleClusters: [],
+      foldedClusters: [],
+      totalItems: 0,
+      totalClusters: 0,
+      foldedItems: 0,
+    } as EffectiveErrorNoiseView;
+  }
+
+  const clusterMap = new Map<string, EffectiveErrorLog[]>();
+  items.forEach((item) => {
+    const fingerprint = buildEffectiveErrorFingerprint(item);
+    const bucket = clusterMap.get(fingerprint);
+    if (bucket) {
+      bucket.push(item);
+    } else {
+      clusterMap.set(fingerprint, [item]);
+    }
+  });
+
+  const clusters = Array.from(clusterMap.entries()).map(([fingerprint, clusterItems], index) => {
+    const representative = chooseRepresentativeLog(clusterItems);
+    const severity = clusterItems.reduce<EffectiveErrorLog['severity']>((current, item) => {
+      if (current === 'critical' || item.severity === current) return current;
+      if (item.severity === 'critical') return 'critical';
+      if (item.severity === 'warning' || current === 'info') return 'warning';
+      return current;
+    }, representative.severity);
+    const tsValues = clusterItems.map((item) => item.ts).filter((item): item is number => typeof item === 'number');
+    const tags = Array.from(new Set(clusterItems.flatMap((item) => item.tags)));
+    const sourceTypes = Array.from(new Set(clusterItems.map((item) => item.source)));
+    const hasCLookup = clusterItems.some((item) => hasCLookupText(item.lookupText));
+    const loweredText = clusterItems.map((item) => `${item.title}\n${item.reason}\n${item.excerpt}`.toLowerCase()).join('\n');
+    const matchesFocusKeywords = focusKeywords.filter((keyword) => loweredText.includes(keyword));
+    const baselineSeenCount = baselineSummary?.fingerprintCounts.get(fingerprint) || 0;
+    const baselineStatus: EffectiveErrorCluster['baselineStatus'] = baselineSeenCount > 0
+      ? 'known'
+      : baselineSummary && baselineSummary.runs.length > 0
+        ? 'new'
+        : 'unknown';
+    const baseCluster = {
+      id: `cluster-${index}-${representative.id}`,
+      fingerprint,
+      representative,
+      items: clusterItems
+        .slice()
+        .sort((left, right) => (left.ts || 0) - (right.ts || 0)),
+      severity,
+      count: clusterItems.length,
+      firstTs: tsValues.length > 0 ? Math.min(...tsValues) : undefined,
+      lastTs: tsValues.length > 0 ? Math.max(...tsValues) : undefined,
+      tags,
+      sourceTypes,
+      hasCLookup,
+      matchesFocusKeywords,
+      baselineSeenCount,
+      baselineStatus,
+      matchedNoiseRules: [] as NoiseSuppressionRule[],
+    };
+    const matchedNoiseRules = noiseRules.filter((rule) => doesNoiseRuleMatchCluster(baseCluster, rule));
+    const scoreResult = computeClusterScore(baseCluster, firstAnomaly?.ts);
+    let adjustedScore = scoreResult.score;
+    const keepReasons = scoreResult.keepReasons.slice();
+
+    if (baselineStatus === 'new') {
+      adjustedScore += 2;
+      keepReasons.push('相对稳定基线新增');
+    } else if (baselineStatus === 'known') {
+      adjustedScore -= 2;
+      keepReasons.push(`历史稳定 Run 中出现 ${baselineSeenCount} 次`);
+    }
+
+    if (matchedNoiseRules.length > 0) {
+      adjustedScore -= 6;
+      keepReasons.push(`命中噪音规则: ${matchedNoiseRules.map((rule) => rule.reason || rule.value).slice(0, 2).join('；')}`);
+    }
+
+    return {
+      ...baseCluster,
+      score: adjustedScore,
+      keepReasons,
+      matchedNoiseRules,
+    } satisfies EffectiveErrorCluster;
+  });
+
+  clusters.sort((left, right) => {
+    if (left.score !== right.score) return right.score - left.score;
+    const severityRank = { critical: 0, warning: 1, info: 2 };
+    const severityDiff = severityRank[left.severity] - severityRank[right.severity];
+    if (severityDiff !== 0) return severityDiff;
+    return (left.firstTs || 0) - (right.firstTs || 0);
+  });
+
+  const visibleClusters = clusters
+    .filter((cluster, index) => cluster.matchedNoiseRules.length === 0 && (cluster.score >= 3 || cluster.severity === 'critical' || index < 4))
+    .slice(0, 8);
+  const visibleIds = new Set(visibleClusters.map((cluster) => cluster.id));
+  const foldedClusters = clusters.filter((cluster) => !visibleIds.has(cluster.id));
+
+  return {
+    visibleClusters,
+    foldedClusters,
+    totalItems: items.length,
+    totalClusters: clusters.length,
+    foldedItems: foldedClusters.reduce((sum, cluster) => sum + cluster.count, 0),
+  } satisfies EffectiveErrorNoiseView;
+}
+
+function buildSourcePreviewDisplayRows(
+  lines: RenderedSourceLine[],
+  highlightedHtml: string[],
+  compactMode: boolean
+) {
+  if (!compactMode) {
+    return lines.map((line, index) => ({
+      type: 'line' as const,
+      key: `line-${line.lineNumber}`,
+      line,
+      html: highlightedHtml[index] || ' ',
+    }));
+  }
+
+  const rows: SourcePreviewDisplayRow[] = [];
+  let foldedStartIndex = -1;
+
+  const flushFold = (endIndexExclusive: number) => {
+    if (foldedStartIndex < 0) return;
+    const hiddenCount = endIndexExclusive - foldedStartIndex;
+    if (hiddenCount <= 1) {
+      for (let index = foldedStartIndex; index < endIndexExclusive; index += 1) {
+        rows.push({
+          type: 'line',
+          key: `line-${lines[index]?.lineNumber || index}`,
+          line: lines[index],
+          html: highlightedHtml[index] || ' ',
+        });
+      }
+    } else if (hiddenCount > 0) {
+      const firstLine = lines[foldedStartIndex];
+      const lastLine = lines[endIndexExclusive - 1];
+      const label = rows.length === 0
+        ? `折叠前置上下文 ${hiddenCount} 行`
+        : endIndexExclusive === lines.length
+          ? `折叠后置上下文 ${hiddenCount} 行`
+          : `折叠无关上下文 ${hiddenCount} 行`;
+      rows.push({
+        type: 'fold',
+        key: `fold-${firstLine?.lineNumber || foldedStartIndex}-${lastLine?.lineNumber || endIndexExclusive}`,
+        label,
+        hiddenCount,
+      });
+    }
+    foldedStartIndex = -1;
+  };
+
+  lines.forEach((line, index) => {
+    const shouldFold = !line.inFunction && !line.isAnchor && !line.isDeclaration;
+    if (shouldFold) {
+      if (foldedStartIndex < 0) foldedStartIndex = index;
+      return;
+    }
+
+    flushFold(index);
+    rows.push({
+      type: 'line',
+      key: `line-${line.lineNumber}`,
+      line,
+      html: highlightedHtml[index] || ' ',
+    });
+  });
+
+  flushFold(lines.length);
+  return rows;
+}
+
 function inferFirstAnomaly(run: DiagnosticRunRecord | null, sessionLogs: AgentSessionLogItem[]): DerivedAnomaly | null {
   const candidates: Array<{ order: number; anomaly: DerivedAnomaly }> = [];
 
@@ -476,6 +871,7 @@ function inferFirstAnomaly(run: DiagnosticRunRecord | null, sessionLogs: AgentSe
         anomaly: {
           sourceType: 'collection_step',
           sourceId: step.id,
+          ts: step.startedAt,
           title: `采集步骤异常: ${step.name}`,
           severity: (step.exitCode ?? 0) !== 0 ? 'critical' : 'warning',
           summary: step.conclusion || step.expectedSignal || '采集输出出现异常信号',
@@ -497,6 +893,7 @@ function inferFirstAnomaly(run: DiagnosticRunRecord | null, sessionLogs: AgentSe
         anomaly: {
           sourceType: 'business_action',
           sourceId: action.id,
+          ts: action.startedAt,
           title: `业务动作异常: ${action.name}`,
           severity: (action.exitCode ?? 0) !== 0 ? 'critical' : 'warning',
           summary: `业务动作 ${action.runMode} 阶段输出了异常信号`,
@@ -543,6 +940,7 @@ function inferFirstAnomaly(run: DiagnosticRunRecord | null, sessionLogs: AgentSe
         anomaly: {
           sourceType: 'session_log',
           sourceId: log.id,
+          ts: log.ts,
           title: `会话日志异常: ${log.type}`,
           severity: log.level === 'error' || (typeof log.exitCode === 'number' && log.exitCode !== 0) ? 'critical' : 'warning',
           summary: log.message || '会话运行日志出现 warning / error / 非零退出码',
@@ -746,7 +1144,7 @@ function extractEffectiveErrorLogs(
       if (severityDiff !== 0) return severityDiff;
       return (left.ts || 0) - (right.ts || 0);
     })
-    .slice(0, 12);
+    .slice(0, 36);
 }
 
 function formatTs(ts?: number) {
@@ -789,6 +1187,7 @@ const DiagnosticWorkbench: React.FC = () => {
     branch: '',
     commit: '',
   });
+  const [savedNoiseRules, setSavedNoiseRules] = useLocalStorage<NoiseSuppressionRule[]>('devutility-diagnostic-noise-rules', []);
   const [messageApi, contextHolder] = message.useMessage();
 
   const safePlaybooks = Array.isArray(playbooks) ? playbooks : [];
@@ -820,6 +1219,8 @@ const DiagnosticWorkbench: React.FC = () => {
   const [openingCodeContext, setOpeningCodeContext] = useState(false);
   const [locatingSource, setLocatingSource] = useState(false);
   const [sourcePreview, setSourcePreview] = useState<SourcePreviewState | null>(null);
+  const [compactSourcePreview, setCompactSourcePreview] = useState(true);
+  const [noiseKeywordDraft, setNoiseKeywordDraft] = useState('');
 
   useEffect(() => {
     if (!activePlaybook) return;
@@ -830,6 +1231,18 @@ const DiagnosticWorkbench: React.FC = () => {
 
   const scenarioMeta = activePlaybook ? SCENARIO_META[activePlaybook.scenarioType] : null;
   const detailRun = activeRun;
+  const noiseRules = useMemo<NoiseSuppressionRule[]>(
+    () => (Array.isArray(savedNoiseRules) ? savedNoiseRules : [])
+      .map((rule) => ({
+        id: String(rule?.id || generateId()),
+        type: (rule?.type === 'fingerprint' ? 'fingerprint' : 'keyword') as NoiseSuppressionRule['type'],
+        value: String(rule?.value || '').trim().toLowerCase(),
+        reason: String(rule?.reason || '').trim(),
+        createdAt: Number(rule?.createdAt || Date.now()),
+      }))
+      .filter((rule) => rule.value),
+    [savedNoiseRules]
+  );
   const detailContextSnapshot = useMemo(
     () => normalizeContextSnapshot(detailRun?.contextSnapshot),
     [detailRun?.contextSnapshot]
@@ -840,6 +1253,32 @@ const DiagnosticWorkbench: React.FC = () => {
     () => extractEffectiveErrorLogs(detailRun, sessionLogs, detailRun ? detailContextSnapshot : contextSnapshot),
     [contextSnapshot, detailContextSnapshot, detailRun, sessionLogs]
   );
+  const baselineReferenceSummary = useMemo(
+    () => buildBaselineReferenceSummary(historyRuns, detailRun),
+    [detailRun, historyRuns]
+  );
+  const effectiveErrorNoiseView = useMemo(
+    () => buildEffectiveErrorNoiseView(
+      effectiveErrorLogs,
+      [
+        ...toKeywordList((detailRun ? detailContextSnapshot : contextSnapshot).logKeywords),
+        ...(firstAnomaly?.tags || []).map((item) => item.toLowerCase()),
+        ...((detailRun?.tags || []).map((item) => item.toLowerCase())),
+      ],
+      firstAnomaly,
+      baselineReferenceSummary,
+      noiseRules
+    ),
+    [baselineReferenceSummary, contextSnapshot, detailContextSnapshot, detailRun?.tags, effectiveErrorLogs, firstAnomaly, noiseRules]
+  );
+  const effectiveErrorNoiseSummary = useMemo(() => {
+    const allClusters = [...effectiveErrorNoiseView.visibleClusters, ...effectiveErrorNoiseView.foldedClusters];
+    return {
+      newCount: allClusters.filter((cluster) => cluster.baselineStatus === 'new').length,
+      knownCount: allClusters.filter((cluster) => cluster.baselineStatus === 'known').length,
+      suppressedCount: allClusters.filter((cluster) => cluster.matchedNoiseRules.length > 0).length,
+    };
+  }, [effectiveErrorNoiseView.foldedClusters, effectiveErrorNoiseView.visibleClusters]);
   const commandLibraryItems = useMemo(
     () => getScenarioCommandLibraryItems(
       activePlaybook?.scenarioType,
@@ -861,6 +1300,18 @@ const DiagnosticWorkbench: React.FC = () => {
     });
     return Array.from(counts.entries());
   }, [activePlaybook?.collectionPlan]);
+  const sourcePreviewHighlightedHtml = useMemo(() => {
+    if (!sourcePreview?.payload.lines) return [];
+    return highlightCLines(sourcePreview.payload.lines, isDark);
+  }, [isDark, sourcePreview?.payload.lines]);
+  const sourcePreviewDisplayRows = useMemo(
+    () => buildSourcePreviewDisplayRows(sourcePreview?.payload.lines || [], sourcePreviewHighlightedHtml, compactSourcePreview),
+    [compactSourcePreview, sourcePreview?.payload.lines, sourcePreviewHighlightedHtml]
+  );
+  const sourcePreviewFoldedLineCount = useMemo(
+    () => sourcePreviewDisplayRows.reduce((sum, row) => sum + (row.type === 'fold' ? row.hiddenCount : 0), 0),
+    [sourcePreviewDisplayRows]
+  );
 
   useEffect(() => {
     void fetchSessions();
@@ -1076,6 +1527,7 @@ const DiagnosticWorkbench: React.FC = () => {
     const orderedFunctions = preferred?.functionCandidate
       ? [preferred.functionCandidate, ...functions.filter((item) => item.query !== preferred.functionCandidate?.query)]
       : functions;
+    const tryFunctionsFirst = Boolean(preferred?.functionCandidate && !preferred?.location);
 
     if (!hasHints || (orderedLocations.length === 0 && orderedFunctions.length === 0)) {
       messageApi.warning('当前异常片段里没有提取到 C 源码路径或 C 函数名');
@@ -1089,42 +1541,56 @@ const DiagnosticWorkbench: React.FC = () => {
     let lastError = '';
 
     try {
-      for (const candidate of orderedLocations.slice(0, 6)) {
-        try {
-          const payload = await renderLocationPreview(context.contextId, candidate);
-          setSourcePreview({
-            request,
-            payload,
-            lookupMode: 'location',
-            locations: orderedLocations,
-            functions: orderedFunctions,
-          });
-          return;
-        } catch (error) {
-          lastError = error instanceof Error ? error.message : '源码位置渲染失败';
-        }
-      }
-
-      for (const candidate of orderedFunctions.slice(0, 6)) {
-        try {
-          const matches = await searchSymbolCandidates(context.contextId, candidate.query);
-          if (matches.length === 0) {
-            lastError = `没有找到函数定义: ${candidate.query}`;
-            continue;
+      const tryOrderedLocationCandidates = async () => {
+        for (const candidate of orderedLocations.slice(0, 6)) {
+          try {
+            const payload = await renderLocationPreview(context.contextId, candidate);
+            setSourcePreview({
+              request,
+              payload,
+              lookupMode: 'location',
+              locations: orderedLocations,
+              functions: orderedFunctions,
+            });
+            return true;
+          } catch (error) {
+            lastError = error instanceof Error ? error.message : '源码位置渲染失败';
           }
-
-          const payload = await renderSymbolPreview(context.contextId, matches[0].id);
-          setSourcePreview({
-            request,
-            payload,
-            lookupMode: 'function',
-            locations: orderedLocations,
-            functions: orderedFunctions,
-          });
-          return;
-        } catch (error) {
-          lastError = error instanceof Error ? error.message : '函数源码渲染失败';
         }
+        return false;
+      };
+
+      const tryOrderedFunctionCandidates = async () => {
+        for (const candidate of orderedFunctions.slice(0, 6)) {
+          try {
+            const matches = await searchSymbolCandidates(context.contextId, candidate.query);
+            if (matches.length === 0) {
+              lastError = `没有找到函数定义: ${candidate.query}`;
+              continue;
+            }
+
+            const payload = await renderSymbolPreview(context.contextId, matches[0].id);
+            setSourcePreview({
+              request,
+              payload,
+              lookupMode: 'function',
+              locations: orderedLocations,
+              functions: orderedFunctions,
+            });
+            return true;
+          } catch (error) {
+            lastError = error instanceof Error ? error.message : '函数源码渲染失败';
+          }
+        }
+        return false;
+      };
+
+      if (tryFunctionsFirst) {
+        if (await tryOrderedFunctionCandidates()) return;
+        if (await tryOrderedLocationCandidates()) return;
+      } else {
+        if (await tryOrderedLocationCandidates()) return;
+        if (await tryOrderedFunctionCandidates()) return;
       }
 
       messageApi.warning(lastError || '未能从当前证据里定位到 C 源码上下文');
@@ -1156,6 +1622,76 @@ const DiagnosticWorkbench: React.FC = () => {
       },
       preferred
     );
+  }
+
+  function handleSourcePreviewCodeClick(event: React.MouseEvent<HTMLDivElement>) {
+    if (!sourcePreview) return;
+    const target = event.target as HTMLElement;
+    const funcCall = target.closest('.code-func-call');
+    const funcName = funcCall?.getAttribute('data-name');
+    if (!funcName) return;
+
+    const currentSymbolName = sourcePreview.payload.symbol?.name;
+    if (funcName === currentSymbolName && sourcePreview.lookupMode === 'function') {
+      return;
+    }
+
+    locateSourceFromParts(
+      {
+        ...sourcePreview.request,
+      },
+      {
+        functionCandidate: {
+          token: funcName,
+          query: funcName,
+          hits: 1,
+          sampleLine: `代码内点击: ${funcName}`,
+        },
+      }
+    );
+  }
+
+  function addNoiseRule(rule: NoiseSuppressionRule) {
+    setSavedNoiseRules((current) => {
+      const normalized = Array.isArray(current) ? current : [];
+      if (normalized.some((item) => item.type === rule.type && String(item.value || '').trim().toLowerCase() === rule.value)) {
+        return normalized;
+      }
+      return [rule, ...normalized].slice(0, 40);
+    });
+  }
+
+  function addKeywordNoiseRule() {
+    const value = noiseKeywordDraft.trim().toLowerCase();
+    if (!value) {
+      messageApi.warning('请先输入要折叠的噪音关键词');
+      return;
+    }
+
+    addNoiseRule({
+      id: generateId(),
+      type: 'keyword',
+      value,
+      reason: `手动标记关键词噪音: ${value}`,
+      createdAt: Date.now(),
+    });
+    setNoiseKeywordDraft('');
+    messageApi.success(`已新增噪音关键词：${value}`);
+  }
+
+  function addFingerprintNoiseRule(cluster: EffectiveErrorCluster) {
+    addNoiseRule({
+      id: generateId(),
+      type: 'fingerprint',
+      value: cluster.fingerprint,
+      reason: `手动折叠同类日志: ${cluster.representative.title}`,
+      createdAt: Date.now(),
+    });
+    messageApi.success(`已将「${cluster.representative.title}」标记为噪音簇`);
+  }
+
+  function removeNoiseRule(ruleId: string) {
+    setSavedNoiseRules((current) => (Array.isArray(current) ? current.filter((item) => item.id !== ruleId) : []));
   }
 
   function syncPolicyState(snapshot: CommandPolicySnapshot) {
@@ -1932,11 +2468,21 @@ const DiagnosticWorkbench: React.FC = () => {
           <Card
             title="C 源码上下文预览"
             extra={
-              locatingSource
-                ? <Tag color="processing">定位中</Tag>
-                : sourcePreview
-                  ? <Tag color="blue">{sourcePreview.lookupMode === 'location' ? 'path:line' : 'function'}</Tag>
-                  : null
+              <Space size={8} wrap>
+                {sourcePreview && (
+                  <Button size="small" onClick={() => setCompactSourcePreview((value) => !value)}>
+                    {compactSourcePreview ? '展开全部上下文' : '折叠无关上下文'}
+                  </Button>
+                )}
+                {compactSourcePreview && sourcePreviewFoldedLineCount > 0 && (
+                  <Tag color="default">已折叠 {sourcePreviewFoldedLineCount} 行</Tag>
+                )}
+                {locatingSource
+                  ? <Tag color="processing">定位中</Tag>
+                  : sourcePreview
+                    ? <Tag color="blue">{sourcePreview.lookupMode === 'location' ? 'path:line' : 'function'}</Tag>
+                    : null}
+              </Space>
             }
           >
             {!sourcePreview ? (
@@ -1959,6 +2505,7 @@ const DiagnosticWorkbench: React.FC = () => {
                 <Text type="secondary">{sourcePreview.request.summary}</Text>
                 <Text code>{sourcePreview.payload.path}:{sourcePreview.payload.line}</Text>
                 {sourcePreview.request.command && <Text code>{sourcePreview.request.command}</Text>}
+                <Text type="secondary">代码区内识别出的 C 函数名可直接点击跳转。</Text>
                 {sourcePreview.payload.signature && (
                   <Alert
                     type="info"
@@ -2006,6 +2553,7 @@ const DiagnosticWorkbench: React.FC = () => {
                   </div>
                 )}
                 <div
+                  onClick={handleSourcePreviewCodeClick}
                   style={{
                     maxHeight: 440,
                     overflow: 'auto',
@@ -2015,50 +2563,69 @@ const DiagnosticWorkbench: React.FC = () => {
                     padding: '8px 0',
                   }}
                 >
-                  {sourcePreview.payload.lines.map((line) => (
-                    <div
-                      key={`${line.lineNumber}-${line.text}`}
-                      style={{
-                        display: 'grid',
-                        gridTemplateColumns: '72px 1fr',
-                        gap: 12,
-                        padding: '0 16px',
-                        minHeight: 20,
-                        lineHeight: '20px',
-                        background: line.isAnchor
-                          ? (isDark ? 'rgba(59, 130, 246, 0.26)' : 'rgba(59, 130, 246, 0.12)')
-                          : line.isDeclaration
-                            ? (isDark ? 'rgba(14, 116, 144, 0.24)' : 'rgba(14, 116, 144, 0.10)')
-                            : line.inFunction
-                              ? (isDark ? 'rgba(15, 23, 42, 0.42)' : 'rgba(226, 232, 240, 0.65)')
-                              : 'transparent',
-                      }}
-                    >
-                      <Text
-                        type="secondary"
+                  {sourcePreviewDisplayRows.map((row) => {
+                    if (row.type === 'fold') {
+                      return (
+                        <div
+                          key={row.key}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            minHeight: 28,
+                            padding: '4px 16px',
+                          }}
+                        >
+                          <Tag color="default">{row.label}</Tag>
+                        </div>
+                      );
+                    }
+
+                    const line = row.line;
+                    return (
+                      <div
+                        key={row.key}
                         style={{
-                          userSelect: 'none',
-                          textAlign: 'right',
-                          fontFamily: 'JetBrains Mono, Fira Code, monospace',
-                          fontSize: 12,
+                          display: 'grid',
+                          gridTemplateColumns: '72px 1fr',
+                          gap: 12,
+                          padding: '0 16px',
+                          minHeight: 20,
+                          lineHeight: '20px',
+                          background: line.isAnchor
+                            ? (isDark ? 'rgba(59, 130, 246, 0.26)' : 'rgba(59, 130, 246, 0.12)')
+                            : line.isDeclaration
+                              ? (isDark ? 'rgba(14, 116, 144, 0.24)' : 'rgba(14, 116, 144, 0.10)')
+                              : line.inFunction
+                                ? (isDark ? 'rgba(15, 23, 42, 0.42)' : 'rgba(226, 232, 240, 0.65)')
+                                : 'transparent',
                         }}
                       >
-                        {line.lineNumber}
-                      </Text>
-                      <pre
-                        style={{
-                          margin: 0,
-                          whiteSpace: 'pre-wrap',
-                          wordBreak: 'break-word',
-                          fontFamily: 'JetBrains Mono, Fira Code, monospace',
-                          fontSize: 12,
-                          color: isDark ? '#e5e7eb' : '#111827',
-                        }}
-                      >
-                        {line.text || ' '}
-                      </pre>
-                    </div>
-                  ))}
+                        <Text
+                          type="secondary"
+                          style={{
+                            userSelect: 'none',
+                            textAlign: 'right',
+                            fontFamily: 'JetBrains Mono, Fira Code, monospace',
+                            fontSize: 12,
+                          }}
+                        >
+                          {line.lineNumber}
+                        </Text>
+                        <pre
+                          style={{
+                            margin: 0,
+                            whiteSpace: 'pre-wrap',
+                            wordBreak: 'break-word',
+                            fontFamily: 'JetBrains Mono, Fira Code, monospace',
+                            fontSize: 12,
+                            color: isDark ? '#e5e7eb' : '#111827',
+                          }}
+                          dangerouslySetInnerHTML={{ __html: row.html }}
+                        />
+                      </div>
+                    );
+                  })}
                 </div>
               </Space>
             )}
@@ -2151,9 +2718,20 @@ const DiagnosticWorkbench: React.FC = () => {
 
           <Card
             title="有效错误日志"
-            extra={<Tag color={effectiveErrorLogs.length > 0 ? 'warning' : 'default'}>{effectiveErrorLogs.length} 条</Tag>}
+            extra={
+              <Space size={8} wrap>
+                <Tag color={effectiveErrorNoiseView.visibleClusters.length > 0 ? 'warning' : 'default'}>
+                  保留 {effectiveErrorNoiseView.visibleClusters.length} 簇
+                </Tag>
+                {effectiveErrorNoiseView.foldedClusters.length > 0 && (
+                  <Tag color="default">
+                    折叠 {effectiveErrorNoiseView.foldedClusters.length} 簇 / {effectiveErrorNoiseView.foldedItems} 条
+                  </Tag>
+                )}
+              </Space>
+            }
           >
-            {effectiveErrorLogs.length === 0 ? (
+            {effectiveErrorNoiseView.totalItems === 0 ? (
               <Alert
                 type="info"
                 showIcon
@@ -2161,96 +2739,227 @@ const DiagnosticWorkbench: React.FC = () => {
                 description="补充定位上下文里的观察窗口和关键日志词，或执行一次编排后，这里会优先给出真正影响定位的错误日志片段。"
               />
             ) : (
-              <List
-                dataSource={effectiveErrorLogs}
-                renderItem={(item) => {
-                  const canLocate = hasCLookupText(item.lookupText);
-                  return (
-                    <List.Item
-                      actions={[
-                        ...(canLocate
-                          ? [
-                              <Button
-                                key="source"
-                                type="link"
-                                icon={<CodeOutlined />}
-                                onClick={() => locateSourceFromParts({
-                                  title: `${item.title} - 有效日志`,
-                                  summary: item.reason,
-                                  sourceType: item.source,
-                                  text: item.lookupText,
-                                  parts: [item.title, item.reason, item.excerpt],
+              <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                <Alert
+                  type="info"
+                  showIcon
+                  message={`从 ${effectiveErrorNoiseView.totalItems} 条候选日志里收敛出 ${effectiveErrorNoiseView.totalClusters} 个证据簇`}
+                  description="默认只保留分值更高、靠近首个异常、能复现或能继续追代码的簇，其余噪音会折叠到下面。"
+                />
+                <Alert
+                  type={baselineReferenceSummary.runs.length > 0 ? 'success' : 'warning'}
+                  showIcon
+                  message={
+                    baselineReferenceSummary.runs.length > 0
+                      ? `已加载 ${baselineReferenceSummary.runs.length} 个稳定基线 Run`
+                      : '还没有可用的稳定基线 Run'
+                  }
+                  description={
+                    baselineReferenceSummary.runs.length > 0
+                      ? `当前簇里 ${effectiveErrorNoiseSummary.newCount} 个是相对基线新增，${effectiveErrorNoiseSummary.knownCount} 个在历史稳定 Run 中也出现过，${effectiveErrorNoiseSummary.suppressedCount} 个命中用户噪音规则。`
+                      : '后续有更多 completed 状态的历史 Run 时，这里会自动比较“当前新增”和“历史常见”信号。'
+                  }
+                />
+
+                <Card size="small" title="噪音规则">
+                  <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                    <Space.Compact style={{ width: '100%' }}>
+                      <Input
+                        value={noiseKeywordDraft}
+                        onChange={(event) => setNoiseKeywordDraft(event.target.value)}
+                        placeholder="输入噪音关键词，例如 heartbeat / retrying / health check"
+                        onPressEnter={() => addKeywordNoiseRule()}
+                      />
+                      <Button icon={<SearchOutlined />} onClick={addKeywordNoiseRule}>
+                        新增关键词规则
+                      </Button>
+                    </Space.Compact>
+                    {noiseRules.length === 0 ? (
+                      <Text type="secondary">还没有自定义噪音规则。可以直接从下面的证据簇一键“标记噪音”，也可以手工补关键词规则。</Text>
+                    ) : (
+                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                        {noiseRules.map((rule) => (
+                          <Tag
+                            key={rule.id}
+                            closable
+                            color={rule.type === 'fingerprint' ? 'purple' : 'default'}
+                            onClose={(event) => {
+                              event.preventDefault();
+                              removeNoiseRule(rule.id);
+                            }}
+                          >
+                            {rule.type === 'fingerprint' ? '簇规则' : '关键词'}: {rule.reason || rule.value}
+                          </Tag>
+                        ))}
+                      </div>
+                    )}
+                  </Space>
+                </Card>
+
+                <List
+                  dataSource={effectiveErrorNoiseView.visibleClusters}
+                  renderItem={(cluster) => {
+                    const item = cluster.representative;
+                    const canLocate = hasCLookupText(item.lookupText);
+                    return (
+                      <List.Item
+                        actions={[
+                          ...(canLocate
+                            ? [
+                                <Button
+                                  key="source"
+                                  type="link"
+                                  icon={<CodeOutlined />}
+                                  onClick={() => locateSourceFromParts({
+                                    title: `${item.title} - 证据簇`,
+                                    summary: cluster.keepReasons.join('；') || item.reason,
+                                    sourceType: item.source,
+                                    text: item.lookupText,
+                                    parts: [item.title, item.reason, item.excerpt],
+                                    command: item.command,
+                                  })}
+                                >
+                                  看源码
+                                </Button>,
+                              ]
+                            : []),
+                          <Button
+                            key="lock"
+                            type="link"
+                            icon={<PushpinOutlined />}
+                            onClick={() => lockEvidence({
+                              sourceType: item.source === 'finding'
+                                ? 'finding'
+                                : item.source === 'business_action'
+                                  ? 'business_action'
+                                  : item.source === 'collection_step'
+                                    ? 'collection_step'
+                                    : 'session_log',
+                              sourceId: item.id,
+                              title: `${item.title} - 证据簇`,
+                              summary: cluster.keepReasons.join('；') || item.reason,
+                              content: item.excerpt,
+                              lookupText: item.lookupText,
+                              command: item.command,
+                              sessionLabel: detailRun?.sessionLabel,
+                              tags: cluster.tags,
+                            })}
+                          >
+                            锁定
+                          </Button>,
+                          <Button
+                            key="noise"
+                            type="link"
+                            onClick={() => addFingerprintNoiseRule(cluster)}
+                          >
+                            标记噪音
+                          </Button>,
+                        ]}
+                      >
+                        <List.Item.Meta
+                          title={
+                            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                              <Text strong>{item.title}</Text>
+                              <Tag color={severityColorMap[cluster.severity] || 'default'}>{cluster.severity}</Tag>
+                              <Tag>{cluster.sourceTypes.join(' / ')}</Tag>
+                              <Tag color="processing">保留分 {cluster.score}</Tag>
+                              {cluster.baselineStatus === 'new' && <Tag color="success">基线新增</Tag>}
+                              {cluster.baselineStatus === 'known' && <Tag color="default">历史常见</Tag>}
+                              {cluster.count > 1 && <Tag color="default">簇内 {cluster.count} 条</Tag>}
+                              {cluster.firstTs && <Text type="secondary">{formatTs(cluster.firstTs)}</Text>}
+                              {cluster.lastTs && cluster.lastTs !== cluster.firstTs && <Text type="secondary">~ {formatTs(cluster.lastTs)}</Text>}
+                            </div>
+                          }
+                          description={
+                            <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                {cluster.keepReasons.map((reason) => (
+                                  <Tag key={reason} color="blue">{reason}</Tag>
+                                ))}
+                              </div>
+                              <Text type="secondary">{item.reason}</Text>
+                              {item.command && <Text code>{item.command}</Text>}
+                              {cluster.count > 1 && (
+                                <Text type="secondary">
+                                  已折叠同类噪音 {cluster.count - 1} 条，只保留这一条代表样本。
+                                </Text>
+                              )}
+                              <ResizableOutput
+                                content={item.excerpt}
+                                isDark={isDark}
+                                minHeight={56}
+                                maxHeight={160}
+                                onTextSelect={(text) => locateSourceFromParts({
+                                  title: `${item.title} - 手动选词`,
+                                  summary: cluster.keepReasons.join('；') || item.reason,
+                                  sourceType: `${item.source}_selection`,
+                                  text,
                                   command: item.command,
                                 })}
-                              >
-                                看源码
-                              </Button>,
-                            ]
-                          : []),
-                        <Button
-                          key="lock"
-                          type="link"
-                          icon={<PushpinOutlined />}
-                          onClick={() => lockEvidence({
-                            sourceType: item.source === 'finding'
-                              ? 'finding'
-                              : item.source === 'business_action'
-                                ? 'business_action'
-                                : item.source === 'collection_step'
-                                  ? 'collection_step'
-                                  : 'session_log',
-                            sourceId: item.id,
-                            title: `${item.title} - 有效日志`,
-                            summary: item.reason,
-                            content: item.excerpt,
-                            lookupText: item.lookupText,
-                            command: item.command,
-                            sessionLabel: detailRun?.sessionLabel,
-                            tags: item.tags,
-                          })}
-                        >
-                          锁定
-                        </Button>,
-                      ]}
-                    >
-                      <List.Item.Meta
-                        title={
-                          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                            <Text strong>{item.title}</Text>
-                            <Tag color={severityColorMap[item.severity] || 'default'}>{item.severity}</Tag>
-                            <Tag>{item.source}</Tag>
-                            {item.ts && <Text type="secondary">{formatTs(item.ts)}</Text>}
-                          </div>
-                        }
-                        description={
-                          <Space direction="vertical" size={6} style={{ width: '100%' }}>
-                            <Text type="secondary">{item.reason}</Text>
-                            {item.command && <Text code>{item.command}</Text>}
-                            <ResizableOutput
-                              content={item.excerpt}
-                              isDark={isDark}
-                              minHeight={56}
-                              maxHeight={160}
-                              onTextSelect={(text) => locateSourceFromParts({
-                                title: `${item.title} - 手动选词`,
-                                summary: item.reason,
-                                sourceType: `${item.source}_selection`,
-                                text,
-                                command: item.command,
-                              })}
-                            />
-                            <div>
-                              {item.tags.map((tag) => (
-                                <Tag key={tag}>{tag}</Tag>
-                              ))}
-                            </div>
-                          </Space>
-                        }
-                      />
-                    </List.Item>
-                  );
-                }}
-              />
+                              />
+                              <div>
+                                {cluster.tags.map((tag) => (
+                                  <Tag key={tag}>{tag}</Tag>
+                                ))}
+                              </div>
+                            </Space>
+                          }
+                        />
+                      </List.Item>
+                    );
+                  }}
+                />
+
+                {effectiveErrorNoiseView.foldedClusters.length > 0 && (
+                  <Collapse
+                    size="small"
+                    items={[
+                      {
+                        key: 'folded-noise',
+                        label: `已折叠的干扰簇 (${effectiveErrorNoiseView.foldedClusters.length} 簇 / ${effectiveErrorNoiseView.foldedItems} 条)`,
+                        children: (
+                          <List
+                            size="small"
+                            dataSource={effectiveErrorNoiseView.foldedClusters}
+                            renderItem={(cluster) => (
+                              <List.Item>
+                                <List.Item.Meta
+                                  title={
+                                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                                      <Text>{cluster.representative.title}</Text>
+                                      <Tag>{cluster.sourceTypes.join(' / ')}</Tag>
+                                      <Tag color="default">簇内 {cluster.count} 条</Tag>
+                                      <Tag color="default">分值 {cluster.score}</Tag>
+                                      {cluster.matchedNoiseRules.length > 0 && <Tag color="purple">命中噪音规则</Tag>}
+                                      {cluster.baselineStatus === 'known' && <Tag color="default">历史常见</Tag>}
+                                    </div>
+                                  }
+                                  description={
+                                    <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                                      <Text type="secondary">
+                                        {cluster.keepReasons.length > 0
+                                          ? `折叠原因：相对保留簇优先级更低。命中因子：${cluster.keepReasons.join('；')}`
+                                          : '折叠原因：未命中足够多的关键字、异常窗口或源码线索。'}
+                                      </Text>
+                                      <Text type="secondary">{cluster.representative.reason}</Text>
+                                      <ResizableOutput
+                                        content={cluster.representative.excerpt}
+                                        isDark={isDark}
+                                        minHeight={48}
+                                        maxHeight={120}
+                                      />
+                                    </Space>
+                                  }
+                                />
+                              </List.Item>
+                            )}
+                          />
+                        ),
+                      },
+                    ]}
+                  />
+                )}
+              </Space>
             )}
           </Card>
 

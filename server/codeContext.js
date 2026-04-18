@@ -39,6 +39,7 @@ const FULL_INDEX_CONCURRENCY = 12;
 const MAX_FAST_SEARCH_FILES = 120;
 const MAX_FAST_SEARCH_LINE_DISTANCE = 6;
 const INDEX_WARMUP_DELAY_MS = 1500;
+const INDEX_SCHEMA_VERSION = 2;
 
 function ensureRoots() {
   fs.mkdirSync(REPO_CACHE_ROOT, { recursive: true });
@@ -100,11 +101,17 @@ async function normalizeRepoSource(repo) {
   const trimmed = String(repo || '').trim();
   if (!trimmed) return trimmed;
 
-  if (!fs.existsSync(trimmed)) {
+  const expandedHomePath = trimmed === '~'
+    ? os.homedir()
+    : trimmed.startsWith('~/')
+      ? path.join(os.homedir(), trimmed.slice(2))
+      : trimmed;
+
+  if (!fs.existsSync(expandedHomePath)) {
     return trimmed;
   }
 
-  const resolvedPath = path.resolve(trimmed);
+  const resolvedPath = path.resolve(expandedHomePath);
 
   try {
     const git = simpleGit(resolvedPath);
@@ -450,8 +457,14 @@ function extractSymbolsFromLines(lines, relativePath) {
   ];
 
   lines.forEach((line, lineIndex) => {
+    const trimmedLine = line.trim();
+    if (!trimmedLine) return;
+
     for (const { kind, pattern } of patterns) {
-      const matched = pattern.exec(line);
+      const candidateText = kind === 'function'
+        ? collectSignature(lines, lineIndex, language, kind)
+        : line;
+      const matched = pattern.exec(candidateText);
       if (!matched) continue;
 
       const symbolName = matched[1];
@@ -466,7 +479,7 @@ function extractSymbolsFromLines(lines, relativePath) {
         line: lineNumber,
         language,
         kind,
-        signature: collectSignature(lines, lineIndex, language, kind) || line.trim(),
+        signature: candidateText || line.trim(),
       });
       break;
     }
@@ -527,6 +540,14 @@ async function loadPersistedSymbolIndex(entry) {
   try {
     const payload = await fs.promises.readFile(entry.indexCachePath);
     const parsed = JSON.parse(zlib.gunzipSync(payload).toString('utf8'));
+    if (Number(parsed?.version || 0) !== INDEX_SCHEMA_VERSION) {
+      try {
+        await fs.promises.unlink(entry.indexCachePath);
+      } catch {
+        // ignore stale cache cleanup failures
+      }
+      return null;
+    }
     if (!Array.isArray(parsed?.symbols)) {
       return null;
     }
@@ -559,6 +580,7 @@ async function persistSymbolIndex(entry, symbols) {
 
   try {
     const payload = zlib.gzipSync(Buffer.from(JSON.stringify({
+      version: INDEX_SCHEMA_VERSION,
       repo: entry.repo,
       branch: entry.branch,
       commit: entry.commit,
@@ -1064,8 +1086,7 @@ function normalizeContextWindow(value, fallback, maxValue) {
   return Math.max(0, Math.min(Number(value) || fallback, maxValue));
 }
 
-async function renderSymbol(contextId, symbolId, options = {}) {
-  const entry = await getContextEntry(contextId);
+function resolveSymbol(entry, symbolId) {
   const symbolKey = decodeSymbolId(symbolId);
   let symbol = entry.symbolById.get(symbolId)
     || (entry.symbolIndex || []).find((item) => item.id === symbolId)
@@ -1090,6 +1111,13 @@ async function renderSymbol(contextId, symbolId, options = {}) {
   if (!symbol) {
     throw new Error('符号不存在，请重新搜索');
   }
+
+  return symbol;
+}
+
+async function renderSymbol(contextId, symbolId, options = {}) {
+  const entry = await getContextEntry(contextId);
+  const symbol = resolveSymbol(entry, symbolId);
 
   const content = await readSourceFile(entry, symbol.path);
   if (!content) {
@@ -1258,7 +1286,8 @@ function extractFunctionCalls(lines, startLine, endLine) {
 async function buildCallGraph(entry) {
   const callers = new Map();
   const callees = new Map();
-  const functions = (entry.symbolIndex || []).filter((s) => (s.kind || 'function') === 'function');
+  const symbolIndex = await ensureSymbolIndex(entry);
+  const functions = symbolIndex.filter((s) => (s.kind || 'function') === 'function');
 
   for (const func of functions) {
     const content = await readSourceFile(entry, func.path);
@@ -1328,6 +1357,148 @@ async function getCallees(contextId, symbolId) {
   return results;
 }
 
+function pickRepresentativeSymbol(entry, functionName) {
+  const matches = (entry.symbolIndex || [])
+    .filter((item) => item.name === functionName && (item.kind || 'function') === 'function')
+    .sort((a, b) => {
+      if (a.path === b.path) return Number(a.line) - Number(b.line);
+      return a.path.localeCompare(b.path);
+    });
+
+  return {
+    symbol: matches[0] || null,
+    matchCount: matches.length,
+  };
+}
+
+function buildRelationPath(entry, names) {
+  return names.map((name) => {
+    const match = pickRepresentativeSymbol(entry, name);
+    return {
+      name,
+      symbol: match.symbol,
+      matchCount: match.matchCount,
+    };
+  });
+}
+
+function findShortestCallPath(callGraph, startName, targetName, maxDepth) {
+  const normalizedStart = String(startName || '').trim();
+  const normalizedTarget = String(targetName || '').trim();
+  const safeDepth = Math.max(1, Math.min(Number(maxDepth) || 8, 24));
+
+  if (!normalizedStart || !normalizedTarget) {
+    return {
+      reachable: false,
+      names: [],
+      maxDepth: safeDepth,
+      visitedCount: 0,
+    };
+  }
+
+  if (normalizedStart === normalizedTarget) {
+    return {
+      reachable: true,
+      names: [normalizedStart],
+      maxDepth: safeDepth,
+      visitedCount: 1,
+    };
+  }
+
+  const queue = [normalizedStart];
+  const parents = new Map();
+  const depthByName = new Map([[normalizedStart, 0]]);
+  const visited = new Set([normalizedStart]);
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    const currentDepth = depthByName.get(current) || 0;
+    if (currentDepth >= safeDepth) {
+      continue;
+    }
+
+    const nextNames = Array.from(callGraph.callees.get(current) || []).sort((a, b) => a.localeCompare(b));
+    for (const nextName of nextNames) {
+      if (visited.has(nextName)) continue;
+      visited.add(nextName);
+      parents.set(nextName, current);
+      depthByName.set(nextName, currentDepth + 1);
+
+      if (nextName === normalizedTarget) {
+        const names = [normalizedTarget];
+        let cursor = current;
+        while (cursor) {
+          names.push(cursor);
+          cursor = parents.get(cursor);
+        }
+        names.reverse();
+        return {
+          reachable: true,
+          names,
+          maxDepth: safeDepth,
+          visitedCount: visited.size,
+        };
+      }
+
+      queue.push(nextName);
+    }
+  }
+
+  return {
+    reachable: false,
+    names: [],
+    maxDepth: safeDepth,
+    visitedCount: visited.size,
+  };
+}
+
+async function findCallRelation(contextId, fromSymbolId, targetQuery, options = {}) {
+  const entry = await getContextEntry(contextId);
+  await ensureSymbolIndex(entry);
+  await ensureCallGraph(entry);
+
+  const sourceSymbol = resolveSymbol(entry, fromSymbolId);
+  const normalizedTargetQuery = String(targetQuery || '').trim();
+  if (!normalizedTargetQuery) {
+    throw new Error('目标函数不能为空');
+  }
+
+  const targetMatches = (entry.symbolIndex || [])
+    .filter((item) => item.name === normalizedTargetQuery && (item.kind || 'function') === 'function')
+    .sort((a, b) => {
+      if (a.path === b.path) return Number(a.line) - Number(b.line);
+      return a.path.localeCompare(b.path);
+    });
+
+  if (targetMatches.length === 0) {
+    throw new Error(`未找到目标函数定义: ${normalizedTargetQuery}`);
+  }
+
+  const targetSymbol = targetMatches[0];
+  const pathResult = findShortestCallPath(entry.callGraph, sourceSymbol.name, targetSymbol.name, options.maxDepth);
+  const relation = !pathResult.reachable
+    ? 'none'
+    : pathResult.names.length <= 1
+      ? 'same'
+      : pathResult.names.length === 2
+        ? 'direct'
+        : 'indirect';
+
+  return {
+    source: sourceSymbol,
+    targetQuery: normalizedTargetQuery,
+    target: targetSymbol,
+    relation,
+    reachable: pathResult.reachable,
+    maxDepth: pathResult.maxDepth,
+    hopCount: pathResult.reachable ? Math.max(0, pathResult.names.length - 1) : 0,
+    visitedCount: pathResult.visitedCount,
+    path: buildRelationPath(entry, pathResult.names),
+    sourceMatchCount: pickRepresentativeSymbol(entry, sourceSymbol.name).matchCount,
+    targetMatchCount: targetMatches.length,
+  };
+}
+
 // ─── 多上下文管理 ───────────────────────────────────────────────────────────
 
 function listContexts() {
@@ -1349,6 +1520,7 @@ module.exports = {
   searchSymbols,
   getCallers,
   getCallees,
+  findCallRelation,
   listContexts,
   closeContext,
 };

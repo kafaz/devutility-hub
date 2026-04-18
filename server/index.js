@@ -81,6 +81,7 @@ const {
   searchSymbols,
   getCallers,
   getCallees,
+  findCallRelation,
   listContexts,
   closeContext,
 } = require('./codeContext');
@@ -2192,6 +2193,20 @@ app.get('/api/code-context/:contextId/symbols/:symbolId/callers', async (req, re
 app.get('/api/code-context/:contextId/symbols/:symbolId/callees', async (req, res) => {
   try {
     const data = await getCallees(req.params.contextId, req.params.symbolId);
+    res.json({ ok: true, data });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/api/code-context/:contextId/call-relation', async (req, res) => {
+  try {
+    const data = await findCallRelation(
+      req.params.contextId,
+      req.body?.fromSymbolId,
+      req.body?.targetQuery,
+      { maxDepth: req.body?.maxDepth }
+    );
     res.json({ ok: true, data });
   } catch (e) {
     res.status(400).json({ ok: false, error: e.message });
