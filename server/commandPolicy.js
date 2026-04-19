@@ -1,7 +1,8 @@
 const fs = require('fs');
 const path = require('path');
+const { getServerDataDir } = require('./storePaths');
 
-const STORE_DIR = path.join(__dirname, 'data');
+const STORE_DIR = getServerDataDir();
 const STORE_FILE = path.join(STORE_DIR, 'command-policy.json');
 
 const DEFAULT_ALLOWED_BASE_COMMANDS = [

@@ -14,8 +14,9 @@
  */
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { generateId } from '../../../utils';
+import { generateId, renderTemplate } from '../../../utils';
 import { matchLogNoise } from '../../../utils/logNoise';
+import { PROXY_HTTP_BASE, PROXY_WS_BASE } from '../../../config/runtime';
 import { useAnalyzerStore } from './analyzerStore';
 import { useJournalStore } from './journalStore';
 
@@ -58,6 +59,52 @@ export interface SSHSession {
   status: ConnStatus;
   statusMsg: string;
   connectedAt?: number;
+}
+
+export interface InitCommandTemplate {
+  id: string;
+  name: string;
+  command: string;
+  captureVar?: string;
+  capturePattern?: string;
+  timeout?: number;
+  continueOnFailure?: boolean;
+}
+
+export interface SessionGroup {
+  id: string;
+  name: string;
+  tags: string[];
+  sessionIds: string[];
+  initCommands: InitCommandTemplate[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type NodeContextEntrySource = 'init' | 'manual';
+export type BootstrapStatus = 'idle' | 'running' | 'success' | 'partial' | 'failed';
+
+export interface NodeContextEntry {
+  id: string;
+  source: NodeContextEntrySource;
+  name: string;
+  command: string;
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  durationMs: number;
+  extractedVars: Record<string, string>;
+  timestamp: number;
+}
+
+export interface NodeConnectionContext {
+  sessionId: string;
+  connectionEpoch: number;
+  entries: NodeContextEntry[];
+  vars: Record<string, string>;
+  bootstrapStatus: BootstrapStatus;
+  bootstrapError?: string;
+  updatedAt: number;
 }
 
 export interface PlanStep {
@@ -162,6 +209,78 @@ function sanitizeTerminalText(text: string): string {
     .replace(/\x1b[=>]/g, '')
     .trim();
   /* eslint-enable no-control-regex */
+}
+
+const DEFAULT_INIT_COMMANDS: InitCommandTemplate[] = [
+  {
+    id: 'default-hostname',
+    name: '主机名',
+    command: 'hostname',
+    captureVar: 'node_hostname',
+    timeout: 8000,
+    continueOnFailure: true,
+  },
+  {
+    id: 'default-user',
+    name: '当前用户',
+    command: 'whoami',
+    captureVar: 'node_user',
+    timeout: 8000,
+    continueOnFailure: true,
+  },
+  {
+    id: 'default-pwd',
+    name: '当前目录',
+    command: 'pwd',
+    captureVar: 'node_pwd',
+    timeout: 8000,
+    continueOnFailure: true,
+  },
+  {
+    id: 'default-shell',
+    name: 'Shell',
+    command: 'printf "%s" "$SHELL"',
+    captureVar: 'node_shell',
+    timeout: 8000,
+    continueOnFailure: true,
+  },
+];
+
+function extractCapturedVars(
+  stdout: string,
+  captureVar?: string,
+  capturePattern?: string
+): Record<string, string> {
+  if (!captureVar) return {};
+  if (!capturePattern) {
+    const trimmed = stdout.trim();
+    return trimmed ? { [captureVar]: trimmed } : {};
+  }
+
+  try {
+    const match = stdout.match(new RegExp(capturePattern, 'm'));
+    if (!match) return {};
+    const extracted = (match[1] ?? match[0] ?? '').trim();
+    return extracted ? { [captureVar]: extracted } : {};
+  } catch {
+    const trimmed = stdout.trim();
+    return trimmed ? { [captureVar]: trimmed } : {};
+  }
+}
+
+function rebuildNodeContextVars(entries: NodeContextEntry[]): Record<string, string> {
+  return entries.reduce<Record<string, string>>((acc, entry) => {
+    Object.entries(entry.extractedVars).forEach(([key, value]) => {
+      acc[key] = value;
+    });
+    return acc;
+  }, {});
+}
+
+function omitKey<T>(record: Record<string, T>, key: string): Record<string, T> {
+  const next = { ...record };
+  delete next[key];
+  return next;
 }
 
 function addSessionJournalEvent(sessionId: string, eventTitle: string, content: string): void {
@@ -277,11 +396,21 @@ export function recordManualCommandStart(sessionId: string, cmd: string, current
 
 // ─── 常量 ──────────────────────────────────────────────────────────────────
 
-const PROXY_HTTP = 'http://127.0.0.1:3001';
-const PROXY_WS   = 'ws://127.0.0.1:3001/terminal';
+const PROXY_HTTP = PROXY_HTTP_BASE;
+const PROXY_WS   = PROXY_WS_BASE;
 
 interface ExecCommandOptions {
   journal?: boolean;
+}
+
+export interface ContextCaptureConfig {
+  source: NodeContextEntrySource;
+  name: string;
+  command: string;
+  captureVar?: string;
+  capturePattern?: string;
+  timeout?: number;
+  continueOnFailure?: boolean;
 }
 
 // ─── Store ─────────────────────────────────────────────────────────────────
@@ -301,11 +430,33 @@ interface SSHStore {
 
   // 命名会话（持久化元数据）
   sessions:         SSHSession[];
+  sessionGroups:    SessionGroup[];
   activeSessionId:  string | null;
+  nodeContexts:     Record<string, NodeConnectionContext>;
   addSession:       (name: string, profileId: string) => string;
   removeSession:    (sessionId: string) => void;
   renameSession:    (sessionId: string, name: string) => void;
   setActiveSession: (id: string | null) => void;
+  createSessionGroup: (group: Omit<SessionGroup, 'id' | 'createdAt' | 'updatedAt'>) => string;
+  updateSessionGroup: (groupId: string, patch: Partial<Omit<SessionGroup, 'id' | 'createdAt' | 'updatedAt'>>) => void;
+  deleteSessionGroup: (groupId: string) => void;
+  assignSessionsToGroup: (groupId: string, sessionIds: string[]) => void;
+  connectGroup: (groupId: string) => void;
+  reconnectGroup: (groupId: string) => void;
+  disconnectGroup: (groupId: string) => void;
+  saveContextEntry: (sessionId: string, entry: Omit<NodeContextEntry, 'id'>) => string;
+  removeContextEntry: (sessionId: string, entryId: string) => void;
+  clearNodeContext: (sessionId: string) => void;
+  captureContextCommand: (
+    sessionId: string,
+    config: ContextCaptureConfig
+  ) => Promise<{ stdout: string; stderr: string; exitCode: number; durationMs: number; extractedVars: Record<string, string> }>;
+  runSessionBootstrap: (sessionId: string) => Promise<void>;
+  buildNodeScopedVars: (
+    sessionId: string,
+    explicitVars?: Record<string, string>,
+    templateDefaults?: Record<string, string>
+  ) => Record<string, string>;
 
   // 代理健康检查
   proxyOnline: boolean;
@@ -373,6 +524,7 @@ function makeWSHandler(
         if (prevSession?.status !== nextStatus) {
           if (nextStatus === 'connected') {
             addSessionJournalEvent(sessionId, '连接已建立', nextStatusMsg || 'SSH 会话已连接');
+            void get().runSessionBootstrap(sessionId);
           } else if (nextStatus === 'error') {
             addSessionJournalEvent(sessionId, '连接异常', nextStatusMsg || 'SSH 会话连接失败');
           }
@@ -551,7 +703,9 @@ export const useSSHStore = create<SSHStore>()(
       credentials:     [],
       profiles:        [],
       sessions:        [],
+      sessionGroups:   [],
       activeSessionId: null,
+      nodeContexts:    {},
       proxyOnline:     false,
       multiNodeRun:    null,
       termLineListeners: {},
@@ -598,6 +752,11 @@ export const useSSHStore = create<SSHStore>()(
         runtimes.delete(sessionId);
         set((s) => ({
           sessions:        s.sessions.filter((x) => x.id !== sessionId),
+          sessionGroups:   s.sessionGroups.map((group) => ({
+            ...group,
+            sessionIds: group.sessionIds.filter((id) => id !== sessionId),
+          })),
+          nodeContexts:    omitKey(s.nodeContexts, sessionId),
           activeSessionId: s.activeSessionId === sessionId
             ? (s.sessions.find((x) => x.id !== sessionId)?.id ?? null)
             : s.activeSessionId,
@@ -610,6 +769,256 @@ export const useSSHStore = create<SSHStore>()(
         })),
 
       setActiveSession: (id) => set({ activeSessionId: id }),
+
+      createSessionGroup: (group) => {
+        const id = generateId();
+        const now = Date.now();
+        set((s) => ({
+          sessionGroups: [
+            ...s.sessionGroups,
+            {
+              ...group,
+              id,
+              tags: Array.from(new Set(group.tags.filter(Boolean))),
+              sessionIds: Array.from(new Set(group.sessionIds)),
+              initCommands: group.initCommands ?? [],
+              createdAt: now,
+              updatedAt: now,
+            },
+          ],
+        }));
+        return id;
+      },
+
+      updateSessionGroup: (groupId, patch) =>
+        set((s) => ({
+          sessionGroups: s.sessionGroups.map((group) =>
+            group.id !== groupId
+              ? group
+              : {
+                  ...group,
+                  ...patch,
+                  tags: patch.tags ? Array.from(new Set(patch.tags.filter(Boolean))) : group.tags,
+                  sessionIds: patch.sessionIds ? Array.from(new Set(patch.sessionIds)) : group.sessionIds,
+                  initCommands: patch.initCommands ?? group.initCommands,
+                  updatedAt: Date.now(),
+                }
+          ),
+        })),
+
+      deleteSessionGroup: (groupId) =>
+        set((s) => ({
+          sessionGroups: s.sessionGroups.filter((group) => group.id !== groupId),
+        })),
+
+      assignSessionsToGroup: (groupId, sessionIds) =>
+        set((s) => ({
+          sessionGroups: s.sessionGroups.map((group) =>
+            group.id !== groupId
+              ? group
+              : {
+                  ...group,
+                  sessionIds: Array.from(new Set(sessionIds)),
+                  updatedAt: Date.now(),
+                }
+          ),
+        })),
+
+      connectGroup: (groupId) => {
+        const group = get().sessionGroups.find((item) => item.id === groupId);
+        if (!group) return;
+        group.sessionIds.forEach((sessionId) => {
+          const session = get().sessions.find((item) => item.id === sessionId);
+          const profile = get().profiles.find((item) => item.id === session?.profileId);
+          if (!session || !profile || session.status === 'connected' || session.status === 'connecting') return;
+          get().connectSession(sessionId, { credentialId: profile.credentialId });
+        });
+      },
+
+      reconnectGroup: (groupId) => {
+        const group = get().sessionGroups.find((item) => item.id === groupId);
+        if (!group) return;
+        group.sessionIds.forEach((sessionId) => {
+          const session = get().sessions.find((item) => item.id === sessionId);
+          const profile = get().profiles.find((item) => item.id === session?.profileId);
+          if (!session || !profile) return;
+          if (session.status === 'connected' || session.status === 'connecting') {
+            get().disconnectSession(sessionId);
+          }
+          queueMicrotask(() => get().connectSession(sessionId, { credentialId: profile.credentialId }));
+        });
+      },
+
+      disconnectGroup: (groupId) => {
+        const group = get().sessionGroups.find((item) => item.id === groupId);
+        if (!group) return;
+        group.sessionIds.forEach((sessionId) => {
+          const session = get().sessions.find((item) => item.id === sessionId);
+          if (session?.status === 'connected' || session?.status === 'connecting') {
+            get().disconnectSession(sessionId);
+          }
+        });
+      },
+
+      saveContextEntry: (sessionId, entry) => {
+        const entryId = generateId();
+        const nextEntry: NodeContextEntry = { ...entry, id: entryId };
+        set((s) => {
+          const current = s.nodeContexts[sessionId];
+          const entries = [...(current?.entries ?? []), nextEntry];
+          return {
+            nodeContexts: {
+              ...s.nodeContexts,
+              [sessionId]: {
+                sessionId,
+                connectionEpoch: current?.connectionEpoch ?? Date.now(),
+                entries,
+                vars: rebuildNodeContextVars(entries),
+                bootstrapStatus: current?.bootstrapStatus ?? 'idle',
+                bootstrapError: current?.bootstrapError,
+                updatedAt: Date.now(),
+              },
+            },
+          };
+        });
+        return entryId;
+      },
+
+      removeContextEntry: (sessionId, entryId) =>
+        set((s) => {
+          const current = s.nodeContexts[sessionId];
+          if (!current) return {};
+          const entries = current.entries.filter((entry) => entry.id !== entryId);
+          return {
+            nodeContexts: {
+              ...s.nodeContexts,
+              [sessionId]: {
+                ...current,
+                entries,
+                vars: rebuildNodeContextVars(entries),
+                updatedAt: Date.now(),
+              },
+            },
+          };
+        }),
+
+      clearNodeContext: (sessionId) =>
+        set((s) => ({ nodeContexts: omitKey(s.nodeContexts, sessionId) })),
+
+      captureContextCommand: async (sessionId, config) => {
+        const renderedCommand = renderTemplate(
+          config.command,
+          get().buildNodeScopedVars(sessionId)
+        );
+        const result = await get().execCommandOnSession(
+          sessionId,
+          renderedCommand,
+          config.timeout ?? 15000
+        );
+        const extractedVars = extractCapturedVars(result.stdout, config.captureVar, config.capturePattern);
+        get().saveContextEntry(sessionId, {
+          source: config.source,
+          name: config.name,
+          command: renderedCommand,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.exitCode,
+          durationMs: result.durationMs,
+          extractedVars,
+          timestamp: Date.now(),
+        });
+        return { ...result, extractedVars };
+      },
+
+      buildNodeScopedVars: (sessionId, explicitVars = {}, templateDefaults = {}) => ({
+        ...templateDefaults,
+        ...(get().nodeContexts[sessionId]?.vars ?? {}),
+        ...explicitVars,
+      }),
+
+      runSessionBootstrap: async (sessionId) => {
+        const session = get().sessions.find((item) => item.id === sessionId);
+        if (!session || session.status !== 'connected') return;
+
+        const connectionEpoch = Date.now();
+        set((s) => ({
+          nodeContexts: {
+            ...s.nodeContexts,
+            [sessionId]: {
+              sessionId,
+              connectionEpoch,
+              entries: [],
+              vars: {},
+              bootstrapStatus: 'running',
+              updatedAt: connectionEpoch,
+            },
+          },
+        }));
+
+        get().sendInputToSession(sessionId, 'export TMOUT=0\n');
+        addSessionJournalEvent(sessionId, 'Shell Bootstrap', '已发送 export TMOUT=0');
+
+        const groupCommands = get().sessionGroups
+          .filter((group) => group.sessionIds.includes(sessionId))
+          .flatMap((group) => group.initCommands ?? []);
+        const mergedCommands = [...DEFAULT_INIT_COMMANDS, ...groupCommands];
+
+        let failedCount = 0;
+        let blockingFailure = false;
+        let lastError = '';
+
+        for (const command of mergedCommands) {
+          const activeContext = get().nodeContexts[sessionId];
+          if (!activeContext || activeContext.connectionEpoch !== connectionEpoch) {
+            return;
+          }
+
+          const result = await get().captureContextCommand(sessionId, {
+            source: 'init',
+            name: command.name,
+            command: command.command,
+            captureVar: command.captureVar,
+            capturePattern: command.capturePattern,
+            timeout: command.timeout,
+            continueOnFailure: command.continueOnFailure,
+          });
+
+          if (result.exitCode !== 0) {
+            failedCount += 1;
+            lastError = result.stderr || result.stdout || `${command.name} 执行失败`;
+            if (!command.continueOnFailure) {
+              blockingFailure = true;
+              break;
+            }
+          }
+        }
+
+        set((s) => {
+          const current = s.nodeContexts[sessionId];
+          if (!current || current.connectionEpoch !== connectionEpoch) return {};
+          const bootstrapStatus: BootstrapStatus =
+            blockingFailure ? 'failed'
+              : failedCount > 0 ? 'partial'
+              : 'success';
+          return {
+            nodeContexts: {
+              ...s.nodeContexts,
+              [sessionId]: {
+                ...current,
+                bootstrapStatus,
+                bootstrapError: lastError || undefined,
+                updatedAt: Date.now(),
+              },
+            },
+          };
+        });
+
+        if (failedCount > 0) {
+          addSessionJournalEvent(sessionId, '上下文初始化异常', lastError || `初始化采集失败 ${failedCount} 项`);
+        } else {
+          addSessionJournalEvent(sessionId, '上下文初始化完成', `已完成 ${mergedCommands.length} 条初始化采集命令`);
+        }
+      },
 
       subscribeToSessionLines: (sessionId, cb) => {
         set((s) => {
@@ -691,6 +1100,7 @@ export const useSSHStore = create<SSHStore>()(
         flushPendingManualCommand(sessionId);
         rt.disconnectRequested = false;
         rt.ws?.close();
+        set((s) => ({ nodeContexts: omitKey(s.nodeContexts, sessionId) }));
 
         const socket = new WebSocket(PROXY_WS);
         rt.ws = socket;
@@ -712,15 +1122,16 @@ export const useSSHStore = create<SSHStore>()(
           const prevSession = get().sessions.find((x) => x.id === sessionId);
           const wasRequested = rt.disconnectRequested;
           rt.disconnectRequested = false;
-          set((s) => ({
-            sessions: s.sessions.map((x) =>
-              x.id === sessionId ? { ...x, status: 'disconnected', statusMsg: '' } : x
-            ),
-          }));
-          if (!wasRequested && prevSession?.status === 'connected') {
-            addSessionJournalEvent(sessionId, '连接已关闭', 'SSH 会话连接已断开');
-          }
-        };
+        set((s) => ({
+          sessions: s.sessions.map((x) =>
+            x.id === sessionId ? { ...x, status: 'disconnected', statusMsg: '' } : x
+          ),
+        }));
+        get().clearNodeContext(sessionId);
+        if (!wasRequested && prevSession?.status === 'connected') {
+          addSessionJournalEvent(sessionId, '连接已关闭', 'SSH 会话连接已断开');
+        }
+      };
         socket.onerror = () => {
           const prevSession = get().sessions.find((x) => x.id === sessionId);
           set((s) => ({
@@ -751,6 +1162,7 @@ export const useSSHStore = create<SSHStore>()(
           sessions: s.sessions.map((x) =>
             x.id === sessionId ? { ...x, status: 'idle', statusMsg: '' } : x
           ),
+          nodeContexts: omitKey(s.nodeContexts, sessionId),
         }));
         addSessionJournalEvent(sessionId, '用户主动断开', '会话已主动断开');
       },
@@ -904,6 +1316,7 @@ export const useSSHStore = create<SSHStore>()(
         credentials:     s.credentials,
         profiles:        s.profiles,
         sessions:        s.sessions,
+        sessionGroups:   s.sessionGroups,
         activeSessionId: s.activeSessionId,
       }),
     }

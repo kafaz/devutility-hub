@@ -9,6 +9,13 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function waitForExit(child) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => child.once('exit', resolve));
+}
+
 async function waitForServerReady(timeoutMs = 10000) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
@@ -34,6 +41,9 @@ test('agent command routes block disallowed commands with controlled 403 errors'
   });
 
   let stderr = '';
+  server.stdout.on('data', () => {
+    // drain stdout so the child cannot block on banner output
+  });
   server.stderr.on('data', (chunk) => {
     stderr += chunk.toString();
   });
@@ -63,8 +73,11 @@ test('agent command routes block disallowed commands with controlled 403 errors'
     assert.match(agentExecuteBody.error, /Command Policy Block/);
     assert.doesNotMatch(agentExecuteBody.error, /ReferenceError/i);
   } finally {
-    server.kill('SIGTERM');
-    await new Promise((resolve) => server.on('exit', resolve));
+    const exitPromise = waitForExit(server);
+    if (server.exitCode === null && server.signalCode === null) {
+      server.kill('SIGTERM');
+    }
+    await exitPromise;
   }
 
   assert.equal(stderr.includes('ReferenceError'), false, `unexpected server stderr: ${stderr}`);

@@ -41,6 +41,9 @@ export interface JournalEntry {
   durationMs?:   number;
   statusReason?: string;         // 正则判断依据
   capturedVar?:  { name: string; value: string };
+  stepStatus?:   'done' | 'failed' | 'cached';
+  stepPhase?:    'ready' | 'context';
+  cacheAgeMs?:   number;
 
   // SOP 关联
   prepareProfileName?: string;

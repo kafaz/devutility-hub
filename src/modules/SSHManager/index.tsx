@@ -57,6 +57,7 @@ import { useLocalStorage } from '../../hooks/useLocalStorage';
 import { useGlobalStore } from '../../store/globalStore';
 import type { NodeReportData } from '../../utils';
 import {
+    extractTemplateVariables,
     generateMultiNodeReport, renderTemplate,
 } from '../../utils';
 import { useSOPStore } from '../SOPBuilder/store/sopStore';
@@ -64,11 +65,13 @@ import BackgroundJobMonitor from './components/BackgroundJobMonitor';
 import BatchLoginModal from './components/BatchLoginModal';
 import CredentialManager from './components/CredentialManager';
 import KeywordAnalyzer from './components/KeywordAnalyzer';
+import NodeContextPanel from './components/NodeContextPanel';
 import SessionJournal from './components/SessionJournal';
+import SessionGroupModal from './components/SessionGroupModal';
 import { useAnalyzerStore } from './store/analyzerStore';
 import { useCronStore } from './store/cronStore';
 import { useJournalStore } from './store/journalStore';
-import type { NodeExecution, PlanStepResult, SSHProfile, SSHSession } from './store/sshStore';
+import type { NodeExecution, PlanStepResult, SessionGroup, SSHProfile, SSHSession } from './store/sshStore';
 import { getTerminalBuffer, recordManualCommandStart, useSSHStore } from './store/sshStore';
 
 const { Title, Text } = Typography;
@@ -681,12 +684,14 @@ const SSHManager: React.FC = () => {
   const analyzerLogCount = useAnalyzerStore(s => s.logs.length);
 
   const {
-    credentials, profiles, sessions, activeSessionId, proxyOnline, multiNodeRun,
+    credentials, profiles, sessions, sessionGroups, activeSessionId, proxyOnline, multiNodeRun, nodeContexts,
     addProfile, updateProfile, deleteProfile,
     addSession, removeSession, renameSession, setActiveSession,
+    createSessionGroup, updateSessionGroup, deleteSessionGroup,
+    connectGroup, reconnectGroup, disconnectGroup,
     checkProxy, setSessionTermCallback,
     connectSession, disconnectSession, sendInputToSession, resizeSession,
-    startMultiNodeRun, cancelMultiNodeRun, clearMultiNodeRun,
+    startMultiNodeRun, cancelMultiNodeRun, clearMultiNodeRun, buildNodeScopedVars,
     checkKeyFile,
   } = useSSHStore();
 
@@ -698,6 +703,7 @@ const SSHManager: React.FC = () => {
   const [connectModal, setConnectModal]     = useState(false);
   const [credentialModal, setCredentialModal] = useState(false);
   const [batchLoginModal, setBatchLoginModal] = useState(false);
+  const [groupModal, setGroupModal] = useState<SessionGroup | null | 'new'>(null);
   const [connectingSessionId, setConnectingSessionId] = useState('');
   const [renamingSessionId, setRenamingSessionId]     = useState('');
   const [renameValue, setRenameValue] = useState('');
@@ -732,6 +738,33 @@ const SSHManager: React.FC = () => {
   const { addEntry, addSOPNodeResults } = useJournalStore();
   const { evaluateJobs } = useCronStore();
 
+  const resolveLegacyGroupSessionIds = React.useCallback((groupId: string) => {
+    if (!groupId.startsWith('group-')) return [];
+    const groupName = groupId.replace(/^group-/, '');
+    return sessions
+      .filter((session) => {
+        const profile = profiles.find((item) => item.id === session.profileId);
+        if (!profile) return false;
+        const parts = profile.name.split('-');
+        const derivedGroupName = parts.length > 1 ? parts[0] : '其他';
+        return derivedGroupName === groupName;
+      })
+      .map((session) => session.id);
+  }, [profiles, sessions]);
+
+  const resolveCronTargetSessionIds = React.useCallback((targetGroupIds: string[], targetSessions: string[]) => {
+    const targetSessionIds = new Set(targetSessions);
+    targetGroupIds.forEach((groupId) => {
+      const realGroup = sessionGroups.find((group) => group.id === groupId);
+      if (realGroup) {
+        realGroup.sessionIds.forEach((sessionId) => targetSessionIds.add(sessionId));
+        return;
+      }
+      resolveLegacyGroupSessionIds(groupId).forEach((sessionId) => targetSessionIds.add(sessionId));
+    });
+    return Array.from(targetSessionIds);
+  }, [resolveLegacyGroupSessionIds, sessionGroups]);
+
   useEffect(() => {
     // 定时任务 (Cron) 每分钟轮询
     const intervalId = setInterval(async () => {
@@ -741,37 +774,7 @@ const SSHManager: React.FC = () => {
         // 对每一个需要执行的 Job 进行自动派发
         for (const job of jobsToRun) {
           console.log(`[Cron] Executing job: ${job.name} (${job.id})`);
-          
-          // 解析目标 Session IDs
-          // 计算当前组别的映射
-          const profiles = useSSHStore.getState().profiles;
-          const localGroupsMap = new Map<string, { id: string; name: string; children: string[] }>();
-          profiles.forEach(p => {
-             const parts = p.name.split('-');
-             const groupName = parts.length > 1 ? parts[0] : '其他';
-             const groupId = `group-${groupName}`;
-             if (!localGroupsMap.has(groupId)) {
-               localGroupsMap.set(groupId, { id: groupId, name: groupName, children: [] });
-             }
-          });
-          useSSHStore.getState().sessions.forEach(sess => {
-              const p = profiles.find(x => x.id === sess.profileId);
-              if (p) {
-                 const parts = p.name.split('-');
-                 const groupName = parts.length > 1 ? parts[0] : '其他';
-                 const groupId = `group-${groupName}`;
-                 localGroupsMap.get(groupId)?.children.push(sess.id);
-              }
-          });
-          const localGroups = Array.from(localGroupsMap.values());
-
-          const targetSessionIds = new Set(job.targetSessions);
-          job.targetGroupIds.forEach(gid => {
-            const g = localGroups.find(gp => gp.id === gid);
-            if (g) {
-              g.children.forEach(sid => targetSessionIds.add(sid));
-            }
-          });
+          const targetSessionIds = new Set(resolveCronTargetSessionIds(job.targetGroupIds, job.targetSessions));
 
           // 取当前所有激活的连线
           const activeSessionIds = Array.from(targetSessionIds).filter(sid => {
@@ -808,16 +811,18 @@ const SSHManager: React.FC = () => {
             if (!inst) continue;
 
             // 构建用于到底层分发的执行步骤 (这里复用了 SSHManager 本地的 buildSteps 逻辑框架)
-            const mergedVars = { ...job.broadcastVars };
+            const templateDefaults: Record<string, string> = {};
             if (inst.variables) {
               inst.variables.forEach(v => {
-                if (mergedVars[v.name] === undefined && v.defaultValue !== undefined) {
-                  mergedVars[v.name] = String(v.defaultValue);
+                if (v.defaultValue !== undefined) {
+                  templateDefaults[v.name] = String(v.defaultValue);
                 }
               });
             }
+            const mergedVars = useSSHStore.getState().buildNodeScopedVars(sessionId, job.broadcastVars, templateDefaults);
 
             const steps: import('./store/sshStore').PlanStep[] = [];
+            const missingVars = new Set<string>();
             [...inst.checkResults, ...inst.extraChecks].forEach((cr) => {
               const subs = cr.subSteps ?? [];
               if (subs.length > 0) {
@@ -831,12 +836,28 @@ const SSHManager: React.FC = () => {
                 }));
               } else {
                 const cmd = renderTemplate(cr.command, mergedVars);
+                extractTemplateVariables(cr.command).forEach((name) => {
+                  if (mergedVars[name] === undefined) missingVars.add(name);
+                });
                 if (cmd.trim()) steps.push({
                   id: cr.checkId, name: cr.checkName, cmd,
                   checkId: cr.checkId, isSubStep: false,
                 });
               }
             });
+
+            [...inst.checkResults, ...inst.extraChecks].forEach((cr) => {
+              (cr.subSteps ?? []).forEach((ss) => {
+                extractTemplateVariables(ss.command).forEach((name) => {
+                  if (mergedVars[name] === undefined) missingVars.add(name);
+                });
+              });
+            });
+
+            if (missingVars.size > 0) {
+              console.warn(`[Cron] Job ${job.name} skipped for session ${sessionId}: missing vars ${Array.from(missingVars).join(', ')}`);
+              continue;
+            }
 
             if (steps.length > 0) {
               configs.push({
@@ -892,7 +913,7 @@ const SSHManager: React.FC = () => {
     evaluateJobs();
 
     return () => clearInterval(intervalId);
-  }, [evaluateJobs, messageApi]);
+  }, [evaluateJobs, messageApi, resolveCronTargetSessionIds]);
 
   // 定期检查代理
   useEffect(() => {
@@ -1158,6 +1179,19 @@ const SSHManager: React.FC = () => {
       void runPrepareOnSession(session.id, 'auto', true);
     });
   }, [prepareRunningIds, prepareSettings.autoRun, prepareSettings.profileId, sessions]);
+  const activeSession = sessions.find((session) => session.id === activeSessionId) ?? null;
+  const activeNodeContext = activeSessionId ? (nodeContexts[activeSessionId] ?? null) : null;
+  const sessionGroupsMap = React.useMemo(() => {
+    const map = new Map<string, SessionGroup[]>();
+    sessionGroups.forEach((group) => {
+      group.sessionIds.forEach((sessionId) => {
+        const current = map.get(sessionId) ?? [];
+        current.push(group);
+        map.set(sessionId, current);
+      });
+    });
+    return map;
+  }, [sessionGroups]);
 
   // ── 变量收集（来自选中实例中的占位符和预定义配置） ──────────────────────────
   const definedVars = React.useMemo(() => {
@@ -1188,33 +1222,56 @@ const SSHManager: React.FC = () => {
 
   const allVarNames = Array.from(new Set([...extractedVarNames, ...Array.from(definedVars.keys())]));
 
-  // ── 构建单会话的执行步骤列表 ──────────────────────────────────────────────
-  function buildSteps(instanceId: string) {
-    const inst = instances.find((i) => i.id === instanceId);
-    if (!inst) return [];
+  const nodeVariableDiagnostics = React.useMemo(() => {
+    return selectedNodes.map((sessionId) => {
+      const instId = execMode === 'broadcast' ? broadcastInstanceId : targetedMap[sessionId];
+      const built = instId ? buildSteps(instId, sessionId) : { steps: [], missingVars: [] as string[] };
+      return {
+        sessionId,
+        sessionName: sessions.find((session) => session.id === sessionId)?.name ?? sessionId,
+        missingVars: built.missingVars,
+      };
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedNodes, execMode, broadcastInstanceId, targetedMap, sessions, varValues, nodeContexts, instances]);
 
-    const mergedVars = { ...varValues };
+  // ── 构建单会话的执行步骤列表 ──────────────────────────────────────────────
+  function buildSteps(instanceId: string, sessionId?: string) {
+    const inst = instances.find((i) => i.id === instanceId);
+    if (!inst) return { steps: [], missingVars: [] as string[] };
+
+    const templateDefaults: Record<string, string> = {};
     if (inst.variables) {
       inst.variables.forEach(v => {
-        if (mergedVars[v.name] === undefined && v.defaultValue !== undefined) {
-          mergedVars[v.name] = v.defaultValue;
-        }
+        if (v.defaultValue !== undefined) templateDefaults[v.name] = String(v.defaultValue);
       });
     }
+    const mergedVars = sessionId
+      ? buildNodeScopedVars(sessionId, varValues, templateDefaults)
+      : { ...templateDefaults, ...varValues };
 
     const steps: import('./store/sshStore').PlanStep[] = [];
+    const missingVars = new Set<string>();
     [...inst.checkResults, ...inst.extraChecks].forEach((cr) => {
       const subs = cr.subSteps ?? [];
       if (subs.length > 0) {
-        subs.forEach((ss) => steps.push({
-          id: ss.id, name: ss.name,
-          cmd: renderTemplate(ss.command, mergedVars),
-          captureVar: ss.captureVar, capturePattern: ss.capturePattern,
-          normalRegex: ss.normalRegex, abnormalRegex: ss.abnormalRegex,
-          scriptPath: ss.scriptPath, timeout: ss.timeoutMs ?? 30000,
-          checkId: cr.checkId, isSubStep: true,
-        }));
+        subs.forEach((ss) => {
+          extractTemplateVariables(ss.command).forEach((name) => {
+            if (mergedVars[name] === undefined) missingVars.add(name);
+          });
+          steps.push({
+            id: ss.id, name: ss.name,
+            cmd: renderTemplate(ss.command, mergedVars),
+            captureVar: ss.captureVar, capturePattern: ss.capturePattern,
+            normalRegex: ss.normalRegex, abnormalRegex: ss.abnormalRegex,
+            scriptPath: ss.scriptPath, timeout: ss.timeoutMs ?? 30000,
+            checkId: cr.checkId, isSubStep: true,
+          });
+        });
       } else {
+        extractTemplateVariables(cr.command).forEach((name) => {
+          if (mergedVars[name] === undefined) missingVars.add(name);
+        });
         const cmd = renderTemplate(cr.command, mergedVars);
         if (cmd.trim()) steps.push({
           id: cr.checkId, name: cr.checkName, cmd,
@@ -1222,24 +1279,37 @@ const SSHManager: React.FC = () => {
         });
       }
     });
-    return steps;
+    return { steps, missingVars: Array.from(missingVars) };
   }
 
   // ── 开始多节点执行 ────────────────────────────────────────────────────────
   const handleRunMultiNode = async () => {
     if (selectedNodes.length === 0) { messageApi.warning('请至少选择一个节点'); return; }
 
+    const skippedNodes: Array<{ sessionName: string; missingVars: string[] }> = [];
     const configs = selectedNodes.map((sessionId) => {
       const instId = execMode === 'broadcast' ? broadcastInstanceId : targetedMap[sessionId];
       const inst   = instances.find((i) => i.id === instId);
+      const built = buildSteps(instId, sessionId);
+      if (built.missingVars.length > 0) {
+        skippedNodes.push({
+          sessionName: sessions.find((session) => session.id === sessionId)?.name ?? sessionId,
+          missingVars: built.missingVars,
+        });
+      }
       return {
         sessionId,
         instanceId:   instId,
         instanceTitle: inst?.incidentTitle ?? '',
         templateName:  inst?.templateName  ?? '',
-        steps:         buildSteps(instId),
+        steps:         built.steps,
+        missingVars:   built.missingVars,
       };
-    }).filter((c) => c.instanceId && c.steps.length > 0);
+    }).filter((c) => c.instanceId && c.steps.length > 0 && c.missingVars.length === 0);
+
+    if (skippedNodes.length > 0) {
+      messageApi.warning(`已跳过 ${skippedNodes.length} 个节点：缺少变量 ${skippedNodes.map((item) => `${item.sessionName}[${item.missingVars.join(', ')}]`).join('；')}`);
+    }
 
     if (configs.length === 0) { messageApi.warning('所选节点无可执行步骤'); return; }
 
@@ -1536,6 +1606,86 @@ const SSHManager: React.FC = () => {
               ))}
           </Card>
 
+          <Card
+            size="small"
+            title="会话组"
+            style={{ background: cardBg, border: `1px solid ${borderColor}` }}
+            extra={
+              <Button size="small" icon={<PlusOutlined />} type="dashed" onClick={() => setGroupModal('new')}>
+                新建
+              </Button>
+            }
+          >
+            {sessionGroups.length === 0 ? (
+              <Text type="secondary" style={{ fontSize: 12 }}>批量登录时可直接建组，或在这里单独创建。</Text>
+            ) : sessionGroups.map((group) => {
+              const groupSessions = sessions.filter((session) => group.sessionIds.includes(session.id));
+              const connectedCount = groupSessions.filter((session) => session.status === 'connected').length;
+              const autoConnectable = groupSessions.filter((session) => {
+                const profile = profiles.find((item) => item.id === session.profileId);
+                const credential = profile?.credentialId ? credentials.find((item) => item.id === profile.credentialId) : null;
+                return Boolean(
+                  profile && (
+                    profile.credentialId ||
+                    credential?.password ||
+                    profile.authType === 'agent' ||
+                    (profile.authType === 'privateKey' && profile.keyFilePath)
+                  )
+                );
+              }).length;
+              return (
+                <div
+                  key={group.id}
+                  style={{
+                    padding: '8px 0',
+                    borderBottom: `1px solid ${borderColor}`,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 6,
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                    <div>
+                      <Text strong style={{ fontSize: 12 }}>{group.name}</Text>
+                      <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
+                        {group.sessionIds.length} 个节点 · {connectedCount} 已连接 · {group.initCommands.length} 条初始化命令
+                      </Text>
+                    </div>
+                    <Space size={4}>
+                      <Tooltip title="连接整组（需要已保存凭证）">
+                        <Button size="small" type="primary" disabled={!proxyOnline} onClick={() => connectGroup(group.id)}>连接</Button>
+                      </Tooltip>
+                      <Tooltip title="重连整组（需要已保存凭证）">
+                        <Button size="small" onClick={() => reconnectGroup(group.id)}>重连</Button>
+                      </Tooltip>
+                      <Tooltip title="断开整组">
+                        <Button size="small" danger onClick={() => disconnectGroup(group.id)}>断开</Button>
+                      </Tooltip>
+                      <Button size="small" icon={<EditOutlined />} onClick={() => setGroupModal(group)} />
+                      <Popconfirm
+                        title="删除此会话组？"
+                        onConfirm={() => deleteSessionGroup(group.id)}
+                        okText="删除"
+                        cancelText="取消"
+                        okButtonProps={{ danger: true }}
+                      >
+                        <Button size="small" danger icon={<DeleteOutlined />} />
+                      </Popconfirm>
+                    </Space>
+                  </div>
+                  <Space wrap size={[4, 4]}>
+                    {group.tags.map((tag) => (
+                      <Tag key={tag} color="purple">{tag}</Tag>
+                    ))}
+                    {autoConnectable < groupSessions.length && (
+                      <Tag color="gold">部分成员缺少自动连接凭证</Tag>
+                    )}
+                  </Space>
+                </div>
+              );
+            })}
+          </Card>
+
           {/* 活跃会话列表 */}
           <Card size="small"
             title={
@@ -1551,6 +1701,7 @@ const SSHManager: React.FC = () => {
               : sessions.map((sess) => {
                 const sc  = STATUS[sess.status];
                 const prf = profiles.find((p) => p.id === sess.profileId);
+                const ownerGroups = sessionGroupsMap.get(sess.id) ?? [];
                 const isDisconnectedOrError = sess.status === 'disconnected' || sess.status === 'error';
                 const uptimeMs = sess.status === 'connected' && sess.connectedAt ? Date.now() - sess.connectedAt : 0;
                 const prepareSummary = prepareSummaries[sess.id];
@@ -1671,6 +1822,13 @@ const SSHManager: React.FC = () => {
                         {prf.username}@{prf.host}:{prf.port}
                         {sess.status === 'error' && sess.statusMsg ? ` · ⚠ ${sess.statusMsg}` : ''}
                       </Text>
+                    )}
+                    {ownerGroups.length > 0 && (
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 4 }}>
+                        {ownerGroups.map((group) => (
+                          <Tag key={group.id} color="blue" style={{ fontSize: 10, margin: 0 }}>{group.name}</Tag>
+                        ))}
+                      </div>
                     )}
                   </div>
                 );
@@ -1926,6 +2084,43 @@ const SSHManager: React.FC = () => {
             size="small"
             style={{ marginBottom: 12 }}
           />
+          {activeTab === 'connect' && (
+            <>
+              <Card
+                size="small"
+                title="连接分组工作台"
+                style={{ background: cardBg, border: `1px solid ${borderColor}` }}
+              >
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  <Alert
+                    type="info"
+                    showIcon={false}
+                    style={{ padding: '8px 10px' }}
+                    message={
+                      <div>
+                        <Text strong style={{ fontSize: 12 }}>当前能力</Text>
+                        <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>
+                          1. 按会话组批量建连/重连/断开
+                        </Text>
+                        <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>
+                          2. 连接成功后自动发送 `TMOUT=0` 并跑初始化采集命令
+                        </Text>
+                        <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>
+                          3. 当前连接内手动补采集的变量会直接参与多节点命令渲染
+                        </Text>
+                      </div>
+                    }
+                  />
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    会话组维护在左侧面板，当前右侧重点用于查看活动会话的连接级上下文和手动补采集。
+                  </Text>
+                </div>
+              </Card>
+              <NodeContextPanel activeSession={activeSession} context={activeNodeContext} isDark={isDark} />
+            </>
+          )}
+
+          {activeTab === 'multi_node' && (
           <Card size="small"
             title={
               <Space>
@@ -2075,6 +2270,25 @@ const SSHManager: React.FC = () => {
                       </div>
                     );
                   })}
+                  {nodeVariableDiagnostics.some((item) => item.missingVars.length > 0) && (
+                    <Alert
+                      type="warning"
+                      showIcon={false}
+                      style={{ marginTop: 8, padding: '6px 10px' }}
+                      message={
+                        <div>
+                          <Text strong style={{ fontSize: 12 }}>变量缺失检查</Text>
+                          {nodeVariableDiagnostics
+                            .filter((item) => item.missingVars.length > 0)
+                            .map((item) => (
+                              <Text key={item.sessionId} type="secondary" style={{ fontSize: 11, display: 'block' }}>
+                                {item.sessionName}: 缺少 {item.missingVars.join(', ')}
+                              </Text>
+                            ))}
+                        </div>
+                      }
+                    />
+                  )}
                 </div>
               )}
 
@@ -2196,6 +2410,31 @@ const SSHManager: React.FC = () => {
               )}
             </div>
           </Card>
+          )}
+
+          {activeTab === 'cron' && (
+            <Card
+              size="small"
+              title="Cron 说明"
+              style={{ background: cardBg, border: `1px solid ${borderColor}` }}
+            >
+              <Alert
+                type="info"
+                showIcon={false}
+                message={
+                  <div>
+                    <Text strong style={{ fontSize: 12 }}>真实会话组已接入 Cron</Text>
+                    <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>
+                      新建/编辑 Cron 时会直接使用真实会话组；旧 `group-*` 任务仍可兼容解析。
+                    </Text>
+                    <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>
+                      中间面板用于维护 Cron 列表，右侧不再重复显示配置表。
+                    </Text>
+                  </div>
+                }
+              />
+            </Card>
+          )}
         </div>
       </div>
 
@@ -2256,6 +2495,21 @@ const SSHManager: React.FC = () => {
         onCancel={() => setBatchLoginModal(false)}
         onSessionsPrepared={(sessionIds) => setSelectedNodes((current) => Array.from(new Set([...current, ...sessionIds])))}
         onSuccess={() => setBatchLoginModal(false)}
+      />
+
+      <SessionGroupModal
+        open={!!groupModal}
+        sessions={sessions}
+        initialValue={groupModal === 'new' ? null : groupModal}
+        onCancel={() => setGroupModal(null)}
+        onSave={(values) => {
+          if (groupModal && groupModal !== 'new') {
+            updateSessionGroup(groupModal.id, values);
+          } else {
+            createSessionGroup(values);
+          }
+          setGroupModal(null);
+        }}
       />
 
       {/* ── 凭证管理弹窗 */}

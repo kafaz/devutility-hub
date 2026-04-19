@@ -38,14 +38,20 @@ import {
     Popconfirm,
     Select,
     Space,
+    Switch,
     Tag,
     Tooltip,
     Typography,
 } from 'antd';
-import React, { useMemo, useState } from 'react';
+import React, { useState } from 'react';
 import ResizableOutput from '../../../components/shared/ResizableOutput';
 import { useGlobalStore } from '../../../store/globalStore';
-import { filterNoiseText } from '../../../utils/logNoise';
+import {
+  BUILTIN_NOISE_MODE_META,
+  filterNoiseText,
+  getSessionLogSuppressionInfo,
+  type LogNoiseOptions,
+} from '../../../utils/logNoise';
 import { useAnalyzerStore } from '../store/analyzerStore';
 import type { JournalEntry, JournalEntryType } from '../store/journalStore';
 import { useJournalStore } from '../store/journalStore';
@@ -73,24 +79,21 @@ const TYPE_CONFIG: Record<JournalEntryType, {
 const EntryCard: React.FC<{
   entry:    JournalEntry;
   isDark:   boolean;
-  noiseKeywords: string[];
   onDelete: () => void;
   showRawOutput: boolean;
-}> = ({ entry, isDark, noiseKeywords, onDelete, showRawOutput }) => {
+  noiseOptions: LogNoiseOptions;
+}> = ({ entry, isDark, onDelete, showRawOutput, noiseOptions }) => {
   const [expanded, setExpanded] = useState(false);
   const tc  = TYPE_CONFIG[entry.type];
   const bg  = isDark ? '#2d2d30' : '#fafafa';
   const bdr = isDark ? '#3e3e42' : '#e4e4e7';
   const ts  = new Date(entry.timestamp).toLocaleTimeString('zh-CN');
 
-  const outputText = entry.output?.trimEnd() ?? '';
-  const outputView = useMemo(
-    () => filterNoiseText(outputText, noiseKeywords),
-    [noiseKeywords, outputText]
-  );
-  const displayOutput = showRawOutput ? outputText : outputView.text.trimEnd();
+  const rawOutputText = entry.output?.trimEnd() ?? '';
+  const filteredOutput = filterNoiseText(rawOutputText, noiseOptions);
+  const outputText = (showRawOutput ? rawOutputText : filteredOutput.text).trimEnd();
+  const suppressedCount = showRawOutput ? 0 : filteredOutput.suppressedCount;
   const hasOutput  = outputText.length > 0;
-  const hiddenNoiseLineCount = showRawOutput ? 0 : outputView.suppressedCount;
 
   return (
     <div
@@ -161,13 +164,25 @@ const EntryCard: React.FC<{
             {entry.statusReason && (
               <Tooltip title={entry.statusReason}>
                 <Tag
-                  color={entry.exitCode === 0 ? 'green' : 'red'}
+                  color={entry.stepStatus === 'cached' ? 'cyan' : entry.exitCode === 0 ? 'green' : 'red'}
                   style={{ fontSize: 10, cursor: 'help' }}
                 >
-                  {entry.statusReason.startsWith('正常正则') ? '✅正则' :
-                   entry.statusReason.startsWith('异常正则') ? '❌正则' : ''}
+                  {entry.stepStatus === 'cached' ? '缓存复用'
+                    : entry.statusReason.startsWith('正常正则') ? '✅正则'
+                    : entry.statusReason.startsWith('异常正则') ? '❌正则'
+                    : '详情'}
                 </Tag>
               </Tooltip>
+            )}
+            {entry.stepPhase && (
+              <Tag color={entry.stepPhase === 'ready' ? 'blue' : 'default'} style={{ fontSize: 10 }}>
+                {entry.stepPhase === 'ready' ? '就绪阶段' : '背景上下文'}
+              </Tag>
+            )}
+            {entry.stepStatus === 'cached' && typeof entry.cacheAgeMs === 'number' && (
+              <Tag color="cyan" style={{ fontSize: 10 }}>
+                {Math.max(1, Math.round(entry.cacheAgeMs / 1000))}s 前缓存
+              </Tag>
             )}
           </Space>
 
@@ -184,11 +199,6 @@ const EntryCard: React.FC<{
           )}
         </div>
         <Space size={4}>
-          {hiddenNoiseLineCount > 0 && (
-            <Tag color="default" style={{ fontSize: 10, margin: 0 }}>
-              折叠 {hiddenNoiseLineCount} 行噪声
-            </Tag>
-          )}
           {hasOutput && (
             <Button
               type="link" size="small" style={{ padding: 0, fontSize: 11 }}
@@ -241,20 +251,19 @@ const EntryCard: React.FC<{
       {/* 输出（可展开，可拖拽） */}
       {expanded && hasOutput && (
         <div style={{ marginTop: 6 }}>
-          {displayOutput ? (
-            <ResizableOutput
-              content={displayOutput}
-              isDark={isDark}
-              minHeight={60}
-              maxHeight={400}
-              showCopy
-            />
-          ) : (
-            <Text type="secondary" style={{ fontSize: 11 }}>
-              当前输出已按低信号规则折叠，可切换到“原始输出”查看完整内容。
-            </Text>
-          )}
+          <ResizableOutput
+            content={outputText}
+            isDark={isDark}
+            minHeight={60}
+            maxHeight={400}
+            showCopy
+          />
         </div>
+      )}
+      {!hasOutput && rawOutputText && suppressedCount > 0 && (
+        <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 6 }}>
+          这条输出已被聚焦视图折叠；切到“显示原始记录”可查看完整内容。
+        </Text>
       )}
     </div>
   );
@@ -272,25 +281,45 @@ interface Props {
 const SessionJournal: React.FC<Props> = ({ sessionId, sessionName, onSnapshotRequest }) => {
   const { theme }              = useGlobalStore();
   const isDark                 = theme === 'dark';
-  const { noiseKeywords }      = useAnalyzerStore();
   const { journals, addEntry, deleteEntry, clearSession } = useJournalStore();
+  const builtinNoiseMode       = useAnalyzerStore((state) => state.builtinNoiseMode);
+  const noiseKeywords          = useAnalyzerStore((state) => state.noiseKeywords);
   const [messageApi, ctx]      = message.useMessage();
   const [filterType, setFilterType] = useState<JournalEntryType | 'all'>('all');
   const [noteModalOpen, setNoteModalOpen] = useState(false);
   const [noteText, setNoteText] = useState('');
   const [isRecording, setIsRecording] = useState(false);
-  const [focusMode, setFocusMode] = useState<'focus' | 'all'>('focus');
-  const [showRawOutput, setShowRawOutput] = useState(false);
+  const [showSuppressedEntries, setShowSuppressedEntries] = useState(false);
 
   const entries = journals[sessionId] ?? [];
+  const noiseOptions: LogNoiseOptions = {
+    builtinMode: builtinNoiseMode,
+    customKeywords: noiseKeywords,
+  };
 
-  const typeFiltered = filterType === 'all'
+  const filteredByType = filterType === 'all'
     ? entries
     : entries.filter((e) => e.type === filterType);
-  const filtered = focusMode === 'focus'
-    ? typeFiltered.filter((entry) => entry.type !== 'session_evt')
-    : typeFiltered;
-  const foldedCount = typeFiltered.length - filtered.length;
+  const decoratedEntries = filteredByType.map((entry) => {
+    const eventMessage = [entry.eventTitle, entry.content].filter(Boolean).join('\n').trim();
+    return {
+      entry,
+      suppressionInfo: getSessionLogSuppressionInfo({
+        type: entry.type,
+        message: eventMessage,
+        stdout: entry.output,
+        stderr: '',
+        cmd: entry.command,
+        exitCode: entry.exitCode,
+        eventTitle: entry.eventTitle,
+        content: entry.content,
+      }, noiseOptions),
+    };
+  });
+  const suppressedEntries = decoratedEntries.filter((item) => item.suppressionInfo);
+  const filtered = showSuppressedEntries
+    ? decoratedEntries
+    : decoratedEntries.filter((item) => !item.suppressionInfo);
 
   // ── 添加终端快照 ────────────────────────────────────────────────────────
   const handleSnapshot = () => {
@@ -452,25 +481,6 @@ const SessionJournal: React.FC<Props> = ({ sessionId, sessionName, onSnapshotReq
             size="small"
             overflowCount={999}
           />
-          <Button
-            size="small"
-            type={focusMode === 'focus' ? 'primary' : 'default'}
-            onClick={() => setFocusMode((current) => current === 'focus' ? 'all' : 'focus')}
-          >
-            {focusMode === 'focus' ? '聚焦视图' : '显示全部'}
-          </Button>
-          <Button
-            size="small"
-            type={showRawOutput ? 'default' : 'primary'}
-            onClick={() => setShowRawOutput((current) => !current)}
-          >
-            {showRawOutput ? '原始输出' : '降噪输出'}
-          </Button>
-          {foldedCount > 0 && (
-            <Tag color="gold" style={{ fontSize: 10, margin: 0 }}>
-              隐藏事件 {foldedCount}
-            </Tag>
-          )}
           {/* 类型统计小标签 */}
           {Object.entries(typeCounts).map(([type, count]) => (
             <Tag
@@ -482,9 +492,23 @@ const SessionJournal: React.FC<Props> = ({ sessionId, sessionName, onSnapshotReq
               {TYPE_CONFIG[type as JournalEntryType]?.label ?? type} {count}
             </Tag>
           ))}
+          <Tag color={builtinNoiseMode === 'off' ? 'default' : 'cyan'} style={{ fontSize: 10 }}>
+            {BUILTIN_NOISE_MODE_META[builtinNoiseMode].label}
+          </Tag>
+          {suppressedEntries.length > 0 && !showSuppressedEntries && (
+            <Tag color="gold" style={{ fontSize: 10 }}>
+              已折叠 {suppressedEntries.length}
+            </Tag>
+          )}
         </Space>
 
         <Space size={4}>
+          <Tooltip title={showSuppressedEntries ? '切回聚焦视图，只看高价值记录' : '显示被聚焦视图折叠的低价值记录'}>
+            <Space size={4} style={{ marginRight: 4 }}>
+              <Text type="secondary" style={{ fontSize: 11 }}>显示原始记录</Text>
+              <Switch size="small" checked={showSuppressedEntries} onChange={setShowSuppressedEntries} />
+            </Space>
+          </Tooltip>
           <Tooltip title="记录终端快照（当前屏幕内容）">
             <Button size="small" icon={<CameraOutlined />} onClick={handleSnapshot} />
           </Tooltip>
@@ -545,20 +569,22 @@ const SessionJournal: React.FC<Props> = ({ sessionId, sessionName, onSnapshotReq
             description={
               entries.length === 0
                 ? '暂无记录\n执行 SOP 或在终端输入命令后自动记录'
-                : '当前筛选条件无结果'
+                : suppressedEntries.length > 0 && !showSuppressedEntries
+                  ? '当前记录已被聚焦视图折叠，可打开“显示原始记录”查看'
+                  : '当前筛选条件无结果'
             }
             image={Empty.PRESENTED_IMAGE_SIMPLE}
             style={{ paddingTop: 40 }}
           />
         ) : (
-          [...filtered].reverse().map((entry) => (
+          [...filtered].reverse().map(({ entry }) => (
             <EntryCard
               key={entry.id}
               entry={entry}
               isDark={isDark}
-              noiseKeywords={noiseKeywords}
               onDelete={() => deleteEntry(sessionId, entry.id)}
-              showRawOutput={showRawOutput}
+              showRawOutput={showSuppressedEntries}
+              noiseOptions={noiseOptions}
             />
           ))
         )}

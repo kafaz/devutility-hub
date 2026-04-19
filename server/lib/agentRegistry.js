@@ -1,9 +1,11 @@
 const fs = require('fs');
 const path = require('path');
+const { getServerDataDir } = require('../storePaths');
 
-const DATA_DIR = path.join(__dirname, '..', 'data');
+const DATA_DIR = getServerDataDir();
 const NODE_FILE = path.join(DATA_DIR, 'agent-nodes.json');
 const PREPARE_FILE = path.join(DATA_DIR, 'prepare-profiles.json');
+const DEFAULT_PREPARE_PROFILE_VERSION = 2;
 
 const READY_SHELL_STEPS = [
   {
@@ -92,6 +94,8 @@ const DEFAULT_PREPARE_PROFILES = [
     name: 'Linux Readonly Context',
     description: 'Collect current identity and host context without mutating shell state.',
     builtinVersion: 2,
+    managedBy: 'system',
+    version: DEFAULT_PREPARE_PROFILE_VERSION,
     steps: SAFE_CONTEXT_STEPS,
     createdAt: Date.now(),
     updatedAt: Date.now(),
@@ -101,6 +105,8 @@ const DEFAULT_PREPARE_PROFILES = [
     name: 'Linux Problem Localization Fast Path',
     description: 'Prioritize shell readiness first, then parallelize read-only probes so issue localization can start faster after login.',
     builtinVersion: 1,
+    managedBy: 'system',
+    version: DEFAULT_PREPARE_PROFILE_VERSION,
     steps: LOCALIZATION_FAST_PATH_STEPS,
     createdAt: Date.now(),
     updatedAt: Date.now(),
@@ -110,6 +116,8 @@ const DEFAULT_PREPARE_PROFILES = [
     name: 'Linux Problem Localization Boost',
     description: 'Warm the shell profile, parallelize safe context probes, and collect a broader runtime snapshot for deeper follow-up localization.',
     builtinVersion: 2,
+    managedBy: 'system',
+    version: DEFAULT_PREPARE_PROFILE_VERSION,
     steps: LOCALIZATION_BOOST_STEPS,
     createdAt: Date.now(),
     updatedAt: Date.now(),
@@ -128,6 +136,29 @@ function materializeBuiltinProfile(profile, createdAt) {
     createdAt: createdAt || now,
     updatedAt: now,
   };
+}
+
+function selectPrepareProfileSteps(profileOrSteps, stage = 'all') {
+  const rawSteps = Array.isArray(profileOrSteps)
+    ? profileOrSteps
+    : Array.isArray(profileOrSteps?.steps)
+      ? profileOrSteps.steps
+      : [];
+
+  const normalized = rawSteps
+    .filter((step) => step && step.cmd)
+    .map((step) => ({
+      ...step,
+      stage: step.phase === 'context' ? 'background' : 'essential',
+    }));
+
+  if (stage === 'background') {
+    return normalized.filter((step) => step.stage === 'background');
+  }
+  if (stage === 'essential') {
+    return normalized.filter((step) => step.stage === 'essential');
+  }
+  return normalized;
 }
 
 function ensureFile(filePath, defaultValue) {
@@ -321,15 +352,18 @@ function deletePrepareProfile(profileId) {
 }
 
 module.exports = {
+  DEFAULT_PREPARE_PROFILES,
   deleteNode,
   deletePrepareProfile,
   getNode,
   getPrepareProfile,
   listNodes,
   listPrepareProfiles,
+  mergeDefaultPrepareProfiles,
   resolveNode,
   saveNode,
   savePrepareProfile,
+  selectPrepareProfileSteps,
   updateNode,
   updatePrepareProfile,
 };

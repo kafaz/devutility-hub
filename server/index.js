@@ -36,6 +36,11 @@ const path   = require('path');
 const os     = require('os');
 const crypto = require('crypto');
 const { simpleGit } = require('simple-git');
+const {
+  buildRuntimeUrls,
+  normalizeServerRuntimeOptions,
+  shouldServeAppShell,
+} = require('./runtimeHelpers');
 const { ManagedAgentSession } = require('./lib/managedAgentSession');
 const {
   deleteNode,
@@ -95,6 +100,12 @@ const {
 const app    = express();
 const server = http.createServer(app);
 const wss    = new WebSocketServer({ server, path: '/terminal' });
+let runtimeOptions = normalizeServerRuntimeOptions({
+  host: process.env.HOST,
+  port: process.env.PORT ? Number(process.env.PORT) : undefined,
+  staticDir: process.env.STATIC_DIR,
+});
+let startPromise = null;
 
 // 全局 Session 会话池 - 供 Agent / MCP Remote API 访问
 global.activeSessions = new Map();
@@ -124,6 +135,68 @@ function appendSessionLog(sessionId, payload) {
 
 app.use(cors({ origin: '*' }));
 app.use(express.json());
+
+function getBoundAddress() {
+  const addressInfo = server.address();
+  if (!addressInfo || typeof addressInfo === 'string') {
+    return {
+      address: runtimeOptions.host,
+      port: runtimeOptions.port,
+    };
+  }
+  return addressInfo;
+}
+
+function getRuntimeUrls() {
+  const addressInfo = getBoundAddress();
+  return buildRuntimeUrls({
+    address: addressInfo.address,
+    port: addressInfo.port,
+  });
+}
+
+function sendStartupBanner() {
+  const urls = getRuntimeUrls();
+  console.log('\n╔══════════════════════════════════════════════════╗');
+  console.log('║   DevUtility Hub — SSH Proxy (Shell 复用模式)    ║');
+  console.log('╠══════════════════════════════════════════════════╣');
+  console.log(`║  HTTP : ${urls.httpBaseUrl.padEnd(37)}║`);
+  console.log(`║  WS   : ${urls.wsBaseUrl.padEnd(37)}║`);
+  console.log('╠══════════════════════════════════════════════════╣');
+  console.log('║  SOP 执行复用同一 Shell PTY，保留:               ║');
+  console.log('║    sudo/su 身份、cd 路径、source env 变量         ║');
+  console.log('╚══════════════════════════════════════════════════╝\n');
+}
+
+function handleStaticFrontend(req, res, next) {
+  if (!runtimeOptions.staticDir || (req.method !== 'GET' && req.method !== 'HEAD')) {
+    next();
+    return;
+  }
+
+  const staticDir = runtimeOptions.staticDir;
+  const requestedPath = decodeURIComponent(req.path || '/');
+  const relativePath = requestedPath.replace(/^\/+/, '');
+  const candidatePath = path.resolve(staticDir, relativePath);
+
+  if (relativePath && candidatePath.startsWith(staticDir) && fs.existsSync(candidatePath)) {
+    const stat = fs.statSync(candidatePath);
+    if (stat.isFile()) {
+      res.sendFile(candidatePath);
+      return;
+    }
+  }
+
+  if (shouldServeAppShell(requestedPath)) {
+    const indexPath = path.join(staticDir, 'index.html');
+    if (fs.existsSync(indexPath)) {
+      res.sendFile(indexPath);
+      return;
+    }
+  }
+
+  next();
+}
 
 // ─── 工具函数 ──────────────────────────────────────────────────────────────
 
@@ -2780,17 +2853,90 @@ wss.on('connection', (ws) => {
   });
 });
 
-// ─── 启动 ──────────────────────────────────────────────────────────────────
+app.use(handleStaticFrontend);
 
-const PORT = process.env.PORT || 3001;
-server.listen(PORT, '127.0.0.1', () => {
-  console.log('\n╔══════════════════════════════════════════════════╗');
-  console.log('║   DevUtility Hub — SSH Proxy (Shell 复用模式)    ║');
-  console.log('╠══════════════════════════════════════════════════╣');
-  console.log(`║  HTTP : http://127.0.0.1:${PORT}                    ║`);
-  console.log(`║  WS   : ws://127.0.0.1:${PORT}/terminal             ║`);
-  console.log('╠══════════════════════════════════════════════════╣');
-  console.log('║  SOP 执行复用同一 Shell PTY，保留:               ║');
-  console.log('║    sudo/su 身份、cd 路径、source env 变量         ║');
-  console.log('╚══════════════════════════════════════════════════╝\n');
-});
+function startProxyServer(options = {}) {
+  runtimeOptions = normalizeServerRuntimeOptions({
+    ...runtimeOptions,
+    ...options,
+  });
+
+  if (server.listening) {
+    return Promise.resolve({
+      server,
+      ...getRuntimeUrls(),
+      staticDir: runtimeOptions.staticDir,
+    });
+  }
+
+  if (startPromise) {
+    return startPromise;
+  }
+
+  startPromise = new Promise((resolve, reject) => {
+    const onError = (error) => {
+      server.off('listening', onListening);
+      startPromise = null;
+      reject(error);
+    };
+    const onListening = () => {
+      server.off('error', onError);
+      startPromise = null;
+      sendStartupBanner();
+      resolve({
+        server,
+        ...getRuntimeUrls(),
+        staticDir: runtimeOptions.staticDir,
+      });
+    };
+
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(runtimeOptions.port, runtimeOptions.host);
+  });
+
+  return startPromise;
+}
+
+function stopProxyServer() {
+  if (startPromise) {
+    return startPromise.then(() => stopProxyServer());
+  }
+
+  if (!server.listening) {
+    return Promise.resolve();
+  }
+
+  wss.clients.forEach((client) => {
+    try {
+      client.close();
+    } catch {
+      // ignore close races
+    }
+  });
+
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+module.exports = {
+  app,
+  server,
+  startProxyServer,
+  stopProxyServer,
+  getRuntimeUrls,
+};
+
+if (require.main === module) {
+  startProxyServer().catch((error) => {
+    console.error('[proxy] failed to start:', error);
+    process.exitCode = 1;
+  });
+}

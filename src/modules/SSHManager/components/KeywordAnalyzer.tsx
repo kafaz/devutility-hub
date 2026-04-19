@@ -10,7 +10,10 @@ import dayjs from 'dayjs';
 import React, { useState } from 'react';
 import { useGlobalStore } from '../../../store/globalStore';
 import { useAnalyzerStore } from '../store/analyzerStore';
-import { BUILTIN_LOG_NOISE_RULES } from '../../../utils/logNoise';
+import {
+  BUILTIN_NOISE_MODE_META,
+  getBuiltinNoiseRules,
+} from '../../../utils/logNoise';
 
 const { Text } = Typography;
 
@@ -28,7 +31,10 @@ const KeywordAnalyzer: React.FC = () => {
     noiseKeywords,
     addNoiseKeyword,
     removeNoiseKeyword,
+    builtinNoiseMode,
+    setBuiltinNoiseMode,
     suppressedCount,
+    suppressionStats,
     clearSuppressedCount,
   } = useAnalyzerStore();
   
@@ -41,6 +47,7 @@ const KeywordAnalyzer: React.FC = () => {
   const [newNoiseKeyword, setNewNoiseKeyword] = useState('');
 
   const sessions = Array.from(new Set(logs.map((l) => l.sessionName)));
+  const activeBuiltinRules = getBuiltinNoiseRules(builtinNoiseMode);
 
   const filteredLogs = logs.filter((l) => {
     if (filterSession && l.sessionName !== filterSession) return false;
@@ -100,6 +107,9 @@ const KeywordAnalyzer: React.FC = () => {
           <Text strong style={{ fontSize: 13 }}>智能监控面板</Text>
           <Tag color="blue">{logs.length} 条记录</Tag>
           <Tag color="gold">{suppressedCount} 条已忽略</Tag>
+          <Tag color={builtinNoiseMode === 'off' ? 'default' : 'cyan'}>
+            {BUILTIN_NOISE_MODE_META[builtinNoiseMode].label}
+          </Tag>
           
           <Select
             size="small"
@@ -233,19 +243,56 @@ const KeywordAnalyzer: React.FC = () => {
         </Space.Compact>
 
         <Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>
-          内建规则会自动忽略常见 INFO 级日志，自定义规则按子串匹配，且不会覆盖 error/timeout 等高风险信号。
+          {BUILTIN_NOISE_MODE_META[builtinNoiseMode].description}
         </Text>
+
+        <Text strong style={{ display: 'block', marginBottom: 8 }}>内建降噪模式</Text>
+        <Select
+          size="small"
+          value={builtinNoiseMode}
+          onChange={(value) => setBuiltinNoiseMode(value as typeof builtinNoiseMode)}
+          style={{ width: '100%', marginBottom: 12 }}
+          options={[
+            { label: BUILTIN_NOISE_MODE_META.focus.label, value: 'focus' },
+            { label: BUILTIN_NOISE_MODE_META.info.label, value: 'info' },
+            { label: BUILTIN_NOISE_MODE_META.off.label, value: 'off' },
+          ]}
+        />
 
         <List
           size="small"
           bordered
-          header={<Text strong>内建规则</Text>}
-          dataSource={BUILTIN_LOG_NOISE_RULES}
+          header={<Text strong>当前生效的内建规则</Text>}
+          locale={{ emptyText: '当前模式未启用内建规则' }}
+          dataSource={activeBuiltinRules}
           renderItem={(item) => (
             <List.Item>
               <Space>
                 <Tag color="default">默认</Tag>
                 <Text>{item.label}</Text>
+                <Tag color={item.level === 'info' ? 'blue' : item.level === 'debug' ? 'gold' : 'purple'}>
+                  {item.level.toUpperCase()}
+                </Tag>
+              </Space>
+            </List.Item>
+          )}
+          style={{ marginBottom: 12 }}
+        />
+
+        <List
+          size="small"
+          bordered
+          header={<Text strong>近期忽略来源</Text>}
+          locale={{ emptyText: '暂无忽略统计' }}
+          dataSource={suppressionStats}
+          renderItem={(item) => (
+            <List.Item>
+              <Space>
+                <Tag color={item.kind === 'builtin' ? 'cyan' : 'default'}>
+                  {item.kind === 'builtin' ? '默认' : '自定义'}
+                </Tag>
+                <Text>{item.label}</Text>
+                <Tag color="gold">{item.count}</Tag>
               </Space>
             </List.Item>
           )}
@@ -304,7 +351,7 @@ const KeywordAnalyzer: React.FC = () => {
         
         <Alert
           message="基于实时输出流的正则/子串匹配"
-          description="系统会先过滤默认 INFO 噪音和自定义忽略词，再把命中关键字的日志抽取到监控面板里。"
+          description="系统会先按当前内建模式与自定义忽略词做降噪，再把命中关键字的日志抽取到监控面板里。"
           type="info"
           showIcon
           style={{ marginTop: 24, fontSize: 12 }}

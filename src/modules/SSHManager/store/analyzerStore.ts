@@ -1,7 +1,13 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { generateId } from '../../../utils';
-import { normalizeNoiseKeyword, normalizeNoiseKeywords } from '../../../utils/logNoise';
+import {
+  normalizeBuiltinNoiseMode,
+  normalizeNoiseKeyword,
+  normalizeNoiseKeywords,
+  type BuiltinNoiseMode,
+  type NoiseMatch,
+} from '../../../utils/logNoise';
 
 export interface CriticalLog {
   id: string;
@@ -19,6 +25,13 @@ export interface HighlightRule {
   color: string;
 }
 
+export interface SuppressedLogStat {
+  id: string;
+  kind: 'builtin' | 'custom';
+  label: string;
+  count: number;
+}
+
 interface AnalyzerStore {
   // 匹配的关键词列表（不区分大小写检索）
   keywords: string[];
@@ -31,7 +44,8 @@ interface AnalyzerStore {
   addLog: (log: Omit<CriticalLog, 'id'>) => void;
   clearLogs: (sessionId?: string) => void;
   suppressedCount: number;
-  recordSuppressedLog: () => void;
+  suppressionStats: SuppressedLogStat[];
+  recordSuppressedLog: (match?: NoiseMatch | null) => void;
   clearSuppressedCount: () => void;
 
   // 终端动态高亮规则
@@ -41,6 +55,8 @@ interface AnalyzerStore {
   updateHighlightRule: (id: string, rule: Partial<Omit<HighlightRule, 'id'>>) => void;
 
   // 日志降噪规则（大小写不敏感的子串匹配，内建规则始终生效）
+  builtinNoiseMode: BuiltinNoiseMode;
+  setBuiltinNoiseMode: (mode: BuiltinNoiseMode) => void;
   noiseKeywords: string[];
   addNoiseKeyword: (keyword: string) => void;
   removeNoiseKeyword: (keyword: string) => void;
@@ -88,8 +104,25 @@ export const useAnalyzerStore = create<AnalyzerStore>()(
         logs: sessionId ? state.logs.filter((l) => l.sessionId !== sessionId) : []
       })),
       suppressedCount: 0,
-      recordSuppressedLog: () => set((state) => ({ suppressedCount: state.suppressedCount + 1 })),
-      clearSuppressedCount: () => set({ suppressedCount: 0 }),
+      suppressionStats: [],
+      recordSuppressedLog: (match) => set((state) => {
+        const statsMap = new Map(state.suppressionStats.map((item) => [item.id, item]));
+        if (match) {
+          const id = `${match.kind}:${match.id}`;
+          const current = statsMap.get(id);
+          statsMap.set(id, {
+            id,
+            kind: match.kind,
+            label: match.label,
+            count: (current?.count || 0) + 1,
+          });
+        }
+        return {
+          suppressedCount: state.suppressedCount + 1,
+          suppressionStats: Array.from(statsMap.values()).sort((left, right) => right.count - left.count),
+        };
+      }),
+      clearSuppressedCount: () => set({ suppressedCount: 0, suppressionStats: [] }),
 
       highlightRules: DEFAULT_HIGHLIGHT_RULES,
       addHighlightRule: (rule) => set((state) => ({
@@ -102,6 +135,8 @@ export const useAnalyzerStore = create<AnalyzerStore>()(
         highlightRules: state.highlightRules.map((r) => r.id === id ? { ...r, ...updates } : r),
       })),
 
+      builtinNoiseMode: 'focus',
+      setBuiltinNoiseMode: (mode) => set({ builtinNoiseMode: normalizeBuiltinNoiseMode(mode) }),
       noiseKeywords: [],
       addNoiseKeyword: (keyword) => set((state) => {
         const normalized = normalizeNoiseKeyword(keyword);
@@ -117,6 +152,7 @@ export const useAnalyzerStore = create<AnalyzerStore>()(
       partialize: (s) => ({
         keywords: s.keywords,
         highlightRules: s.highlightRules,
+        builtinNoiseMode: s.builtinNoiseMode,
         noiseKeywords: s.noiseKeywords,
       }),
     }

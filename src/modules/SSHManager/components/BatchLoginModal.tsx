@@ -1,5 +1,6 @@
 import { Form, Input, message, Modal, Select, Switch, Tag, Typography } from 'antd';
 import React, { useState } from 'react';
+import { renderTemplate } from '../../../utils';
 import { useSSHStore } from '../store/sshStore';
 
 const { TextArea } = Input;
@@ -33,16 +34,32 @@ function parseHostLine(hostLine: string) {
 }
 
 const BatchLoginModal: React.FC<Props> = ({ open, onCancel, onSuccess, onSessionsPrepared }) => {
-  const { credentials, addProfile, addSession, connectSession, profiles, sessions } = useSSHStore();
+  const {
+    credentials,
+    addProfile,
+    addSession,
+    connectSession,
+    profiles,
+    sessions,
+    sessionGroups,
+    createSessionGroup,
+    assignSessionsToGroup,
+  } = useSSHStore();
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
   const [joinCurrentTargets, setJoinCurrentTargets] = useState(true);
+  const groupMode = Form.useWatch('groupMode', form) as 'none' | 'existing' | 'new' | undefined;
 
   const handleBatchLogin = async () => {
     try {
       const values = await form.validateFields();
       const ipListRaw = values.ipList as string;
       const credId = values.credentialId as string;
+      const groupMode = values.groupMode as 'none' | 'existing' | 'new';
+      const groupIdValue = values.groupId as string | undefined;
+      const groupName = values.groupName as string | undefined;
+      const groupTags = (values.groupTags as string[] | undefined) ?? [];
+      const sessionNamePattern = (values.sessionNamePattern as string | undefined)?.trim() || '${host}:${port}';
 
       const seenTargets = new Set<string>();
       let duplicateCount = 0;
@@ -65,6 +82,17 @@ const BatchLoginModal: React.FC<Props> = ({ open, onCancel, onSuccess, onSession
       }
 
       setLoading(true);
+      let targetGroupId: string | null = null;
+      if (groupMode === 'existing' && groupIdValue) {
+        targetGroupId = groupIdValue;
+      } else if (groupMode === 'new' && groupName) {
+        targetGroupId = createSessionGroup({
+          name: groupName,
+          tags: groupTags,
+          sessionIds: [],
+          initCommands: [],
+        });
+      }
 
       let launchedCount = 0;
       let reusedCount = 0;
@@ -104,13 +132,22 @@ const BatchLoginModal: React.FC<Props> = ({ open, onCancel, onSuccess, onSession
           continue;
         }
 
-        const sessionId = addSession(`${host}:${port}`, profileId);
+        const sessionName = renderTemplate(sessionNamePattern, {
+          host,
+          port: String(port),
+          index: String(preparedSessionIds.length + 1),
+        });
+        const sessionId = addSession(sessionName || `${host}:${port}`, profileId);
         connectSession(sessionId, { credentialId: credId });
         preparedSessionIds.push(sessionId);
         launchedCount += 1;
       }
 
       const uniquePreparedSessionIds = Array.from(new Set(preparedSessionIds));
+      if (targetGroupId && uniquePreparedSessionIds.length > 0) {
+        const existing = sessionGroups.find((group) => group.id === targetGroupId)?.sessionIds ?? [];
+        assignSessionsToGroup(targetGroupId, Array.from(new Set([...existing, ...uniquePreparedSessionIds])));
+      }
       if (joinCurrentTargets && uniquePreparedSessionIds.length > 0) {
         onSessionsPrepared?.(uniquePreparedSessionIds);
       }
@@ -119,6 +156,7 @@ const BatchLoginModal: React.FC<Props> = ({ open, onCancel, onSuccess, onSession
       if (reconnectedCount > 0) messageParts.push(`复用断开会话 ${reconnectedCount} 个`);
       if (reusedCount > 0) messageParts.push(`沿用活跃会话 ${reusedCount} 个`);
       if (duplicateCount > 0) messageParts.push(`去重 ${duplicateCount} 行`);
+      if (targetGroupId) messageParts.push('已加入会话组');
       if (joinCurrentTargets && uniquePreparedSessionIds.length > 0) messageParts.push('已加入当前排查目标');
       message.success(messageParts.join('，'));
       form.resetFields();
@@ -158,6 +196,38 @@ const BatchLoginModal: React.FC<Props> = ({ open, onCancel, onSuccess, onSession
             ))}
           </Select>
         </Form.Item>
+        <Form.Item
+          name="sessionNamePattern"
+          label="会话命名模板"
+          initialValue="${host}:${port}"
+          extra={<Text type="secondary" style={{ fontSize: 12 }}>支持变量：`${'{host}'}`、`${'{port}'}`、`${'{index}'}`</Text>}
+        >
+          <Input placeholder="${host}:${port}" />
+        </Form.Item>
+        <Form.Item name="groupMode" label="加入会话组" initialValue="new">
+          <Select
+            options={[
+              { label: '创建新组', value: 'new' },
+              { label: '加入已有组', value: 'existing' },
+              { label: '不分组', value: 'none' },
+            ]}
+          />
+        </Form.Item>
+        {groupMode === 'existing' && (
+          <Form.Item name="groupId" label="目标会话组" rules={[{ required: true, message: '请选择会话组' }]}>
+            <Select placeholder="选择已有会话组" options={sessionGroups.map((group) => ({ label: group.name, value: group.id }))} />
+          </Form.Item>
+        )}
+        {groupMode === 'new' && (
+          <>
+            <Form.Item name="groupName" label="新组名称" rules={[{ required: true, message: '请输入组名' }]}>
+              <Input placeholder="例如：回归测试-第一批" />
+            </Form.Item>
+            <Form.Item name="groupTags" label="组标签">
+              <Select mode="tags" placeholder="输入标签后回车，例如 smoke / perf / nightly" />
+            </Form.Item>
+          </>
+        )}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
           <div>
             <Text style={{ fontSize: 12, display: 'block' }}>登录后加入当前排查目标</Text>

@@ -3,6 +3,7 @@ import {
   Button,
   Card,
   Collapse,
+  Drawer,
   Empty,
   Input,
   List,
@@ -10,6 +11,7 @@ import {
   Select,
   Space,
   Spin,
+  Tabs,
   Tag,
   Typography,
   message,
@@ -21,7 +23,6 @@ import {
   HistoryOutlined,
   PlusOutlined,
   PushpinOutlined,
-  RadarChartOutlined,
   ReloadOutlined,
   RobotOutlined,
   SaveOutlined,
@@ -32,6 +33,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import ResizableOutput from '../../components/shared/ResizableOutput';
 import { useClipboard } from '../../hooks/useClipboard';
 import { useLocalStorage } from '../../hooks/useLocalStorage';
+import { PROXY_HTTP_BASE } from '../../config/runtime';
 import { useGlobalStore } from '../../store/globalStore';
 import { useCommandStore } from '../CommandBuilder/store/commandStore';
 import { useAnalyzerStore } from '../SSHManager/store/analyzerStore';
@@ -51,6 +53,11 @@ import {
   SCENARIO_META,
   STEP_PHASE_META,
 } from './scenarioLibrary';
+import {
+  buildEvidenceDrawerSummary,
+  getDiagnosticWorkbenchSections,
+  type DiagnosticWorkbenchView,
+} from './viewModel';
 import { useEvidenceStore } from './store/evidenceStore';
 import {
   type DiagnosticAnalysisRule,
@@ -64,7 +71,7 @@ import {
 const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
 
-const PROXY_HTTP = 'http://127.0.0.1:3001';
+const PROXY_HTTP = PROXY_HTTP_BASE;
 
 interface SessionOption {
   sessionId: string;
@@ -1237,6 +1244,10 @@ const DiagnosticWorkbench: React.FC = () => {
   const [sourcePreview, setSourcePreview] = useState<SourcePreviewState | null>(null);
   const [compactSourcePreview, setCompactSourcePreview] = useState(true);
   const [noiseKeywordDraft, setNoiseKeywordDraft] = useState('');
+  const [activeWorkbenchView, setActiveWorkbenchView] = useState<DiagnosticWorkbenchView>('flow');
+  const [sourceDrawerOpen, setSourceDrawerOpen] = useState(false);
+  const [logsDrawerOpen, setLogsDrawerOpen] = useState(false);
+  const [evidenceDrawerOpen, setEvidenceDrawerOpen] = useState(false);
 
   useEffect(() => {
     if (!activePlaybook) return;
@@ -1267,7 +1278,6 @@ const DiagnosticWorkbench: React.FC = () => {
     () => sessionLogs.filter((log) => !shouldSuppressSessionLog(log, analyzerNoiseKeywords)),
     [analyzerNoiseKeywords, sessionLogs]
   );
-  const suppressedSessionLogCount = sessionLogs.length - filteredSessionLogs.length;
   const firstAnomaly = useMemo(
     () => inferFirstAnomaly(detailRun, filteredSessionLogs, analyzerNoiseKeywords),
     [analyzerNoiseKeywords, detailRun, filteredSessionLogs]
@@ -1343,6 +1353,18 @@ const DiagnosticWorkbench: React.FC = () => {
   const sourcePreviewFoldedLineCount = useMemo(
     () => sourcePreviewDisplayRows.reduce((sum, row) => sum + (row.type === 'fold' ? row.hiddenCount : 0), 0),
     [sourcePreviewDisplayRows]
+  );
+  const evidenceDrawerSummary = useMemo(
+    () => buildEvidenceDrawerSummary(lockedEvidence.map((item) => ({ id: item.id, title: item.title }))),
+    [lockedEvidence]
+  );
+  const workbenchSections = useMemo(
+    () => ({
+      flow: getDiagnosticWorkbenchSections('flow'),
+      config: getDiagnosticWorkbenchSections('config'),
+      history: getDiagnosticWorkbenchSections('history'),
+    }),
+    []
   );
 
   useEffect(() => {
@@ -1584,6 +1606,7 @@ const DiagnosticWorkbench: React.FC = () => {
               locations: orderedLocations,
               functions: orderedFunctions,
             });
+            setSourceDrawerOpen(true);
             return true;
           } catch (error) {
             lastError = error instanceof Error ? error.message : '源码位置渲染失败';
@@ -1609,6 +1632,7 @@ const DiagnosticWorkbench: React.FC = () => {
               locations: orderedLocations,
               functions: orderedFunctions,
             });
+            setSourceDrawerOpen(true);
             return true;
           } catch (error) {
             lastError = error instanceof Error ? error.message : '函数源码渲染失败';
@@ -1864,6 +1888,7 @@ const DiagnosticWorkbench: React.FC = () => {
       }
       setActiveRun(data.run);
       setMatches(data.run.similarCases || []);
+      setActiveWorkbenchView('history');
     } catch {
       messageApi.error('诊断记录加载失败');
     }
@@ -2121,6 +2146,7 @@ const DiagnosticWorkbench: React.FC = () => {
       }
       setActiveRun(data.run);
       setMatches(data.run.similarCases || []);
+      setActiveWorkbenchView('flow');
       await fetchRuns();
       messageApi.success('诊断编排执行完成，结果已归档入知识库');
     } catch {
@@ -2131,1763 +2157,1794 @@ const DiagnosticWorkbench: React.FC = () => {
   }
 
   const currentSession = sessions.find((item) => item.sessionId === selectedSessionId);
+  const similarCaseReferences = (detailRun?.similarCases?.length ? detailRun.similarCases : matches).slice(0, 3);
+
+  const sourcePreviewContent = !sourcePreview ? (
+    <Alert
+      type="info"
+      showIcon
+      message="这里会显示异常关联的 C 源码片段"
+      description="先绑定 C 代码版本，然后在首个异常、证据簇、证据篮或原始日志里点击“看源码”。工作台只会处理 C 源码路径和 C 函数线索。"
+    />
+  ) : (
+    <Space direction="vertical" size={12} style={{ width: '100%' }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <Text strong>{sourcePreview.request.title}</Text>
+        <Tag>{sourcePreview.request.sourceType}</Tag>
+        <Tag color={sourcePreview.lookupMode === 'location' ? 'processing' : 'geekblue'}>
+          {sourcePreview.lookupMode === 'location' ? '路径定位' : '函数定位'}
+        </Tag>
+        <Tag color="default">{formatSourceMatchLabel(sourcePreview.payload.matchedBy)}</Tag>
+      </div>
+      <Text type="secondary">{sourcePreview.request.summary}</Text>
+      <Text code>{sourcePreview.payload.path}:{sourcePreview.payload.line}</Text>
+      {sourcePreview.request.command && <Text code>{sourcePreview.request.command}</Text>}
+      <Text type="secondary">代码区内识别出的 C 函数名可直接点击跳转。</Text>
+      {sourcePreview.payload.signature && (
+        <Alert
+          type="info"
+          showIcon
+          message={sourcePreview.payload.signature}
+          description={
+            sourcePreview.payload.functionStartLine && sourcePreview.payload.functionEndLine
+              ? `函数范围 ${sourcePreview.payload.functionStartLine}-${sourcePreview.payload.functionEndLine}`
+              : '当前按日志命中的 C 代码位置展示上下文'
+          }
+        />
+      )}
+      {sourcePreview.locations.length > 1 && (
+        <div>
+          <Text type="secondary">备选路径线索</Text>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
+            {sourcePreview.locations.slice(0, 6).map((candidate) => (
+              <Tag
+                key={`${candidate.path}:${candidate.line}`}
+                color={sourcePreview.payload.mode === 'location' && sourcePreview.payload.path === candidate.path && sourcePreview.payload.line === candidate.line ? 'processing' : 'default'}
+                onClick={() => locateSourceFromParts(sourcePreview.request, { location: candidate })}
+                style={{ cursor: 'pointer' }}
+              >
+                {candidate.path}:{candidate.line}
+              </Tag>
+            ))}
+          </div>
+        </div>
+      )}
+      {sourcePreview.functions.length > 0 && (
+        <div>
+          <Text type="secondary">函数线索</Text>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
+            {sourcePreview.functions.slice(0, 8).map((candidate) => (
+              <Tag
+                key={`${candidate.query}-${candidate.hits}`}
+                color={sourcePreview.payload.symbol?.name === candidate.query ? 'geekblue' : 'default'}
+                onClick={() => locateSourceFromParts(sourcePreview.request, { functionCandidate: candidate })}
+                style={{ cursor: 'pointer' }}
+              >
+                {candidate.query}
+              </Tag>
+            ))}
+          </div>
+        </div>
+      )}
+      <div
+        onClick={handleSourcePreviewCodeClick}
+        style={{
+          maxHeight: 520,
+          overflow: 'auto',
+          borderRadius: 8,
+          border: `1px solid ${isDark ? '#334155' : '#dbe2ea'}`,
+          background: isDark ? '#0f172a' : '#f8fafc',
+          padding: '8px 0',
+        }}
+      >
+        {sourcePreviewDisplayRows.map((row) => {
+          if (row.type === 'fold') {
+            return (
+              <div
+                key={row.key}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  minHeight: 28,
+                  padding: '4px 16px',
+                }}
+              >
+                <Tag color="default">{row.label}</Tag>
+              </div>
+            );
+          }
+
+          const line = row.line;
+          return (
+            <div
+              key={row.key}
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '72px 1fr',
+                gap: 12,
+                padding: '0 16px',
+                minHeight: 20,
+                lineHeight: '20px',
+                background: line.isAnchor
+                  ? (isDark ? 'rgba(59, 130, 246, 0.26)' : 'rgba(59, 130, 246, 0.12)')
+                  : line.isDeclaration
+                    ? (isDark ? 'rgba(14, 116, 144, 0.24)' : 'rgba(14, 116, 144, 0.10)')
+                    : line.inFunction
+                      ? (isDark ? 'rgba(15, 23, 42, 0.42)' : 'rgba(226, 232, 240, 0.65)')
+                      : 'transparent',
+              }}
+            >
+              <Text
+                type="secondary"
+                style={{
+                  userSelect: 'none',
+                  textAlign: 'right',
+                  fontFamily: 'JetBrains Mono, Fira Code, monospace',
+                  fontSize: 12,
+                }}
+              >
+                {line.lineNumber}
+              </Text>
+              <pre
+                style={{
+                  margin: 0,
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-word',
+                  fontFamily: 'JetBrains Mono, Fira Code, monospace',
+                  fontSize: 12,
+                  color: isDark ? '#e5e7eb' : '#111827',
+                }}
+                dangerouslySetInnerHTML={{ __html: row.html }}
+              />
+            </div>
+          );
+        })}
+      </div>
+    </Space>
+  );
+
+  const evidenceDrawerContent = (
+    <Space direction="vertical" size={12} style={{ width: '100%' }}>
+      <Space wrap>
+        <Button icon={<CopyOutlined />} disabled={lockedEvidence.length === 0} onClick={() => void copyEvidencePanel()}>
+          复制 Markdown
+        </Button>
+        <Popconfirm title="清空所有锁定证据？" onConfirm={() => clearEvidence()}>
+          <Button danger disabled={lockedEvidence.length === 0}>
+            清空证据
+          </Button>
+        </Popconfirm>
+      </Space>
+      {lockedEvidence.length === 0 ? (
+        <Alert
+          type="info"
+          showIcon
+          message="还没有锁定证据"
+          description="可以从首个异常、证据簇、执行结果和原始日志中，把关键现场固定到这里，后续直接导出给人或 Agent。"
+        />
+      ) : (
+        <List
+          dataSource={lockedEvidence}
+          renderItem={(item) => {
+            const canLocate = hasCLookupText(item.lookupText);
+            return (
+              <List.Item
+                actions={[
+                  ...(canLocate
+                    ? [
+                        <Button
+                          key="source"
+                          type="link"
+                          icon={<CodeOutlined />}
+                          onClick={() => locateSourceFromParts({
+                            title: item.title,
+                            summary: item.summary,
+                            sourceType: item.sourceType,
+                            text: item.lookupText,
+                            parts: [item.title, item.summary, item.content],
+                            command: item.command,
+                          })}
+                        >
+                          看源码
+                        </Button>,
+                      ]
+                    : []),
+                  <Button key="remove" type="link" danger onClick={() => removeEvidence(item.id)}>
+                    删除
+                  </Button>,
+                ]}
+              >
+                <List.Item.Meta
+                  title={
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                      <Text strong>{item.title}</Text>
+                      <Tag>{item.sourceType}</Tag>
+                      {item.sessionLabel && <Tag color="processing">{item.sessionLabel}</Tag>}
+                    </div>
+                  }
+                  description={
+                    <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                      <Text type="secondary">{item.summary}</Text>
+                      {item.command && <Text code>{item.command}</Text>}
+                      <ResizableOutput
+                        content={item.content}
+                        isDark={isDark}
+                        minHeight={56}
+                        maxHeight={180}
+                        onTextSelect={(text) => locateSourceFromParts({
+                          title: `${item.title} - 手动选词`,
+                          summary: item.summary,
+                          sourceType: `${item.sourceType}_selection`,
+                          text,
+                          command: item.command,
+                        })}
+                      />
+                      <div>
+                        {item.tags.map((tag) => (
+                          <Tag key={tag}>{tag}</Tag>
+                        ))}
+                      </div>
+                    </Space>
+                  }
+                />
+              </List.Item>
+            );
+          }}
+        />
+      )}
+    </Space>
+  );
+
+  const sessionLogsContent = !selectedSessionId ? (
+    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请先选择目标 SSH 会话" />
+  ) : loadingSessionLogs && sessionLogs.length === 0 ? (
+    <div style={{ textAlign: 'center', padding: '20px 0' }}>
+      <Spin />
+    </div>
+  ) : sessionLogs.length === 0 ? (
+    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前会话暂无日志" />
+  ) : (
+    <List
+      size="small"
+      dataSource={[...sessionLogs].reverse()}
+      renderItem={(item) => {
+        const lookupText = buildLookupText([item.type, item.message, item.stdout, item.stderr]);
+        const canLocate = hasCLookupText(lookupText);
+        return (
+          <List.Item
+            actions={[
+              ...(canLocate
+                ? [
+                    <Button
+                      key="source"
+                      type="link"
+                      icon={<CodeOutlined />}
+                      onClick={() => locateSourceFromParts({
+                        title: `会话日志: ${item.type}`,
+                        summary: item.message || `exit=${item.exitCode ?? '-'} / duration=${item.durationMs ?? '-'}ms`,
+                        sourceType: 'session_log',
+                        text: lookupText,
+                        parts: [item.type, item.message, item.stdout, item.stderr],
+                        command: item.cmd,
+                      })}
+                    >
+                      看源码
+                    </Button>,
+                  ]
+                : []),
+              <Button
+                key="lock"
+                type="link"
+                icon={<PushpinOutlined />}
+                onClick={() => lockEvidence({
+                  sourceType: 'session_log',
+                  sourceId: item.id,
+                  title: `会话日志: ${item.type}`,
+                  summary: item.message || `exit=${item.exitCode ?? '-'} / duration=${item.durationMs ?? '-'}ms`,
+                  content: buildSessionLogEvidence(item),
+                  lookupText,
+                  command: item.cmd,
+                  sessionLabel: currentSession ? `${currentSession.username}@${currentSession.host}` : undefined,
+                  tags: collectEvidenceTags([item.message, item.stdout, item.stderr, item.cmd, item.type]),
+                })}
+              >
+                锁定
+              </Button>,
+            ]}
+          >
+            <List.Item.Meta
+              title={
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <Text strong>{item.type}</Text>
+                  <Tag color={item.level === 'error' ? 'red' : item.level === 'warning' ? 'orange' : 'blue'}>{item.level || 'info'}</Tag>
+                  <Text type="secondary">{formatTs(item.ts)}</Text>
+                  {typeof item.exitCode === 'number' && <Tag color={item.exitCode === 0 ? 'green' : 'red'}>exit {item.exitCode}</Tag>}
+                  {typeof item.durationMs === 'number' && <Tag>{item.durationMs}ms</Tag>}
+                  {item.mode && <Tag>{item.mode}</Tag>}
+                </div>
+              }
+              description={
+                <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                  {item.cmd && <Text code>{item.cmd}</Text>}
+                  {item.message && <Text>{item.message}</Text>}
+                  {item.stdout && (
+                    <div>
+                      <Text strong>stdout</Text>
+                      <ResizableOutput
+                        content={item.stdout}
+                        isDark={isDark}
+                        minHeight={56}
+                        maxHeight={180}
+                        onTextSelect={(text) => locateSourceFromParts({
+                          title: `会话日志 stdout: ${item.type}`,
+                          summary: item.message || '手动选取 stdout 中的线索',
+                          sourceType: 'session_log_selection',
+                          text,
+                          command: item.cmd,
+                        })}
+                      />
+                    </div>
+                  )}
+                  {item.stderr && (
+                    <div>
+                      <Text strong>stderr</Text>
+                      <ResizableOutput
+                        content={item.stderr}
+                        isDark={isDark}
+                        minHeight={56}
+                        maxHeight={180}
+                        onTextSelect={(text) => locateSourceFromParts({
+                          title: `会话日志 stderr: ${item.type}`,
+                          summary: item.message || '手动选取 stderr 中的线索',
+                          sourceType: 'session_log_selection',
+                          text,
+                          command: item.cmd,
+                        })}
+                      />
+                    </div>
+                  )}
+                </Space>
+              }
+            />
+          </List.Item>
+        );
+      }}
+    />
+  );
+
+  const historyDetailContent = !detailRun ? (
+    <Alert type="info" showIcon message="执行一次编排或点开历史 Run 后，这里会展示结构化详情。" />
+  ) : (
+    <Space direction="vertical" size={16} style={{ width: '100%' }}>
+      <Card
+        size="small"
+        title={detailRun.title}
+        extra={
+          <Space wrap>
+            <Tag color={statusColorMap[detailRun.status] || 'default'}>{detailRun.status}</Tag>
+            <Button size="small" type="link" onClick={() => setActiveWorkbenchView('flow')}>
+              带回定位流
+            </Button>
+          </Space>
+        }
+      >
+        <Space direction="vertical" size={8} style={{ width: '100%' }}>
+          {detailRun.scenarioType && (
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <Tag color={SCENARIO_META[detailRun.scenarioType]?.color || 'default'}>
+                {SCENARIO_META[detailRun.scenarioType]?.label || detailRun.scenarioType}
+              </Tag>
+              {(detailRun.tags || []).map((tag) => (
+                <Tag key={tag}>{tag}</Tag>
+              ))}
+            </div>
+          )}
+          <Text type="secondary">故障现象：{detailRun.symptom}</Text>
+          {detailRun.objective && <Text type="secondary">目标：{detailRun.objective}</Text>}
+          {detailRun.successCriteria && <Text type="secondary">成功判据：{detailRun.successCriteria}</Text>}
+          {buildContextSummary(detailContextSnapshot) && (
+            <Text type="secondary">定位上下文：{buildContextSummary(detailContextSnapshot)}</Text>
+          )}
+          <Text type="secondary">运行时间：{formatTs(detailRun.startedAt)} {detailRun.finishedAt ? `- ${formatTs(detailRun.finishedAt)}` : ''}</Text>
+          <Text type="secondary">目标会话：{detailRun.sessionLabel || '未绑定 SSH 会话'}</Text>
+        </Space>
+      </Card>
+
+      {detailRun.report && (
+        <Card size="small" title="报告归纳 Agent">
+          <Space direction="vertical" size={10} style={{ width: '100%' }}>
+            <Alert type="success" showIcon message={detailRun.report.summary} />
+            <div>
+              <Text strong>根因假设</Text>
+              <Paragraph style={{ marginBottom: 0 }}>{detailRun.report.rootCauseHypothesis}</Paragraph>
+            </div>
+            {detailRun.report.similarCaseHint && (
+              <Text type="secondary">{detailRun.report.similarCaseHint}</Text>
+            )}
+            {detailRun.report.recommendations?.length > 0 && (
+              <div>
+                <Text strong>建议动作</Text>
+                <List
+                  size="small"
+                  dataSource={detailRun.report.recommendations}
+                  renderItem={(item) => <List.Item>{item}</List.Item>}
+                />
+              </div>
+            )}
+            {detailRun.report.nextActions?.length > 0 && (
+              <div>
+                <Text strong>下一步</Text>
+                <List
+                  size="small"
+                  dataSource={detailRun.report.nextActions}
+                  renderItem={(item) => <List.Item>{item}</List.Item>}
+                />
+              </div>
+            )}
+          </Space>
+        </Card>
+      )}
+
+      <Card size="small" title="日志分析 Agent Findings" extra={<Tag>{detailRun.findings?.length || 0}</Tag>}>
+        {!detailRun.findings?.length ? (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="本次未提取到明确 Finding" />
+        ) : (
+          <List
+            dataSource={detailRun.findings || []}
+            renderItem={(finding) => (
+              <List.Item
+                actions={[
+                  <Button
+                    key="lock"
+                    type="link"
+                    icon={<PushpinOutlined />}
+                    onClick={() => lockEvidence({
+                      sourceType: 'finding',
+                      sourceId: finding.id,
+                      title: finding.title,
+                      summary: finding.summary,
+                      content: finding.evidence || '',
+                      sessionLabel: detailRun.sessionLabel,
+                      tags: collectEvidenceTags([finding.title, finding.summary, finding.evidence]),
+                    })}
+                  >
+                    锁定证据
+                  </Button>,
+                ]}
+              >
+                <List.Item.Meta
+                  title={
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                      <Text strong>{finding.title}</Text>
+                      <Tag color={severityColorMap[finding.severity] || 'default'}>{finding.severity}</Tag>
+                      <Tag>{finding.sourceStepName}</Tag>
+                    </div>
+                  }
+                  description={
+                    <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                      <Text>{finding.summary}</Text>
+                      <ResizableOutput content={finding.evidence || ''} isDark={isDark} minHeight={52} maxHeight={180} />
+                    </Space>
+                  }
+                />
+              </List.Item>
+            )}
+          />
+        )}
+      </Card>
+
+      <Collapse
+        defaultActiveKey={['collector']}
+        items={[
+          {
+            key: 'collector',
+            label: `连接采集结果 (${detailRun.collectionSteps?.length || 0})`,
+            children: !detailRun.collectionSteps?.length ? (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有采集步骤结果" />
+            ) : (
+              <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                {(detailRun.collectionSteps || []).map((step) => (
+                  <Card
+                    key={step.id}
+                    size="small"
+                    title={
+                      <Space wrap>
+                        <Text strong>{step.name}</Text>
+                        {step.phase && (
+                          <Tag color={STEP_PHASE_META[step.phase as keyof typeof STEP_PHASE_META]?.color || 'default'}>
+                            {STEP_PHASE_META[step.phase as keyof typeof STEP_PHASE_META]?.label || step.phase}
+                          </Tag>
+                        )}
+                      </Space>
+                    }
+                    extra={<Tag color={statusColorMap[step.status] || 'default'}>{step.status}</Tag>}
+                  >
+                    <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                      <Text code>{step.resolvedCommand || step.command}</Text>
+                      <Text type="secondary">
+                        exit={step.exitCode} / duration={step.durationMs}ms
+                        {step.startedAt ? ` / start=${formatTs(step.startedAt)}` : ''}
+                      </Text>
+                      {step.expectedSignal && (
+                        <Text type="secondary">预期信号：{step.expectedSignal}</Text>
+                      )}
+                      <ResizableOutput content={step.stdout || step.stderr || ''} isDark={isDark} minHeight={84} maxHeight={260} />
+                      {step.stderr && (
+                        <>
+                          <Text strong>stderr</Text>
+                          <ResizableOutput content={step.stderr} isDark={isDark} minHeight={60} maxHeight={200} />
+                        </>
+                      )}
+                      <Space wrap>
+                        <Button
+                          size="small"
+                          icon={<PushpinOutlined />}
+                          onClick={() => lockEvidence({
+                            sourceType: 'collection_step',
+                            sourceId: step.id,
+                            title: `采集步骤: ${step.name}`,
+                            summary: step.conclusion || step.expectedSignal || '采集输出已锁定',
+                            content: [step.stdout, step.stderr].filter(Boolean).join('\n'),
+                            command: step.resolvedCommand || step.command,
+                            sessionLabel: detailRun.sessionLabel,
+                            tags: collectEvidenceTags([step.name, step.expectedSignal, step.stdout, step.stderr]),
+                          })}
+                        >
+                          锁定输出
+                        </Button>
+                        <Button
+                          size="small"
+                          icon={<SaveOutlined />}
+                          onClick={() => saveCommandAsTemplate(
+                            `${step.name} - 采集命令`,
+                            step.resolvedCommand || step.command,
+                            step.expectedSignal || step.conclusion || '来自诊断工作台的采集步骤',
+                            '诊断/采集步骤'
+                          )}
+                        >
+                          保存命令模板
+                        </Button>
+                      </Space>
+                    </Space>
+                  </Card>
+                ))}
+              </Space>
+            ),
+          },
+          {
+            key: 'biz-actions',
+            label: `业务脚本结果 (${detailRun.businessActions?.length || 0})`,
+            children: !detailRun.businessActions?.length ? (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有业务脚本执行结果" />
+            ) : (
+              <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                {(detailRun.businessActions || []).map((action) => (
+                  <Card key={action.id} size="small" title={action.name} extra={<Tag color={statusColorMap[action.status] || 'default'}>{action.status}</Tag>}>
+                    <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                      <Text code>{action.scriptPath}</Text>
+                      <Text type="secondary">
+                        phase={action.runMode} / exit={action.exitCode} / duration={action.durationMs}ms
+                        {action.startedAt ? ` / start=${formatTs(action.startedAt)}` : ''}
+                      </Text>
+                      <ResizableOutput content={action.stdout || action.stderr || ''} isDark={isDark} minHeight={72} maxHeight={240} />
+                      {action.stdinPayload && (
+                        <>
+                          <Text strong>stdin payload</Text>
+                          <ResizableOutput content={action.stdinPayload} isDark={isDark} minHeight={52} maxHeight={180} />
+                        </>
+                      )}
+                      <Button
+                        size="small"
+                        icon={<PushpinOutlined />}
+                        onClick={() => lockEvidence({
+                          sourceType: 'business_action',
+                          sourceId: action.id,
+                          title: `业务动作: ${action.name}`,
+                          summary: `phase=${action.runMode} / exit=${action.exitCode}`,
+                          content: [action.stdout, action.stderr].filter(Boolean).join('\n'),
+                          command: action.scriptPath,
+                          sessionLabel: detailRun.sessionLabel,
+                          tags: collectEvidenceTags([action.name, action.runMode, action.stdout, action.stderr]),
+                        })}
+                      >
+                        锁定输出
+                      </Button>
+                    </Space>
+                  </Card>
+                ))}
+              </Space>
+            ),
+          },
+        ]}
+      />
+    </Space>
+  );
 
   return (
     <div style={{ padding: 24 }}>
       {contextHolder}
 
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, marginBottom: 20, flexWrap: 'wrap' }}>
-        <div>
-          <Title level={2} style={{ margin: 0 }}>诊断工作台</Title>
-          <Paragraph type="secondary" style={{ margin: '8px 0 0' }}>
-            把连接采集、日志分析、报告归纳和 Python 业务测试放进一条编排链，同时自动沉淀到诊断知识库。
-          </Paragraph>
+      <Space direction="vertical" size={16} style={{ width: '100%' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap' }}>
+          <div>
+            <Title level={2} style={{ margin: 0 }}>诊断工作台</Title>
+            <Paragraph type="secondary" style={{ margin: '8px 0 0' }}>
+              以定位为主链，把连接采集、证据收敛、时序复盘和结论归纳收在一条更短的漏斗里。
+            </Paragraph>
+          </div>
+          <Space wrap>
+            <Tag color="blue">{safePlaybooks.length} 个 Playbook</Tag>
+            <Tag color={selectedSessionId ? 'processing' : 'default'}>
+              {currentSession ? `${currentSession.username}@${currentSession.host}` : '未选会话'}
+            </Tag>
+            <Tag color={detailRun ? 'processing' : 'default'}>
+              {detailRun ? `当前 Run: ${detailRun.title}` : '当前无 Run'}
+            </Tag>
+            <Tag color={lockedEvidence.length > 0 ? 'processing' : 'default'}>
+              证据篮 {lockedEvidence.length}
+            </Tag>
+          </Space>
         </div>
-        <Space wrap>
-          <Button icon={<PlusOutlined />} onClick={() => addPlaybook()}>
-            新建 Playbook
-          </Button>
-          <Button icon={<SearchOutlined />} onClick={() => void runRecall()}>
-            相似预召回
-          </Button>
-          <Button type="primary" icon={<RobotOutlined />} loading={running} onClick={() => void runOrchestration()}>
-            执行多 Agent 编排
-          </Button>
-        </Space>
-      </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(360px, 1.2fr) minmax(320px, 0.8fr)', gap: 16, alignItems: 'start' }}>
-        <Card title="本次诊断配置" extra={<Tag color="blue">Collector / Analyst / Summarizer</Tag>}>
-          <Space direction="vertical" size={16} style={{ width: '100%' }}>
-            <div>
-              <Text type="secondary">选择编排模板</Text>
-              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                <Select
-                  style={{ flex: 1 }}
-                  value={activePlaybook?.id}
-                  options={safePlaybooks.map((playbook) => ({ label: playbook.name, value: playbook.id }))}
-                  onChange={(value) => setActivePlaybook(String(value))}
-                />
-                <Popconfirm title="删除当前 Playbook？" onConfirm={() => activePlaybook && deletePlaybook(activePlaybook.id)}>
-                  <Button danger icon={<DeleteOutlined />} />
-                </Popconfirm>
-              </div>
-            </div>
-
-            <div>
-              <Text type="secondary">场景类型</Text>
-              <Select
-                style={{ width: '100%', marginTop: 8 }}
-                value={activePlaybook?.scenarioType}
-                options={Object.entries(SCENARIO_META).map(([value, meta]) => ({
-                  value,
-                  label: meta.label,
-                }))}
-                onChange={(value) => patchPlaybook({ scenarioType: value as DiagnosticScenarioType })}
-              />
-              {scenarioMeta && (
-                <Text type="secondary" style={{ display: 'block', marginTop: 8 }}>
-                  {scenarioMeta.description}
-                </Text>
-              )}
-            </div>
-
-            <div>
-              <Text type="secondary">Playbook 描述</Text>
-              <Input
-                value={activePlaybook?.description}
-                onChange={(e) => patchPlaybook({ description: e.target.value })}
-                placeholder="描述这套诊断编排适用于什么故障"
-                style={{ marginTop: 8 }}
-                suffix={<SaveOutlined />}
-              />
-            </div>
-
-            <div>
-              <Text type="secondary">目标</Text>
-              <Input
-                value={activePlaybook?.objective}
-                onChange={(e) => patchPlaybook({ objective: e.target.value })}
-                placeholder="例如：先锁定首个异常，再明确下一跳验证命令"
-                style={{ marginTop: 8 }}
-              />
-            </div>
-
-            <div>
-              <Text type="secondary">成功判据</Text>
-              <TextArea
-                value={activePlaybook?.successCriteria}
-                onChange={(e) => patchPlaybook({ successCriteria: e.target.value })}
-                autoSize={{ minRows: 2, maxRows: 4 }}
-                style={{ marginTop: 8 }}
-                placeholder="例如：抓到 timeout 日志、确认端口/进程状态、回滚后业务恢复"
-              />
-            </div>
-
-            <div>
-              <Text type="secondary">标签</Text>
-              <Input
-                value={formatTagInput(activePlaybook?.tags)}
-                onChange={(e) => patchPlaybook({ tags: toTagList(e.target.value) })}
-                placeholder="例如：timeout, io, journalctl"
-                style={{ marginTop: 8 }}
-              />
-            </div>
-
-            <div>
-              <Text type="secondary">本次 Run 标题</Text>
-              <Input value={title} onChange={(e) => setTitle(e.target.value)} style={{ marginTop: 8 }} placeholder="例如：订单接口超时诊断" />
-            </div>
-
-            <div>
-              <Text type="secondary">故障现象</Text>
-              <TextArea
-                value={symptom}
-                onChange={(e) => setSymptom(e.target.value)}
-                autoSize={{ minRows: 3, maxRows: 5 }}
-                style={{ marginTop: 8 }}
-                placeholder="描述现象、影响范围、怀疑方向"
-              />
-            </div>
-
-            <div>
-              <Text type="secondary">补充备注</Text>
-              <TextArea
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                autoSize={{ minRows: 2, maxRows: 4 }}
-                style={{ marginTop: 8 }}
-                placeholder="例如：刚做过发布、只影响某个 AZ、业务验证点等"
-              />
-            </div>
-
-            <Card size="small" title="定位上下文" styles={{ body: { padding: 12 } }}>
-              <Space direction="vertical" size={10} style={{ width: '100%' }}>
-                <Input
-                  value={contextSnapshot.impactScope}
-                  onChange={(e) => patchContextSnapshot('impactScope', e.target.value)}
-                  placeholder="影响范围，例如：仅某 AZ、某租户、某节点、某卷"
-                />
-                <Input
-                  value={contextSnapshot.triggerAction}
-                  onChange={(e) => patchContextSnapshot('triggerAction', e.target.value)}
-                  placeholder="执行时序起点，例如：发布后 / 注入后 / 压测第 3 分钟开始异常"
-                />
-                <Input
-                  value={contextSnapshot.recentChange}
-                  onChange={(e) => patchContextSnapshot('recentChange', e.target.value)}
-                  placeholder="最近变更，例如：发布、参数修改、节点重启、限流调整"
-                />
-                <Input
-                  value={contextSnapshot.expectedBehavior}
-                  onChange={(e) => patchContextSnapshot('expectedBehavior', e.target.value)}
-                  placeholder="期望行为，例如：请求 200、IO 延迟稳定、回滚后恢复"
-                />
-                <Input
-                  value={contextSnapshot.observationWindow}
-                  onChange={(e) => patchContextSnapshot('observationWindow', e.target.value)}
-                  placeholder="观察窗口，例如：10:21-10:25 / 注入后 60s"
-                />
-                <Input
-                  value={contextSnapshot.logKeywords}
-                  onChange={(e) => patchContextSnapshot('logKeywords', e.target.value)}
-                  placeholder="关键日志词，例如：timeout refused nvme reset"
-                />
-                <Text type="secondary">
-                  {buildContextSummary(contextSnapshot) || '上下文越清晰，时序和有效错误日志提纯越准。'}
-                </Text>
-              </Space>
-            </Card>
-
-            <div>
-              <Text type="secondary">目标 SSH 会话</Text>
-              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                <Select
-                  style={{ flex: 1 }}
-                  loading={loadingSessions}
-                  value={selectedSessionId}
-                  placeholder="选择一个已连接 SSH 会话"
-                  options={sessions.map((session) => ({
-                    value: session.sessionId,
-                    label: `${session.username}@${session.host}`,
-                  }))}
-                  onChange={(value) => setSelectedSessionId(String(value))}
-                />
-                <Button onClick={() => void fetchSessions()}>刷新会话</Button>
-              </div>
-              {currentSession && (
-                <Text type="secondary" style={{ display: 'block', marginTop: 8 }}>
-                  当前采集目标：{currentSession.username}@{currentSession.host}
-                </Text>
-              )}
-            </div>
-
-            <Alert
-              type="info"
-              showIcon
-              message="编排阶段"
-              description="业务脚本会先执行 before_collection，再执行远程采集，最后执行 after_collection。日志分析与报告归纳在全部动作结束后统一生成。"
-            />
-
-            {phaseCounts.length > 0 && (
-              <div>
-                <Text type="secondary">当前阶段分布</Text>
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
-                  {phaseCounts.map(([phase, count]) => (
-                    <Tag key={phase} color={STEP_PHASE_META[phase as keyof typeof STEP_PHASE_META]?.color || 'default'}>
-                      {STEP_PHASE_META[phase as keyof typeof STEP_PHASE_META]?.label || phase}: {count}
-                    </Tag>
-                  ))}
-                </div>
-              </div>
-            )}
+        <Card size="small" styles={{ body: { paddingBlock: 12 } }}>
+          <Space wrap size={[8, 8]}>
+            {workbenchSections[activeWorkbenchView].map((section, index) => (
+              <Tag key={section.id} color={activeWorkbenchView === 'flow' ? 'blue' : activeWorkbenchView === 'config' ? 'purple' : 'geekblue'}>
+                {activeWorkbenchView === 'flow' ? `${index + 1}. ` : ''}{section.title}
+              </Tag>
+            ))}
           </Space>
         </Card>
 
-        <Card title="相似案例召回" extra={<RadarChartOutlined />}>
-          {matches.length === 0 ? (
-            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有预召回结果" />
-          ) : (
-            <List
-              dataSource={matches}
-              renderItem={(item) => (
-                <List.Item
-                  actions={[
-                    <Button key="open" type="link" onClick={() => void loadRun(item.runId)}>
-                      查看
-                    </Button>,
-                  ]}
-                >
-                  <List.Item.Meta
-                    title={
-                      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                        <Text strong>{item.title}</Text>
-                        <Tag color="geekblue">相似度 {item.score}</Tag>
-                      </div>
-                    }
-                    description={
-                      <Space direction="vertical" size={6}>
-                        <Text type="secondary">{item.reportSummary || '暂无摘要'}</Text>
+        <Tabs
+          activeKey={activeWorkbenchView}
+          onChange={(value) => setActiveWorkbenchView(value as DiagnosticWorkbenchView)}
+          items={[
+            {
+              key: 'flow',
+              label: '定位流',
+              children: (
+                <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                  <Card title="1. 定位上下文" extra={<Tag color="blue">定位优先</Tag>}>
+                    <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12 }}>
                         <div>
-                          {item.matchedSignals?.map((signal) => (
-                            <Tag key={signal}>{signal}</Tag>
-                          ))}
+                          <Text type="secondary">本次 Run 标题</Text>
+                          <Input value={title} onChange={(e) => setTitle(e.target.value)} style={{ marginTop: 8 }} placeholder="例如：订单接口超时诊断" />
                         </div>
-                      </Space>
-                    }
-                  />
-                </List.Item>
-              )}
-            />
-          )}
-        </Card>
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(380px, 1.1fr) minmax(360px, 0.9fr)', gap: 16, marginTop: 16, alignItems: 'start' }}>
-        <Card
-          title="场景命令库"
-          extra={scenarioMeta ? <Tag color={scenarioMeta.color}>{scenarioMeta.label}</Tag> : null}
-        >
-          <Space direction="vertical" size={14} style={{ width: '100%' }}>
-            <Input
-              value={librarySearch}
-              onChange={(e) => setLibrarySearch(e.target.value)}
-              placeholder="按 timeout / io / recovery / network 等关键字过滤建议命令"
-              suffix={<SearchOutlined />}
-            />
-            {commandLibraryItems.length === 0 ? (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前场景下没有命中的建议命令" />
-            ) : (
-              <List
-                dataSource={commandLibraryItems}
-                renderItem={(item) => (
-                  <List.Item
-                    actions={[
-                      <Button key="playbook" type="link" onClick={() => addLibraryItemToPlaybook(item.id)}>
-                        加入 Playbook
-                      </Button>,
-                      <Button key="builder" type="link" onClick={() => saveLibraryItemToCommandBuilder(item.id)}>
-                        存到命令生成器
-                      </Button>,
-                    ]}
-                  >
-                    <List.Item.Meta
-                      title={
-                        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                          <Text strong>{item.name}</Text>
-                          <Tag color={STEP_PHASE_META[item.phase].color}>{STEP_PHASE_META[item.phase].label}</Tag>
-                          <Tag color={item.riskLevel === 'mutation' ? 'orange' : 'green'}>
-                            {item.riskLevel === 'mutation' ? '变更型命令' : '只读命令'}
-                          </Tag>
-                        </div>
-                      }
-                      description={
-                        <Space direction="vertical" size={6} style={{ width: '100%' }}>
-                          <Text type="secondary">{item.description}</Text>
-                          <Text code>{item.command}</Text>
-                          <Text type="secondary">预期信号：{item.expectedSignal}</Text>
-                          <div>
-                            {item.tags.map((tag) => (
-                              <Tag key={tag}>{tag}</Tag>
-                            ))}
+                        <div>
+                          <Text type="secondary">目标 SSH 会话</Text>
+                          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                            <Select
+                              style={{ flex: 1 }}
+                              loading={loadingSessions}
+                              value={selectedSessionId}
+                              placeholder="选择一个已连接 SSH 会话"
+                              options={sessions.map((session) => ({
+                                value: session.sessionId,
+                                label: `${session.username}@${session.host}`,
+                              }))}
+                              onChange={(value) => setSelectedSessionId(String(value))}
+                            />
+                            <Button onClick={() => void fetchSessions()}>刷新会话</Button>
                           </div>
-                        </Space>
-                      }
-                    />
-                  </List.Item>
-                )}
-              />
-            )}
-          </Space>
-        </Card>
-
-        <Space direction="vertical" size={16} style={{ width: '100%' }}>
-          <Card
-            title="C 代码定位上下文"
-            extra={activeCodeContext ? <Tag color="success">已绑定</Tag> : <Tag color="default">未绑定</Tag>}
-          >
-            <Space direction="vertical" size={12} style={{ width: '100%' }}>
-              <Text type="secondary">
-                绑定一次 repo / branch / commit 后，下面命中 C 线索的异常、有效错误日志和证据都可以直接跳到源码上下文。
-              </Text>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 8 }}>
-                <Input
-                  value={codeBinding.repo}
-                  onChange={(e) => patchCodeBinding('repo', e.target.value)}
-                  placeholder="repo，本地路径或远端 Git URL"
-                />
-                <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: 8 }}>
-                  <Input
-                    value={codeBinding.branch}
-                    onChange={(e) => patchCodeBinding('branch', e.target.value)}
-                    placeholder="branch"
-                  />
-                  <Input
-                    value={codeBinding.commit}
-                    onChange={(e) => patchCodeBinding('commit', e.target.value)}
-                    placeholder="commit"
-                  />
-                </div>
-                <Input
-                  value={codeToken}
-                  onChange={(e) => setCodeToken(e.target.value)}
-                  placeholder="可选 Git token，私有仓库需要时再填"
-                />
-              </div>
-              <Space wrap>
-                <Button type="primary" icon={<CodeOutlined />} loading={openingCodeContext} onClick={() => void openCodeContext()}>
-                  绑定 C 代码版本
-                </Button>
-                {activeCodeContext && (
-                  <>
-                    <Tag color="processing">{activeCodeContext.repoDisplayName}</Tag>
-                    <Tag>{activeCodeContext.branch}</Tag>
-                    <Tag>{activeCodeContext.commit.slice(0, 12)}</Tag>
-                    <Tag color={activeCodeContext.searchStrategy === 'indexed' ? 'blue' : 'gold'}>
-                      {activeCodeContext.searchStrategy === 'indexed' ? '已索引' : '按需检索'}
-                    </Tag>
-                  </>
-                )}
-              </Space>
-              {activeCodeContext && (
-                <Text type="secondary">
-                  当前工作树：{activeCodeContext.worktreePath}
-                </Text>
-              )}
-            </Space>
-          </Card>
-
-          <Card
-            title="C 源码上下文预览"
-            extra={
-              <Space size={8} wrap>
-                {sourcePreview && (
-                  <Button size="small" onClick={() => setCompactSourcePreview((value) => !value)}>
-                    {compactSourcePreview ? '展开全部上下文' : '折叠无关上下文'}
-                  </Button>
-                )}
-                {compactSourcePreview && sourcePreviewFoldedLineCount > 0 && (
-                  <Tag color="default">已折叠 {sourcePreviewFoldedLineCount} 行</Tag>
-                )}
-                {locatingSource
-                  ? <Tag color="processing">定位中</Tag>
-                  : sourcePreview
-                    ? <Tag color="blue">{sourcePreview.lookupMode === 'location' ? 'path:line' : 'function'}</Tag>
-                    : null}
-              </Space>
-            }
-          >
-            {!sourcePreview ? (
-              <Alert
-                type="info"
-                showIcon
-                message="这里会显示异常关联的 C 源码片段"
-                description="先绑定 C 代码版本，然后在首个异常、有效错误日志、证据面板或会话日志里点击“看源码”。工作台只会处理 C 源码路径和 C 函数线索。"
-              />
-            ) : (
-              <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                  <Text strong>{sourcePreview.request.title}</Text>
-                  <Tag>{sourcePreview.request.sourceType}</Tag>
-                  <Tag color={sourcePreview.lookupMode === 'location' ? 'processing' : 'geekblue'}>
-                    {sourcePreview.lookupMode === 'location' ? '路径定位' : '函数定位'}
-                  </Tag>
-                  <Tag color="default">{formatSourceMatchLabel(sourcePreview.payload.matchedBy)}</Tag>
-                </div>
-                <Text type="secondary">{sourcePreview.request.summary}</Text>
-                <Text code>{sourcePreview.payload.path}:{sourcePreview.payload.line}</Text>
-                {sourcePreview.request.command && <Text code>{sourcePreview.request.command}</Text>}
-                <Text type="secondary">代码区内识别出的 C 函数名可直接点击跳转。</Text>
-                {sourcePreview.payload.signature && (
-                  <Alert
-                    type="info"
-                    showIcon
-                    message={sourcePreview.payload.signature}
-                    description={
-                      sourcePreview.payload.functionStartLine && sourcePreview.payload.functionEndLine
-                        ? `函数范围 ${sourcePreview.payload.functionStartLine}-${sourcePreview.payload.functionEndLine}`
-                        : '当前按日志命中的 C 代码位置展示上下文'
-                    }
-                  />
-                )}
-                {sourcePreview.locations.length > 1 && (
-                  <div>
-                    <Text type="secondary">备选路径线索</Text>
-                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
-                      {sourcePreview.locations.slice(0, 6).map((candidate) => (
-                        <Tag
-                          key={`${candidate.path}:${candidate.line}`}
-                          color={sourcePreview.payload.mode === 'location' && sourcePreview.payload.path === candidate.path && sourcePreview.payload.line === candidate.line ? 'processing' : 'default'}
-                          onClick={() => locateSourceFromParts(sourcePreview.request, { location: candidate })}
-                          style={{ cursor: 'pointer' }}
-                        >
-                          {candidate.path}:{candidate.line}
-                        </Tag>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {sourcePreview.functions.length > 0 && (
-                  <div>
-                    <Text type="secondary">函数线索</Text>
-                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
-                      {sourcePreview.functions.slice(0, 8).map((candidate) => (
-                        <Tag
-                          key={`${candidate.query}-${candidate.hits}`}
-                          color={sourcePreview.payload.symbol?.name === candidate.query ? 'geekblue' : 'default'}
-                          onClick={() => locateSourceFromParts(sourcePreview.request, { functionCandidate: candidate })}
-                          style={{ cursor: 'pointer' }}
-                        >
-                          {candidate.query}
-                        </Tag>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                <div
-                  onClick={handleSourcePreviewCodeClick}
-                  style={{
-                    maxHeight: 440,
-                    overflow: 'auto',
-                    borderRadius: 8,
-                    border: `1px solid ${isDark ? '#334155' : '#dbe2ea'}`,
-                    background: isDark ? '#0f172a' : '#f8fafc',
-                    padding: '8px 0',
-                  }}
-                >
-                  {sourcePreviewDisplayRows.map((row) => {
-                    if (row.type === 'fold') {
-                      return (
-                        <div
-                          key={row.key}
-                          style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            minHeight: 28,
-                            padding: '4px 16px',
-                          }}
-                        >
-                          <Tag color="default">{row.label}</Tag>
                         </div>
-                      );
-                    }
+                      </div>
 
-                    const line = row.line;
-                    return (
-                      <div
-                        key={row.key}
-                        style={{
-                          display: 'grid',
-                          gridTemplateColumns: '72px 1fr',
-                          gap: 12,
-                          padding: '0 16px',
-                          minHeight: 20,
-                          lineHeight: '20px',
-                          background: line.isAnchor
-                            ? (isDark ? 'rgba(59, 130, 246, 0.26)' : 'rgba(59, 130, 246, 0.12)')
-                            : line.isDeclaration
-                              ? (isDark ? 'rgba(14, 116, 144, 0.24)' : 'rgba(14, 116, 144, 0.10)')
-                              : line.inFunction
-                                ? (isDark ? 'rgba(15, 23, 42, 0.42)' : 'rgba(226, 232, 240, 0.65)')
-                                : 'transparent',
-                        }}
-                      >
-                        <Text
-                          type="secondary"
-                          style={{
-                            userSelect: 'none',
-                            textAlign: 'right',
-                            fontFamily: 'JetBrains Mono, Fira Code, monospace',
-                            fontSize: 12,
-                          }}
-                        >
-                          {line.lineNumber}
-                        </Text>
-                        <pre
-                          style={{
-                            margin: 0,
-                            whiteSpace: 'pre-wrap',
-                            wordBreak: 'break-word',
-                            fontFamily: 'JetBrains Mono, Fira Code, monospace',
-                            fontSize: 12,
-                            color: isDark ? '#e5e7eb' : '#111827',
-                          }}
-                          dangerouslySetInnerHTML={{ __html: row.html }}
+                      <div>
+                        <Text type="secondary">故障现象</Text>
+                        <TextArea
+                          value={symptom}
+                          onChange={(e) => setSymptom(e.target.value)}
+                          autoSize={{ minRows: 3, maxRows: 5 }}
+                          style={{ marginTop: 8 }}
+                          placeholder="描述现象、影响范围、怀疑方向"
                         />
                       </div>
-                    );
-                  })}
-                </div>
-              </Space>
-            )}
-          </Card>
 
-          <Card
-            title="首个异常定位"
-            extra={firstAnomaly ? <Tag color={severityColorMap[firstAnomaly.severity] || 'default'}>{firstAnomaly.severity}</Tag> : null}
-          >
-            {!firstAnomaly ? (
-              <Alert
-                type="info"
-                showIcon
-                message="还没有明确的首个异常"
-                description="执行一次编排或等待会话日志出现 warning / error / 非零退出码后，这里会自动收敛最先出现的高风险异常。"
-              />
-            ) : (
-              <Space direction="vertical" size={10} style={{ width: '100%' }}>
-                <Text strong>{firstAnomaly.title}</Text>
-                <Text type="secondary">{firstAnomaly.summary}</Text>
-                {firstAnomaly.command && <Text code>{firstAnomaly.command}</Text>}
-                <ResizableOutput
-                  content={firstAnomaly.evidence}
-                  isDark={isDark}
-                  minHeight={72}
-                  maxHeight={220}
-                  onTextSelect={(text) => locateSourceFromParts({
-                    title: `${firstAnomaly.title} - 手动选词`,
-                    summary: firstAnomaly.summary,
-                    sourceType: `${firstAnomaly.sourceType}_selection`,
-                    text,
-                    command: firstAnomaly.command,
-                  })}
-                />
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                  {firstAnomaly.tags.map((tag) => (
-                    <Tag key={tag}>{tag}</Tag>
-                  ))}
-                </div>
-                <Space wrap>
-                  {hasCLookupText(firstAnomaly.lookupText) && (
-                    <Button
-                      icon={<CodeOutlined />}
-                      loading={locatingSource}
-                      onClick={() => locateSourceFromParts({
-                        title: firstAnomaly.title,
-                        summary: firstAnomaly.summary,
-                        sourceType: firstAnomaly.sourceType,
-                        text: firstAnomaly.lookupText,
-                        parts: [firstAnomaly.title, firstAnomaly.summary, firstAnomaly.evidence],
-                        command: firstAnomaly.command,
-                      })}
-                    >
-                      看源码
-                    </Button>
-                  )}
-                  <Button
-                    icon={<PushpinOutlined />}
-                    onClick={() => lockEvidence({
-                      sourceType: 'first_anomaly',
-                      sourceId: firstAnomaly.sourceId,
-                      title: firstAnomaly.title,
-                      summary: firstAnomaly.summary,
-                      content: firstAnomaly.evidence,
-                      lookupText: firstAnomaly.lookupText,
-                      command: firstAnomaly.command,
-                      sessionLabel: firstAnomaly.sessionLabel,
-                      tags: firstAnomaly.tags,
-                    })}
-                  >
-                    锁定首个异常
-                  </Button>
-                  {firstAnomaly.command && (
-                    <Button
-                      icon={<SaveOutlined />}
-                      onClick={() => saveCommandAsTemplate(
-                        `${firstAnomaly.title} - 现场命令`,
-                        firstAnomaly.command || '',
-                        firstAnomaly.summary,
-                        '诊断/异常定位'
-                      )}
-                    >
-                      保存命令模板
-                    </Button>
-                  )}
-                </Space>
-              </Space>
-            )}
-          </Card>
-
-          <Card
-            title="有效错误日志"
-            extra={
-              <Space size={8} wrap>
-                <Tag color={effectiveErrorNoiseView.visibleClusters.length > 0 ? 'warning' : 'default'}>
-                  保留 {effectiveErrorNoiseView.visibleClusters.length} 簇
-                </Tag>
-                {effectiveErrorNoiseView.foldedClusters.length > 0 && (
-                  <Tag color="default">
-                    折叠 {effectiveErrorNoiseView.foldedClusters.length} 簇 / {effectiveErrorNoiseView.foldedItems} 条
-                  </Tag>
-                )}
-              </Space>
-            }
-          >
-            {effectiveErrorNoiseView.totalItems === 0 ? (
-              <Alert
-                type="info"
-                showIcon
-                message="还没有提纯出关键日志"
-                description="补充定位上下文里的观察窗口和关键日志词，或执行一次编排后，这里会优先给出真正影响定位的错误日志片段。"
-              />
-            ) : (
-              <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                <Alert
-                  type="info"
-                  showIcon
-                  message={`从 ${effectiveErrorNoiseView.totalItems} 条候选日志里收敛出 ${effectiveErrorNoiseView.totalClusters} 个证据簇`}
-                  description="默认只保留分值更高、靠近首个异常、能复现或能继续追代码的簇，其余噪音会折叠到下面。"
-                />
-                <Alert
-                  type={baselineReferenceSummary.runs.length > 0 ? 'success' : 'warning'}
-                  showIcon
-                  message={
-                    baselineReferenceSummary.runs.length > 0
-                      ? `已加载 ${baselineReferenceSummary.runs.length} 个稳定基线 Run`
-                      : '还没有可用的稳定基线 Run'
-                  }
-                  description={
-                    baselineReferenceSummary.runs.length > 0
-                      ? `当前簇里 ${effectiveErrorNoiseSummary.newCount} 个是相对基线新增，${effectiveErrorNoiseSummary.knownCount} 个在历史稳定 Run 中也出现过，${effectiveErrorNoiseSummary.suppressedCount} 个命中用户噪音规则。`
-                      : '后续有更多 completed 状态的历史 Run 时，这里会自动比较“当前新增”和“历史常见”信号。'
-                  }
-                />
-
-                <Card size="small" title="噪音规则">
-                  <Space direction="vertical" size={10} style={{ width: '100%' }}>
-                    <Space.Compact style={{ width: '100%' }}>
-                      <Input
-                        value={noiseKeywordDraft}
-                        onChange={(event) => setNoiseKeywordDraft(event.target.value)}
-                        placeholder="输入噪音关键词，例如 heartbeat / retrying / health check"
-                        onPressEnter={() => addKeywordNoiseRule()}
-                      />
-                      <Button icon={<SearchOutlined />} onClick={addKeywordNoiseRule}>
-                        新增关键词规则
-                      </Button>
-                    </Space.Compact>
-                    {noiseRules.length === 0 ? (
-                      <Text type="secondary">还没有自定义噪音规则。可以直接从下面的证据簇一键“标记噪音”，也可以手工补关键词规则。</Text>
-                    ) : (
-                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                        {noiseRules.map((rule) => (
-                          <Tag
-                            key={rule.id}
-                            closable
-                            color={rule.type === 'fingerprint' ? 'purple' : 'default'}
-                            onClose={(event) => {
-                              event.preventDefault();
-                              removeNoiseRule(rule.id);
-                            }}
-                          >
-                            {rule.type === 'fingerprint' ? '簇规则' : '关键词'}: {rule.reason || rule.value}
-                          </Tag>
-                        ))}
+                      <div>
+                        <Text type="secondary">补充备注</Text>
+                        <TextArea
+                          value={notes}
+                          onChange={(e) => setNotes(e.target.value)}
+                          autoSize={{ minRows: 2, maxRows: 4 }}
+                          style={{ marginTop: 8 }}
+                          placeholder="例如：刚做过发布、只影响某个 AZ、业务验证点等"
+                        />
                       </div>
-                    )}
-                  </Space>
-                </Card>
 
-                <List
-                  dataSource={effectiveErrorNoiseView.visibleClusters}
-                  renderItem={(cluster) => {
-                    const item = cluster.representative;
-                    const canLocate = hasCLookupText(item.lookupText);
-                    return (
-                      <List.Item
-                        actions={[
-                          ...(canLocate
-                            ? [
+                      <Card size="small" title="结构化定位上下文" styles={{ body: { padding: 12 } }}>
+                        <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                          <Input
+                            value={contextSnapshot.impactScope}
+                            onChange={(e) => patchContextSnapshot('impactScope', e.target.value)}
+                            placeholder="影响范围，例如：仅某 AZ、某租户、某节点、某卷"
+                          />
+                          <Input
+                            value={contextSnapshot.triggerAction}
+                            onChange={(e) => patchContextSnapshot('triggerAction', e.target.value)}
+                            placeholder="执行时序起点，例如：发布后 / 注入后 / 压测第 3 分钟开始异常"
+                          />
+                          <Input
+                            value={contextSnapshot.recentChange}
+                            onChange={(e) => patchContextSnapshot('recentChange', e.target.value)}
+                            placeholder="最近变更，例如：发布、参数修改、节点重启、限流调整"
+                          />
+                          <Input
+                            value={contextSnapshot.expectedBehavior}
+                            onChange={(e) => patchContextSnapshot('expectedBehavior', e.target.value)}
+                            placeholder="期望行为，例如：请求 200、IO 延迟稳定、回滚后恢复"
+                          />
+                          <Input
+                            value={contextSnapshot.observationWindow}
+                            onChange={(e) => patchContextSnapshot('observationWindow', e.target.value)}
+                            placeholder="观察窗口，例如：10:21-10:25 / 注入后 60s"
+                          />
+                          <Input
+                            value={contextSnapshot.logKeywords}
+                            onChange={(e) => patchContextSnapshot('logKeywords', e.target.value)}
+                            placeholder="关键日志词，例如：timeout refused nvme reset"
+                          />
+                          <Text type="secondary">
+                            {buildContextSummary(contextSnapshot) || '上下文越清晰，时序和有效错误日志提纯越准。'}
+                          </Text>
+                        </Space>
+                      </Card>
+
+                      <Card
+                        size="small"
+                        title="C 代码定位绑定"
+                        extra={activeCodeContext ? <Tag color="success">已绑定</Tag> : <Tag color="default">未绑定</Tag>}
+                        styles={{ body: { padding: 12 } }}
+                      >
+                        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                          <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 8 }}>
+                            <Input
+                              value={codeBinding.repo}
+                              onChange={(e) => patchCodeBinding('repo', e.target.value)}
+                              placeholder="repo，本地路径或远端 Git URL"
+                            />
+                            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: 8 }}>
+                              <Input
+                                value={codeBinding.branch}
+                                onChange={(e) => patchCodeBinding('branch', e.target.value)}
+                                placeholder="branch"
+                              />
+                              <Input
+                                value={codeBinding.commit}
+                                onChange={(e) => patchCodeBinding('commit', e.target.value)}
+                                placeholder="commit"
+                              />
+                            </div>
+                            <Input
+                              value={codeToken}
+                              onChange={(e) => setCodeToken(e.target.value)}
+                              placeholder="可选 Git token，私有仓库需要时再填"
+                            />
+                          </div>
+                          <Space wrap>
+                            <Button type="primary" icon={<CodeOutlined />} loading={openingCodeContext} onClick={() => void openCodeContext()}>
+                              绑定 C 代码版本
+                            </Button>
+                            {activeCodeContext && (
+                              <>
+                                <Tag color="processing">{activeCodeContext.repoDisplayName}</Tag>
+                                <Tag>{activeCodeContext.branch}</Tag>
+                                <Tag>{activeCodeContext.commit.slice(0, 12)}</Tag>
+                              </>
+                            )}
+                          </Space>
+                          {activeCodeContext && (
+                            <Text type="secondary">
+                              当前工作树：{activeCodeContext.worktreePath}
+                            </Text>
+                          )}
+                        </Space>
+                      </Card>
+                    </Space>
+                  </Card>
+
+                  <Card
+                    title="2. 执行与采集"
+                    extra={
+                      <Space wrap>
+                        <Button icon={<SearchOutlined />} onClick={() => void runRecall()}>
+                          召回
+                        </Button>
+                        <Button type="primary" icon={<RobotOutlined />} loading={running} onClick={() => void runOrchestration()}>
+                          执行编排
+                        </Button>
+                      </Space>
+                    }
+                  >
+                    <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(280px, 1fr) auto', gap: 8, alignItems: 'end' }}>
+                        <div>
+                          <Text type="secondary">当前 Playbook</Text>
+                          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                            <Select
+                              style={{ flex: 1 }}
+                              value={activePlaybook?.id}
+                              options={safePlaybooks.map((playbook) => ({ label: playbook.name, value: playbook.id }))}
+                              onChange={(value) => setActivePlaybook(String(value))}
+                            />
+                            <Popconfirm title="删除当前 Playbook？" onConfirm={() => activePlaybook && deletePlaybook(activePlaybook.id)}>
+                              <Button danger icon={<DeleteOutlined />} />
+                            </Popconfirm>
+                          </div>
+                        </div>
+                        <Button icon={<PlusOutlined />} onClick={() => addPlaybook()}>
+                          新建 Playbook
+                        </Button>
+                      </div>
+
+                      {activePlaybook ? (
+                        <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                            {scenarioMeta && <Tag color={scenarioMeta.color}>{scenarioMeta.label}</Tag>}
+                            {(activePlaybook.tags || []).map((tag) => (
+                              <Tag key={tag}>{tag}</Tag>
+                            ))}
+                            {phaseCounts.map(([phase, count]) => (
+                              <Tag key={phase} color={STEP_PHASE_META[phase as keyof typeof STEP_PHASE_META]?.color || 'default'}>
+                                {STEP_PHASE_META[phase as keyof typeof STEP_PHASE_META]?.label || phase}: {count}
+                              </Tag>
+                            ))}
+                          </div>
+                          <Text type="secondary">{activePlaybook.description || '当前 Playbook 还没有补充描述。'}</Text>
+                        </Space>
+                      ) : (
+                        <Alert type="warning" showIcon message="当前没有可用 Playbook" />
+                      )}
+
+                      <Alert
+                        type="info"
+                        showIcon
+                        message="运行方式"
+                        description="业务脚本会先执行 before_collection，再执行远程采集，最后执行 after_collection。日志分析与报告归纳在全部动作结束后统一生成。"
+                      />
+
+                      <Space wrap>
+                        <Button type="link" onClick={() => setActiveWorkbenchView('config')}>
+                          进入 Playbook 与策略
+                        </Button>
+                        <Tag color={matches.length > 0 ? 'processing' : 'default'}>
+                          可参考案例 {matches.length}
+                        </Tag>
+                      </Space>
+                    </Space>
+                  </Card>
+
+                  <Card
+                    title="3. 关键证据"
+                    extra={
+                      <Space wrap>
+                        <Button size="small" onClick={() => setLogsDrawerOpen(true)} disabled={!selectedSessionId}>
+                          查看原始日志
+                        </Button>
+                        <Button size="small" onClick={() => setEvidenceDrawerOpen(true)}>
+                          打开证据篮
+                        </Button>
+                      </Space>
+                    }
+                  >
+                    <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                      <Card
+                        size="small"
+                        title="首个异常"
+                        extra={firstAnomaly ? <Tag color={severityColorMap[firstAnomaly.severity] || 'default'}>{firstAnomaly.severity}</Tag> : null}
+                      >
+                        {!firstAnomaly ? (
+                          <Alert
+                            type="info"
+                            showIcon
+                            message="还没有明确的首个异常"
+                            description="执行一次编排或等待会话日志出现 warning / error / 非零退出码后，这里会自动收敛最先出现的高风险异常。"
+                          />
+                        ) : (
+                          <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                            <Text strong>{firstAnomaly.title}</Text>
+                            <Text type="secondary">{firstAnomaly.summary}</Text>
+                            {firstAnomaly.command && <Text code>{firstAnomaly.command}</Text>}
+                            <ResizableOutput
+                              content={firstAnomaly.evidence}
+                              isDark={isDark}
+                              minHeight={72}
+                              maxHeight={220}
+                              onTextSelect={(text) => locateSourceFromParts({
+                                title: `${firstAnomaly.title} - 手动选词`,
+                                summary: firstAnomaly.summary,
+                                sourceType: `${firstAnomaly.sourceType}_selection`,
+                                text,
+                                command: firstAnomaly.command,
+                              })}
+                            />
+                            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                              {firstAnomaly.tags.map((tag) => (
+                                <Tag key={tag}>{tag}</Tag>
+                              ))}
+                            </div>
+                            <Space wrap>
+                              {hasCLookupText(firstAnomaly.lookupText) && (
                                 <Button
-                                  key="source"
-                                  type="link"
                                   icon={<CodeOutlined />}
+                                  loading={locatingSource}
                                   onClick={() => locateSourceFromParts({
-                                    title: `${item.title} - 证据簇`,
-                                    summary: cluster.keepReasons.join('；') || item.reason,
-                                    sourceType: item.source,
-                                    text: item.lookupText,
-                                    parts: [item.title, item.reason, item.excerpt],
-                                    command: item.command,
+                                    title: firstAnomaly.title,
+                                    summary: firstAnomaly.summary,
+                                    sourceType: firstAnomaly.sourceType,
+                                    text: firstAnomaly.lookupText,
+                                    parts: [firstAnomaly.title, firstAnomaly.summary, firstAnomaly.evidence],
+                                    command: firstAnomaly.command,
                                   })}
                                 >
                                   看源码
-                                </Button>,
-                              ]
-                            : []),
-                          <Button
-                            key="lock"
-                            type="link"
-                            icon={<PushpinOutlined />}
-                            onClick={() => lockEvidence({
-                              sourceType: item.source === 'finding'
-                                ? 'finding'
-                                : item.source === 'business_action'
-                                  ? 'business_action'
-                                  : item.source === 'collection_step'
-                                    ? 'collection_step'
-                                    : 'session_log',
-                              sourceId: item.id,
-                              title: `${item.title} - 证据簇`,
-                              summary: cluster.keepReasons.join('；') || item.reason,
-                              content: item.excerpt,
-                              lookupText: item.lookupText,
-                              command: item.command,
-                              sessionLabel: detailRun?.sessionLabel,
-                              tags: cluster.tags,
-                            })}
-                          >
-                            锁定
-                          </Button>,
-                          <Button
-                            key="noise"
-                            type="link"
-                            onClick={() => addFingerprintNoiseRule(cluster)}
-                          >
-                            标记噪音
-                          </Button>,
-                        ]}
-                      >
-                        <List.Item.Meta
-                          title={
-                            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                              <Text strong>{item.title}</Text>
-                              <Tag color={severityColorMap[cluster.severity] || 'default'}>{cluster.severity}</Tag>
-                              <Tag>{cluster.sourceTypes.join(' / ')}</Tag>
-                              <Tag color="processing">保留分 {cluster.score}</Tag>
-                              {cluster.baselineStatus === 'new' && <Tag color="success">基线新增</Tag>}
-                              {cluster.baselineStatus === 'known' && <Tag color="default">历史常见</Tag>}
-                              {cluster.count > 1 && <Tag color="default">簇内 {cluster.count} 条</Tag>}
-                              {cluster.firstTs && <Text type="secondary">{formatTs(cluster.firstTs)}</Text>}
-                              {cluster.lastTs && cluster.lastTs !== cluster.firstTs && <Text type="secondary">~ {formatTs(cluster.lastTs)}</Text>}
-                            </div>
-                          }
-                          description={
-                            <Space direction="vertical" size={6} style={{ width: '100%' }}>
-                              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                                {cluster.keepReasons.map((reason) => (
-                                  <Tag key={reason} color="blue">{reason}</Tag>
-                                ))}
-                              </div>
-                              <Text type="secondary">{item.reason}</Text>
-                              {item.command && <Text code>{item.command}</Text>}
-                              {cluster.count > 1 && (
-                                <Text type="secondary">
-                                  已折叠同类噪音 {cluster.count - 1} 条，只保留这一条代表样本。
-                                </Text>
+                                </Button>
                               )}
-                              <ResizableOutput
-                                content={item.excerpt}
-                                isDark={isDark}
-                                minHeight={56}
-                                maxHeight={160}
-                                onTextSelect={(text) => locateSourceFromParts({
-                                  title: `${item.title} - 手动选词`,
-                                  summary: cluster.keepReasons.join('；') || item.reason,
-                                  sourceType: `${item.source}_selection`,
-                                  text,
-                                  command: item.command,
+                              <Button
+                                icon={<PushpinOutlined />}
+                                onClick={() => lockEvidence({
+                                  sourceType: 'first_anomaly',
+                                  sourceId: firstAnomaly.sourceId,
+                                  title: firstAnomaly.title,
+                                  summary: firstAnomaly.summary,
+                                  content: firstAnomaly.evidence,
+                                  lookupText: firstAnomaly.lookupText,
+                                  command: firstAnomaly.command,
+                                  sessionLabel: firstAnomaly.sessionLabel,
+                                  tags: firstAnomaly.tags,
                                 })}
+                              >
+                                锁定首个异常
+                              </Button>
+                              {firstAnomaly.command && (
+                                <Button
+                                  icon={<SaveOutlined />}
+                                  onClick={() => saveCommandAsTemplate(
+                                    `${firstAnomaly.title} - 现场命令`,
+                                    firstAnomaly.command || '',
+                                    firstAnomaly.summary,
+                                    '诊断/异常定位'
+                                  )}
+                                >
+                                  保存命令模板
+                                </Button>
+                              )}
+                            </Space>
+                          </Space>
+                        )}
+                      </Card>
+
+                      <Card
+                        size="small"
+                        title="证据簇"
+                        extra={
+                          <Space size={8} wrap>
+                            <Tag color={effectiveErrorNoiseView.visibleClusters.length > 0 ? 'warning' : 'default'}>
+                              保留 {effectiveErrorNoiseView.visibleClusters.length} 簇
+                            </Tag>
+                            {effectiveErrorNoiseView.foldedClusters.length > 0 && (
+                              <Tag color="default">
+                                折叠 {effectiveErrorNoiseView.foldedClusters.length} 簇 / {effectiveErrorNoiseView.foldedItems} 条
+                              </Tag>
+                            )}
+                          </Space>
+                        }
+                      >
+                        {effectiveErrorNoiseView.totalItems === 0 ? (
+                          <Alert
+                            type="info"
+                            showIcon
+                            message="还没有提纯出关键日志"
+                            description="补充定位上下文里的观察窗口和关键日志词，或执行一次编排后，这里会优先给出真正影响定位的错误日志片段。"
+                          />
+                        ) : (
+                          <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                            <Alert
+                              type="info"
+                              showIcon
+                              message={`从 ${effectiveErrorNoiseView.totalItems} 条候选日志里收敛出 ${effectiveErrorNoiseView.totalClusters} 个证据簇`}
+                              description="默认只保留分值更高、靠近首个异常、能复现或能继续追代码的簇，其余噪音会折叠到下面。"
+                            />
+                            <Alert
+                              type={baselineReferenceSummary.runs.length > 0 ? 'success' : 'warning'}
+                              showIcon
+                              message={
+                                baselineReferenceSummary.runs.length > 0
+                                  ? `已加载 ${baselineReferenceSummary.runs.length} 个稳定基线 Run`
+                                  : '还没有可用的稳定基线 Run'
+                              }
+                              description={
+                                baselineReferenceSummary.runs.length > 0
+                                  ? `当前簇里 ${effectiveErrorNoiseSummary.newCount} 个是相对基线新增，${effectiveErrorNoiseSummary.knownCount} 个在历史稳定 Run 中也出现过，${effectiveErrorNoiseSummary.suppressedCount} 个命中用户噪音规则。`
+                                  : '后续有更多 completed 状态的历史 Run 时，这里会自动比较“当前新增”和“历史常见”信号。'
+                              }
+                            />
+                            <Space.Compact style={{ width: '100%' }}>
+                              <Input
+                                value={noiseKeywordDraft}
+                                onChange={(event) => setNoiseKeywordDraft(event.target.value)}
+                                placeholder="输入噪音关键词，例如 heartbeat / retrying / health check"
+                                onPressEnter={() => addKeywordNoiseRule()}
                               />
-                              <div>
-                                {cluster.tags.map((tag) => (
-                                  <Tag key={tag}>{tag}</Tag>
+                              <Button icon={<SearchOutlined />} onClick={addKeywordNoiseRule}>
+                                新增关键词规则
+                              </Button>
+                            </Space.Compact>
+                            {noiseRules.length > 0 && (
+                              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                {noiseRules.map((rule) => (
+                                  <Tag
+                                    key={rule.id}
+                                    closable
+                                    color={rule.type === 'fingerprint' ? 'purple' : 'default'}
+                                    onClose={(event) => {
+                                      event.preventDefault();
+                                      removeNoiseRule(rule.id);
+                                    }}
+                                  >
+                                    {rule.type === 'fingerprint' ? '簇规则' : '关键词'}: {rule.reason || rule.value}
+                                  </Tag>
                                 ))}
                               </div>
-                            </Space>
-                          }
-                        />
-                      </List.Item>
-                    );
-                  }}
-                />
+                            )}
 
-                {effectiveErrorNoiseView.foldedClusters.length > 0 && (
-                  <Collapse
-                    size="small"
-                    items={[
-                      {
-                        key: 'folded-noise',
-                        label: `已折叠的干扰簇 (${effectiveErrorNoiseView.foldedClusters.length} 簇 / ${effectiveErrorNoiseView.foldedItems} 条)`,
-                        children: (
+                            <List
+                              dataSource={effectiveErrorNoiseView.visibleClusters}
+                              renderItem={(cluster) => {
+                                const item = cluster.representative;
+                                const canLocate = hasCLookupText(item.lookupText);
+                                return (
+                                  <List.Item
+                                    actions={[
+                                      ...(canLocate
+                                        ? [
+                                            <Button
+                                              key="source"
+                                              type="link"
+                                              icon={<CodeOutlined />}
+                                              onClick={() => locateSourceFromParts({
+                                                title: `${item.title} - 证据簇`,
+                                                summary: cluster.keepReasons.join('；') || item.reason,
+                                                sourceType: item.source,
+                                                text: item.lookupText,
+                                                parts: [item.title, item.reason, item.excerpt],
+                                                command: item.command,
+                                              })}
+                                            >
+                                              看源码
+                                            </Button>,
+                                          ]
+                                        : []),
+                                      <Button
+                                        key="lock"
+                                        type="link"
+                                        icon={<PushpinOutlined />}
+                                        onClick={() => lockEvidence({
+                                          sourceType: item.source === 'finding'
+                                            ? 'finding'
+                                            : item.source === 'business_action'
+                                              ? 'business_action'
+                                              : item.source === 'collection_step'
+                                                ? 'collection_step'
+                                                : 'session_log',
+                                          sourceId: item.id,
+                                          title: `${item.title} - 证据簇`,
+                                          summary: cluster.keepReasons.join('；') || item.reason,
+                                          content: item.excerpt,
+                                          lookupText: item.lookupText,
+                                          command: item.command,
+                                          sessionLabel: detailRun?.sessionLabel,
+                                          tags: cluster.tags,
+                                        })}
+                                      >
+                                        锁定
+                                      </Button>,
+                                      <Button key="noise" type="link" onClick={() => addFingerprintNoiseRule(cluster)}>
+                                        标记噪音
+                                      </Button>,
+                                    ]}
+                                  >
+                                    <List.Item.Meta
+                                      title={
+                                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                                          <Text strong>{item.title}</Text>
+                                          <Tag color={severityColorMap[cluster.severity] || 'default'}>{cluster.severity}</Tag>
+                                          <Tag>{cluster.sourceTypes.join(' / ')}</Tag>
+                                          <Tag color="processing">保留分 {cluster.score}</Tag>
+                                          {cluster.baselineStatus === 'new' && <Tag color="success">基线新增</Tag>}
+                                          {cluster.baselineStatus === 'known' && <Tag color="default">历史常见</Tag>}
+                                          {cluster.count > 1 && <Tag color="default">簇内 {cluster.count} 条</Tag>}
+                                        </div>
+                                      }
+                                      description={
+                                        <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                                          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                            {cluster.keepReasons.map((reason) => (
+                                              <Tag key={reason} color="blue">{reason}</Tag>
+                                            ))}
+                                          </div>
+                                          <Text type="secondary">{item.reason}</Text>
+                                          {item.command && <Text code>{item.command}</Text>}
+                                          <ResizableOutput
+                                            content={item.excerpt}
+                                            isDark={isDark}
+                                            minHeight={56}
+                                            maxHeight={160}
+                                            onTextSelect={(text) => locateSourceFromParts({
+                                              title: `${item.title} - 手动选词`,
+                                              summary: cluster.keepReasons.join('；') || item.reason,
+                                              sourceType: `${item.source}_selection`,
+                                              text,
+                                              command: item.command,
+                                            })}
+                                          />
+                                        </Space>
+                                      }
+                                    />
+                                  </List.Item>
+                                );
+                              }}
+                            />
+
+                            {effectiveErrorNoiseView.foldedClusters.length > 0 && (
+                              <Collapse
+                                size="small"
+                                items={[
+                                  {
+                                    key: 'folded-noise',
+                                    label: `已折叠的干扰簇 (${effectiveErrorNoiseView.foldedClusters.length} 簇 / ${effectiveErrorNoiseView.foldedItems} 条)`,
+                                    children: (
+                                      <List
+                                        size="small"
+                                        dataSource={effectiveErrorNoiseView.foldedClusters}
+                                        renderItem={(cluster) => (
+                                          <List.Item>
+                                            <List.Item.Meta
+                                              title={
+                                                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                                                  <Text>{cluster.representative.title}</Text>
+                                                  <Tag>{cluster.sourceTypes.join(' / ')}</Tag>
+                                                  <Tag color="default">簇内 {cluster.count} 条</Tag>
+                                                  <Tag color="default">分值 {cluster.score}</Tag>
+                                                </div>
+                                              }
+                                              description={
+                                                <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                                                  <Text type="secondary">
+                                                    {cluster.keepReasons.length > 0
+                                                      ? `折叠原因：相对保留簇优先级更低。命中因子：${cluster.keepReasons.join('；')}`
+                                                      : '折叠原因：未命中足够多的关键字、异常窗口或源码线索。'}
+                                                  </Text>
+                                                  <ResizableOutput
+                                                    content={cluster.representative.excerpt}
+                                                    isDark={isDark}
+                                                    minHeight={48}
+                                                    maxHeight={120}
+                                                  />
+                                                </Space>
+                                              }
+                                            />
+                                          </List.Item>
+                                        )}
+                                      />
+                                    ),
+                                  },
+                                ]}
+                              />
+                            )}
+                          </Space>
+                        )}
+                      </Card>
+
+                      <Card
+                        size="small"
+                        title="关键时序"
+                        extra={<Tag color={executionTimeline.length > 0 ? 'processing' : 'default'}>{executionTimeline.length} 个事件</Tag>}
+                      >
+                        {executionTimeline.length === 0 ? (
+                          <Alert
+                            type="info"
+                            showIcon
+                            message="执行后这里会生成统一时序"
+                            description="会把业务动作、采集步骤和关键会话日志按时间统一展开，帮助用户理解异常是在哪个动作之后、哪一步之前出现的。"
+                          />
+                        ) : (
                           <List
                             size="small"
-                            dataSource={effectiveErrorNoiseView.foldedClusters}
-                            renderItem={(cluster) => (
+                            dataSource={executionTimeline}
+                            renderItem={(item) => (
                               <List.Item>
                                 <List.Item.Meta
                                   title={
                                     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                                      <Text>{cluster.representative.title}</Text>
-                                      <Tag>{cluster.sourceTypes.join(' / ')}</Tag>
-                                      <Tag color="default">簇内 {cluster.count} 条</Tag>
-                                      <Tag color="default">分值 {cluster.score}</Tag>
-                                      {cluster.matchedNoiseRules.length > 0 && <Tag color="purple">命中噪音规则</Tag>}
-                                      {cluster.baselineStatus === 'known' && <Tag color="default">历史常见</Tag>}
+                                      <Text strong>{item.title}</Text>
+                                      <Tag color={severityColorMap[item.severity] || 'default'}>{item.severity}</Tag>
+                                      <Tag>{item.source}</Tag>
+                                      <Text type="secondary">{formatTs(item.ts)}</Text>
+                                      {typeof item.durationMs === 'number' && item.durationMs > 0 && <Tag>{item.durationMs}ms</Tag>}
                                     </div>
                                   }
                                   description={
                                     <Space direction="vertical" size={4} style={{ width: '100%' }}>
-                                      <Text type="secondary">
-                                        {cluster.keepReasons.length > 0
-                                          ? `折叠原因：相对保留簇优先级更低。命中因子：${cluster.keepReasons.join('；')}`
-                                          : '折叠原因：未命中足够多的关键字、异常窗口或源码线索。'}
-                                      </Text>
-                                      <Text type="secondary">{cluster.representative.reason}</Text>
-                                      <ResizableOutput
-                                        content={cluster.representative.excerpt}
-                                        isDark={isDark}
-                                        minHeight={48}
-                                        maxHeight={120}
-                                      />
+                                      <Text type="secondary">状态：{item.status}</Text>
+                                      <Text>{item.detail}</Text>
+                                      {item.command && <Text code>{item.command}</Text>}
                                     </Space>
                                   }
                                 />
                               </List.Item>
                             )}
                           />
-                        ),
-                      },
-                    ]}
-                  />
-                )}
-              </Space>
-            )}
-          </Card>
-
-          <Card
-            title="执行时序"
-            extra={<Tag color={executionTimeline.length > 0 ? 'processing' : 'default'}>{executionTimeline.length} 个事件</Tag>}
-          >
-            {executionTimeline.length === 0 ? (
-              <Alert
-                type="info"
-                showIcon
-                message="执行后这里会生成统一时序"
-                description="会把业务动作、采集步骤和关键会话日志按时间统一展开，帮助用户理解异常是在哪个动作之后、哪一步之前出现的。"
-              />
-            ) : (
-              <List
-                size="small"
-                dataSource={executionTimeline}
-                renderItem={(item) => (
-                  <List.Item>
-                    <List.Item.Meta
-                      title={
-                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                          <Text strong>{item.title}</Text>
-                          <Tag color={severityColorMap[item.severity] || 'default'}>{item.severity}</Tag>
-                          <Tag>{item.source}</Tag>
-                          <Text type="secondary">{formatTs(item.ts)}</Text>
-                          {typeof item.durationMs === 'number' && item.durationMs > 0 && <Tag>{item.durationMs}ms</Tag>}
-                        </div>
-                      }
-                      description={
-                        <Space direction="vertical" size={4} style={{ width: '100%' }}>
-                          <Text type="secondary">状态：{item.status}</Text>
-                          <Text>{item.detail}</Text>
-                          {item.command && <Text code>{item.command}</Text>}
-                        </Space>
-                      }
-                    />
-                  </List.Item>
-                )}
-              />
-            )}
-          </Card>
-
-          <Card
-            title="证据锁定面板"
-            extra={<Tag color={lockedEvidence.length > 0 ? 'processing' : 'default'}>{lockedEvidence.length} 条</Tag>}
-          >
-            <Space direction="vertical" size={12} style={{ width: '100%' }}>
-              <Space wrap>
-                <Button icon={<CopyOutlined />} disabled={lockedEvidence.length === 0} onClick={() => void copyEvidencePanel()}>
-                  复制 Markdown
-                </Button>
-                <Popconfirm title="清空所有锁定证据？" onConfirm={() => clearEvidence()}>
-                  <Button danger disabled={lockedEvidence.length === 0}>
-                    清空证据
-                  </Button>
-                </Popconfirm>
-              </Space>
-              {lockedEvidence.length === 0 ? (
-                <Alert
-                  type="info"
-                  showIcon
-                  message="还没有锁定证据"
-                  description="可以从会话日志、分析 Finding、采集输出和首个异常卡片中，把关键现场固定到这里，后续直接导出给人或 Agent。"
-                />
-              ) : (
-                <List
-                  dataSource={lockedEvidence}
-                  renderItem={(item) => {
-                    const canLocate = hasCLookupText(item.lookupText);
-                    return (
-                      <List.Item
-                        actions={[
-                          ...(canLocate
-                            ? [
-                                <Button
-                                  key="source"
-                                  type="link"
-                                  icon={<CodeOutlined />}
-                                  onClick={() => locateSourceFromParts({
-                                    title: item.title,
-                                    summary: item.summary,
-                                    sourceType: item.sourceType,
-                                    text: item.lookupText,
-                                    parts: [item.title, item.summary, item.content],
-                                    command: item.command,
-                                  })}
-                                >
-                                  看源码
-                                </Button>,
-                              ]
-                            : []),
-                          <Button key="remove" type="link" danger onClick={() => removeEvidence(item.id)}>
-                            删除
-                          </Button>,
-                        ]}
-                      >
-                        <List.Item.Meta
-                          title={
-                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                              <Text strong>{item.title}</Text>
-                              <Tag>{item.sourceType}</Tag>
-                              {item.sessionLabel && <Tag color="processing">{item.sessionLabel}</Tag>}
-                            </div>
-                          }
-                          description={
-                            <Space direction="vertical" size={6} style={{ width: '100%' }}>
-                              <Text type="secondary">{item.summary}</Text>
-                              {item.command && <Text code>{item.command}</Text>}
-                              <ResizableOutput
-                                content={item.content}
-                                isDark={isDark}
-                                minHeight={56}
-                                maxHeight={180}
-                                onTextSelect={(text) => locateSourceFromParts({
-                                  title: `${item.title} - 手动选词`,
-                                  summary: item.summary,
-                                  sourceType: `${item.sourceType}_selection`,
-                                  text,
-                                  command: item.command,
-                                })}
-                              />
-                              <div>
-                                {item.tags.map((tag) => (
-                                  <Tag key={tag}>{tag}</Tag>
-                                ))}
-                              </div>
-                            </Space>
-                          }
-                        />
-                      </List.Item>
-                    );
-                  }}
-                />
-              )}
-            </Space>
-          </Card>
-        </Space>
-      </div>
-
-      <div style={{ marginTop: 16 }}>
-        <Card
-          title="Agent 会话监控"
-          extra={
-            <Space>
-              <Tag color={selectedSessionId ? 'processing' : 'default'}>{selectedSessionId || '未选择会话'}</Tag>
-              {selectedSessionId && (
-                <>
-                  <Tag color={filteredSessionLogs.length > 0 ? 'blue' : 'default'}>
-                    展示 {filteredSessionLogs.length}
-                  </Tag>
-                  {suppressedSessionLogCount > 0 && (
-                    <Tag color="gold">忽略 {suppressedSessionLogCount}</Tag>
-                  )}
-                </>
-              )}
-              <Button
-                icon={<ReloadOutlined />}
-                size="small"
-                disabled={!selectedSessionId}
-                onClick={() => selectedSessionId && void fetchSessionLogs(selectedSessionId, true)}
-              >
-                刷新日志
-              </Button>
-            </Space>
-          }
-        >
-          {!selectedSessionId ? (
-            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="请先选择目标 SSH 会话" />
-          ) : loadingSessionLogs && sessionLogs.length === 0 ? (
-            <div style={{ textAlign: 'center', padding: '20px 0' }}>
-              <Spin />
-            </div>
-          ) : filteredSessionLogs.length === 0 ? (
-            <Empty
-              image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description={sessionLogs.length > 0 ? '日志已被默认 INFO 降噪规则过滤' : '当前会话暂无日志'}
-            />
-          ) : (
-            <List
-              size="small"
-              dataSource={[...filteredSessionLogs].reverse()}
-              renderItem={(item) => {
-                const filteredStdout = filterNoiseText(item.stdout || '', analyzerNoiseKeywords).text;
-                const filteredStderr = filterNoiseText(item.stderr || '', analyzerNoiseKeywords).text;
-                const filteredEvidence = buildSessionLogEvidence(item, analyzerNoiseKeywords);
-                const lookupText = buildLookupText([item.type, item.message, filteredStdout, filteredStderr]);
-                const canLocate = hasCLookupText(lookupText);
-                return (
-                  <List.Item
-                    actions={[
-                      ...(canLocate
-                        ? [
-                            <Button
-                              key="source"
-                              type="link"
-                              icon={<CodeOutlined />}
-                              onClick={() => locateSourceFromParts({
-                                title: `会话日志: ${item.type}`,
-                                summary: item.message || `exit=${item.exitCode ?? '-'} / duration=${item.durationMs ?? '-'}ms`,
-                                sourceType: 'session_log',
-                                text: lookupText,
-                                parts: [item.type, item.message, filteredStdout, filteredStderr],
-                                command: item.cmd,
-                              })}
-                            >
-                              看源码
-                            </Button>,
-                          ]
-                        : []),
-                      <Button
-                        key="lock"
-                        type="link"
-                        icon={<PushpinOutlined />}
-                        onClick={() => lockEvidence({
-                          sourceType: 'session_log',
-                          sourceId: item.id,
-                          title: `会话日志: ${item.type}`,
-                          summary: item.message || `exit=${item.exitCode ?? '-'} / duration=${item.durationMs ?? '-'}ms`,
-                          content: filteredEvidence,
-                          lookupText,
-                          command: item.cmd,
-                          sessionLabel: currentSession ? `${currentSession.username}@${currentSession.host}` : undefined,
-                          tags: collectEvidenceTags([item.message, filteredStdout, filteredStderr, item.cmd, item.type]),
-                        })}
-                      >
-                        锁定
-                      </Button>,
-                    ]}
-                  >
-                    <List.Item.Meta
-                      title={
-                        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                          <Text strong>{item.type}</Text>
-                          <Tag color={item.level === 'error' ? 'red' : item.level === 'warning' ? 'orange' : 'blue'}>{item.level || 'info'}</Tag>
-                          <Text type="secondary">{formatTs(item.ts)}</Text>
-                          {typeof item.exitCode === 'number' && <Tag color={item.exitCode === 0 ? 'green' : 'red'}>exit {item.exitCode}</Tag>}
-                          {typeof item.durationMs === 'number' && <Tag>{item.durationMs}ms</Tag>}
-                          {item.mode && <Tag>{item.mode}</Tag>}
-                        </div>
-                      }
-                      description={
-                        <Space direction="vertical" size={6} style={{ width: '100%' }}>
-                        {item.cmd && <Text code>{item.cmd}</Text>}
-                        {item.message && <Text>{item.message}</Text>}
-                        {filteredStdout && (
-                          <div>
-                            <Text strong>stdout</Text>
-                            <ResizableOutput
-                              content={filteredStdout}
-                              isDark={isDark}
-                              minHeight={56}
-                              maxHeight={180}
-                              onTextSelect={(text) => locateSourceFromParts({
-                                title: `会话日志 stdout: ${item.type}`,
-                                summary: item.message || '手动选取 stdout 中的线索',
-                                sourceType: 'session_log_selection',
-                                text,
-                                command: item.cmd,
-                              })}
-                            />
-                          </div>
                         )}
-                        {filteredStderr && (
-                          <div>
-                            <Text strong>stderr</Text>
-                            <ResizableOutput
-                              content={filteredStderr}
-                              isDark={isDark}
-                              minHeight={56}
-                              maxHeight={180}
-                              onTextSelect={(text) => locateSourceFromParts({
-                                title: `会话日志 stderr: ${item.type}`,
-                                summary: item.message || '手动选取 stderr 中的线索',
-                                sourceType: 'session_log_selection',
-                                text,
-                                command: item.cmd,
-                              })}
-                            />
-                          </div>
-                        )}
-                        </Space>
-                      }
-                    />
-                  </List.Item>
-                );
-              }}
-            />
-          )}
-        </Card>
-      </div>
+                      </Card>
 
-      <div style={{ marginTop: 16 }}>
-        <Card
-          title="命令白名单策略"
-          extra={
-            <Space wrap>
-              <Tag color="blue">{commandPolicy?.allowedBaseCommands?.length || 0} 条允许命令</Tag>
-              <Tag color="green">服务层实时生效</Tag>
-            </Space>
-          }
-        >
-          <Space direction="vertical" size={16} style={{ width: '100%' }}>
-            <Alert
-              type="warning"
-              showIcon
-              message="固定安全规则仍然生效"
-              description="这里仅管理基础命令白名单。危险模式拦截、只读限制和特殊命令约束仍由服务层强制执行，UI 不能关闭。"
-            />
-
-            {loadingPolicy ? (
-              <div style={{ textAlign: 'center', padding: '24px 0' }}>
-                <Spin />
-              </div>
-            ) : !commandPolicy ? (
-              <Alert type="error" showIcon message="未能加载命令策略" />
-            ) : (
-              <Space direction="vertical" size={16} style={{ width: '100%' }}>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
-                  <Card size="small">
-                    <Text type="secondary">当前允许命令</Text>
-                    <Title level={4} style={{ margin: '8px 0 0' }}>{commandPolicy.allowedBaseCommands.length}</Title>
-                  </Card>
-                  <Card size="small">
-                    <Text type="secondary">动态新增</Text>
-                    <Title level={4} style={{ margin: '8px 0 0' }}>{commandPolicy.customAddedCommands.length}</Title>
-                  </Card>
-                  <Card size="small">
-                    <Text type="secondary">移出默认</Text>
-                    <Title level={4} style={{ margin: '8px 0 0' }}>{commandPolicy.customRemovedCommands.length}</Title>
-                  </Card>
-                </div>
-
-                <div>
-                  <Text type="secondary">策略存储文件</Text>
-                  <div style={{ marginTop: 8 }}>
-                    <Text code>{commandPolicy.storeFile || 'server/data/command-policy.json'}</Text>
-                  </div>
-                </div>
-
-                <div>
-                  <Text type="secondary">快速新增允许命令</Text>
-                  <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
-                    <Input
-                      value={newAllowedCommand}
-                      onChange={(e) => setNewAllowedCommand(e.target.value)}
-                      placeholder="例如 kubectl"
-                      style={{ flex: 1, minWidth: 220 }}
-                      onPressEnter={() => void addAllowedCommand()}
-                    />
-                    <Button type="primary" icon={<PlusOutlined />} loading={savingPolicy} onClick={() => void addAllowedCommand()}>
-                      加入白名单
-                    </Button>
-                    <Button icon={<ReloadOutlined />} loading={loadingPolicy} onClick={() => void fetchCommandPolicy()}>
-                      刷新策略
-                    </Button>
-                    <Popconfirm title="恢复默认白名单？" onConfirm={() => void resetPolicyToDefault()}>
-                      <Button loading={savingPolicy}>恢复默认</Button>
-                    </Popconfirm>
-                  </div>
-                </div>
-
-                <div>
-                  <Text type="secondary">批量编辑基础命令白名单</Text>
-                  <Text type="secondary" style={{ display: 'block', marginTop: 4 }}>
-                    支持换行、空格或逗号分隔；保存后立即写入服务端运行策略。
-                  </Text>
-                  <TextArea
-                    value={policyEditorValue}
-                    onChange={(e) => setPolicyEditorValue(e.target.value)}
-                    autoSize={{ minRows: 6, maxRows: 12 }}
-                    style={{ marginTop: 8 }}
-                    placeholder="一行一个命令，例如&#10;curl&#10;journalctl&#10;kubectl"
-                  />
-                  <div style={{ marginTop: 8 }}>
-                    <Button type="primary" icon={<SaveOutlined />} loading={savingPolicy} onClick={() => void saveCommandPolicy()}>
-                      保存整套白名单
-                    </Button>
-                  </div>
-                </div>
-
-                <div>
-                  <Text type="secondary">当前允许命令</Text>
-                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
-                    {commandPolicy.allowedBaseCommands.map((command) => (
-                      <Tag
-                        key={command}
-                        closable
-                        onClose={(event) => {
-                          event.preventDefault();
-                          void removeAllowedCommand(command);
-                        }}
-                        color={commandPolicy.customAddedCommands.includes(command) ? 'green' : 'blue'}
-                        style={{ paddingInline: 10 }}
-                      >
-                        {command}
-                      </Tag>
-                    ))}
-                  </div>
-                </div>
-
-                {(commandPolicy.customAddedCommands.length > 0 || commandPolicy.customRemovedCommands.length > 0) && (
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 16 }}>
-                    <Card size="small" title={`动态新增 (${commandPolicy.customAddedCommands.length})`}>
-                      {commandPolicy.customAddedCommands.length === 0 ? (
-                        <Text type="secondary">当前没有额外放开的命令</Text>
-                      ) : (
-                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                          {commandPolicy.customAddedCommands.map((command) => (
-                            <Tag key={command} color="green">{command}</Tag>
-                          ))}
-                        </div>
-                      )}
-                    </Card>
-                    <Card size="small" title={`移出默认 (${commandPolicy.customRemovedCommands.length})`}>
-                      {commandPolicy.customRemovedCommands.length === 0 ? (
-                        <Text type="secondary">默认命令尚未被移除</Text>
-                      ) : (
-                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                          {commandPolicy.customRemovedCommands.map((command) => (
-                            <Tag key={command} color="orange">{command}</Tag>
-                          ))}
-                        </div>
-                      )}
-                    </Card>
-                  </div>
-                )}
-
-                <div>
-                  <Text type="secondary">固定安全规则（只读）</Text>
-                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 12 }}>
-                    {commandPolicy.blockedRules.map((rule) => (
-                      <Tag key={rule.id} color="red">
-                        {rule.id}: {rule.reason}
-                      </Tag>
-                    ))}
-                  </div>
-                </div>
-              </Space>
-            )}
-          </Space>
-        </Card>
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(360px, 1.1fr) minmax(360px, 0.9fr)', gap: 16, marginTop: 16, alignItems: 'start' }}>
-        <Card title="Playbook 设计" extra={<Tag color="processing">可持久化复用</Tag>}>
-          {!activePlaybook ? (
-            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无可编辑 Playbook" />
-          ) : (
-            <Collapse
-              defaultActiveKey={['collection', 'rules']}
-              items={[
-                {
-                  key: 'collection',
-                  label: `连接采集 Agent (${activePlaybook.collectionPlan.length})`,
-                  children: (
-                    <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                      {activePlaybook.collectionPlan.map((step) => (
-                        <Card
-                          key={step.id}
-                          size="small"
-                          title={
+                      <Card size="small" title="证据篮摘要" extra={<Tag color={lockedEvidence.length > 0 ? 'processing' : 'default'}>{lockedEvidence.length} 条</Tag>}>
+                        {lockedEvidence.length === 0 ? (
+                          <Alert type="info" showIcon message="还没有锁定证据" description="从首个异常、证据簇或原始日志中把关键现场固定到证据篮。" />
+                        ) : (
+                          <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                            <Text type="secondary">最近锁定</Text>
+                            {evidenceDrawerSummary.recentTitles.map((titleItem) => (
+                              <Tag key={titleItem} color="processing">{titleItem}</Tag>
+                            ))}
                             <Space wrap>
-                              <Text strong>{step.name}</Text>
-                              <Tag color={STEP_PHASE_META[step.phase].color}>{STEP_PHASE_META[step.phase].label}</Tag>
+                              <Button icon={<PushpinOutlined />} onClick={() => setEvidenceDrawerOpen(true)}>
+                                打开证据篮
+                              </Button>
+                              <Button icon={<CopyOutlined />} onClick={() => void copyEvidencePanel()} disabled={lockedEvidence.length === 0}>
+                                复制 Markdown
+                              </Button>
                             </Space>
-                          }
-                          extra={<Button size="small" danger icon={<DeleteOutlined />} onClick={() => removeCollectionStep(step.id)} />}
-                        >
-                          <Space direction="vertical" size={8} style={{ width: '100%' }}>
-                            <Input value={step.name} onChange={(e) => updateCollectionStep(step.id, { name: e.target.value })} placeholder="步骤名" />
-                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-                              <Select
-                                value={step.phase}
-                                options={Object.entries(STEP_PHASE_META).map(([value, meta]) => ({
-                                  value,
-                                  label: meta.label,
-                                }))}
-                                onChange={(value) => updateCollectionStep(step.id, { phase: value as DiagnosticCollectionStep['phase'] })}
-                              />
-                              <Select
-                                value={step.continueOnFailure ? 'continue' : 'stop'}
-                                options={[
-                                  { label: '失败继续', value: 'continue' },
-                                  { label: '失败停下', value: 'stop' },
-                                ]}
-                                onChange={(value) => updateCollectionStep(step.id, { continueOnFailure: value === 'continue' })}
+                          </Space>
+                        )}
+                      </Card>
+                    </Space>
+                  </Card>
+
+                  <Card title="4. 诊断结论" extra={<Tag color={detailRun?.status ? statusColorMap[detailRun.status] || 'default' : 'default'}>{detailRun?.status || '未生成'}</Tag>}>
+                    <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                      {!detailRun?.report ? (
+                        <Alert
+                          type="info"
+                          showIcon
+                          message="执行编排后这里会出现结构化结论"
+                          description="当前会保留可参考案例摘要；完整历史和旧 run 详情请切到“历史复盘”。"
+                        />
+                      ) : (
+                        <>
+                          <Alert type="success" showIcon message={detailRun.report.summary} />
+                          <div>
+                            <Text strong>根因假设</Text>
+                            <Paragraph style={{ marginBottom: 0 }}>{detailRun.report.rootCauseHypothesis}</Paragraph>
+                          </div>
+                          {detailRun.report.recommendations?.length > 0 && (
+                            <div>
+                              <Text strong>建议动作</Text>
+                              <List
+                                size="small"
+                                dataSource={detailRun.report.recommendations}
+                                renderItem={(item) => <List.Item>{item}</List.Item>}
                               />
                             </div>
-                            <TextArea
-                              value={step.command}
-                              onChange={(e) => updateCollectionStep(step.id, { command: e.target.value })}
-                              autoSize={{ minRows: 2, maxRows: 4 }}
-                              placeholder="填写远程采集命令"
-                            />
-                            <Input
-                              value={step.expectedSignal}
-                              onChange={(e) => updateCollectionStep(step.id, { expectedSignal: e.target.value })}
-                              placeholder="预期抓到什么信号，例如 timeout / iostat util 飙升 / 恢复完成"
-                            />
-                            <Input
-                              value={String(step.timeoutMs)}
-                              onChange={(e) => updateCollectionStep(step.id, { timeoutMs: Number(e.target.value || 0) })}
-                              placeholder="超时毫秒"
-                            />
-                          </Space>
-                        </Card>
-                      ))}
-                      <Button icon={<PlusOutlined />} onClick={addCollectionStep}>添加采集步骤</Button>
-                    </Space>
-                  ),
-                },
-                {
-                  key: 'rules',
-                  label: `日志分析 Agent (${activePlaybook.analysisRules.length})`,
-                  children: (
-                    <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                      {activePlaybook.analysisRules.map((rule) => (
-                        <Card
-                          key={rule.id}
-                          size="small"
-                          title={rule.name}
-                          extra={<Button size="small" danger icon={<DeleteOutlined />} onClick={() => removeAnalysisRule(rule.id)} />}
-                        >
-                          <Space direction="vertical" size={8} style={{ width: '100%' }}>
-                            <Input value={rule.name} onChange={(e) => updateAnalysisRule(rule.id, { name: e.target.value })} placeholder="规则名称" />
-                            <Input value={rule.pattern} onChange={(e) => updateAnalysisRule(rule.id, { pattern: e.target.value })} placeholder="正则或关键词" />
-                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-                              <Select
-                                value={rule.source}
-                                options={[
-                                  { label: 'stdout + stderr', value: 'all' },
-                                  { label: '仅 stdout', value: 'stdout' },
-                                  { label: '仅 stderr', value: 'stderr' },
-                                ]}
-                                onChange={(value) => updateAnalysisRule(rule.id, { source: value as DiagnosticAnalysisRule['source'] })}
-                              />
-                              <Select
-                                value={rule.severity}
-                                options={[
-                                  { label: 'Info', value: 'info' },
-                                  { label: 'Warning', value: 'warning' },
-                                  { label: 'Critical', value: 'critical' },
-                                ]}
-                                onChange={(value) => updateAnalysisRule(rule.id, { severity: value as DiagnosticAnalysisRule['severity'] })}
+                          )}
+                          {detailRun.report.nextActions?.length > 0 && (
+                            <div>
+                              <Text strong>下一步</Text>
+                              <List
+                                size="small"
+                                dataSource={detailRun.report.nextActions}
+                                renderItem={(item) => <List.Item>{item}</List.Item>}
                               />
                             </div>
-                            <Input value={rule.summary} onChange={(e) => updateAnalysisRule(rule.id, { summary: e.target.value })} placeholder="命中后的人类可读说明" />
-                          </Space>
-                        </Card>
-                      ))}
-                      <Button icon={<PlusOutlined />} onClick={addAnalysisRule}>添加分析规则</Button>
+                          )}
+                        </>
+                      )}
+
+                      <Card size="small" title="可参考案例" extra={<Tag>{similarCaseReferences.length}</Tag>}>
+                        {similarCaseReferences.length === 0 ? (
+                          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前没有可参考案例" />
+                        ) : (
+                          <List
+                            size="small"
+                            dataSource={similarCaseReferences}
+                            renderItem={(item) => (
+                              <List.Item
+                                actions={[
+                                  <Button
+                                    key="open-history"
+                                    type="link"
+                                    onClick={() => {
+                                      void loadRun(item.runId);
+                                      setActiveWorkbenchView('history');
+                                    }}
+                                  >
+                                    在历史复盘中打开
+                                  </Button>,
+                                ]}
+                              >
+                                <List.Item.Meta
+                                  title={
+                                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                                      <Text strong>{item.title}</Text>
+                                      <Tag color="geekblue">相似度 {item.score}</Tag>
+                                    </div>
+                                  }
+                                  description={
+                                    <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                                      <Text type="secondary">{item.reportSummary || '暂无摘要'}</Text>
+                                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                        {item.matchedSignals?.slice(0, 6).map((signal) => (
+                                          <Tag key={signal}>{signal}</Tag>
+                                        ))}
+                                      </div>
+                                    </Space>
+                                  }
+                                />
+                              </List.Item>
+                            )}
+                          />
+                        )}
+                      </Card>
                     </Space>
-                  ),
-                },
-                {
-                  key: 'biz',
-                  label: `业务测试控制 (${activePlaybook.businessActions.length})`,
-                  children: (
-                    <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                  </Card>
+                </Space>
+              ),
+            },
+            {
+              key: 'config',
+              label: 'Playbook与策略',
+              children: (
+                <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                  <Card title="Playbook 与场景元信息" extra={<Tag color="processing">编辑专用</Tag>}>
+                    <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                      <div>
+                        <Text type="secondary">选择编排模板</Text>
+                        <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                          <Select
+                            style={{ flex: 1 }}
+                            value={activePlaybook?.id}
+                            options={safePlaybooks.map((playbook) => ({ label: playbook.name, value: playbook.id }))}
+                            onChange={(value) => setActivePlaybook(String(value))}
+                          />
+                          <Button icon={<PlusOutlined />} onClick={() => addPlaybook()}>
+                            新建
+                          </Button>
+                          <Popconfirm title="删除当前 Playbook？" onConfirm={() => activePlaybook && deletePlaybook(activePlaybook.id)}>
+                            <Button danger icon={<DeleteOutlined />} />
+                          </Popconfirm>
+                        </div>
+                      </div>
+
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12 }}>
+                        <div>
+                          <Text type="secondary">场景类型</Text>
+                          <Select
+                            style={{ width: '100%', marginTop: 8 }}
+                            value={activePlaybook?.scenarioType}
+                            options={Object.entries(SCENARIO_META).map(([value, meta]) => ({
+                              value,
+                              label: meta.label,
+                            }))}
+                            onChange={(value) => patchPlaybook({ scenarioType: value as DiagnosticScenarioType })}
+                          />
+                        </div>
+                        <div>
+                          <Text type="secondary">标签</Text>
+                          <Input
+                            value={formatTagInput(activePlaybook?.tags)}
+                            onChange={(e) => patchPlaybook({ tags: toTagList(e.target.value) })}
+                            placeholder="例如：timeout, io, journalctl"
+                            style={{ marginTop: 8 }}
+                          />
+                        </div>
+                      </div>
+
+                      {scenarioMeta && <Text type="secondary">{scenarioMeta.description}</Text>}
+
+                      <div>
+                        <Text type="secondary">Playbook 描述</Text>
+                        <Input
+                          value={activePlaybook?.description}
+                          onChange={(e) => patchPlaybook({ description: e.target.value })}
+                          placeholder="描述这套诊断编排适用于什么故障"
+                          style={{ marginTop: 8 }}
+                          suffix={<SaveOutlined />}
+                        />
+                      </div>
+
+                      <div>
+                        <Text type="secondary">目标</Text>
+                        <Input
+                          value={activePlaybook?.objective}
+                          onChange={(e) => patchPlaybook({ objective: e.target.value })}
+                          placeholder="例如：先锁定首个异常，再明确下一跳验证命令"
+                          style={{ marginTop: 8 }}
+                        />
+                      </div>
+
+                      <div>
+                        <Text type="secondary">成功判据</Text>
+                        <TextArea
+                          value={activePlaybook?.successCriteria}
+                          onChange={(e) => patchPlaybook({ successCriteria: e.target.value })}
+                          autoSize={{ minRows: 2, maxRows: 4 }}
+                          style={{ marginTop: 8 }}
+                          placeholder="例如：抓到 timeout 日志、确认端口/进程状态、回滚后业务恢复"
+                        />
+                      </div>
+                    </Space>
+                  </Card>
+
+                  <Card title="场景命令库" extra={scenarioMeta ? <Tag color={scenarioMeta.color}>{scenarioMeta.label}</Tag> : null}>
+                    <Space direction="vertical" size={14} style={{ width: '100%' }}>
+                      <Input
+                        value={librarySearch}
+                        onChange={(e) => setLibrarySearch(e.target.value)}
+                        placeholder="按 timeout / io / recovery / network 等关键字过滤建议命令"
+                        suffix={<SearchOutlined />}
+                      />
+                      {commandLibraryItems.length === 0 ? (
+                        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前场景下没有命中的建议命令" />
+                      ) : (
+                        <List
+                          dataSource={commandLibraryItems}
+                          renderItem={(item) => (
+                            <List.Item
+                              actions={[
+                                <Button key="playbook" type="link" onClick={() => addLibraryItemToPlaybook(item.id)}>
+                                  加入 Playbook
+                                </Button>,
+                                <Button key="builder" type="link" onClick={() => saveLibraryItemToCommandBuilder(item.id)}>
+                                  存到命令生成器
+                                </Button>,
+                              ]}
+                            >
+                              <List.Item.Meta
+                                title={
+                                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                                    <Text strong>{item.name}</Text>
+                                    <Tag color={STEP_PHASE_META[item.phase].color}>{STEP_PHASE_META[item.phase].label}</Tag>
+                                    <Tag color={item.riskLevel === 'mutation' ? 'orange' : 'green'}>
+                                      {item.riskLevel === 'mutation' ? '变更型命令' : '只读命令'}
+                                    </Tag>
+                                  </div>
+                                }
+                                description={
+                                  <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                                    <Text type="secondary">{item.description}</Text>
+                                    <Text code>{item.command}</Text>
+                                    <Text type="secondary">预期信号：{item.expectedSignal}</Text>
+                                  </Space>
+                                }
+                              />
+                            </List.Item>
+                          )}
+                        />
+                      )}
+                    </Space>
+                  </Card>
+
+                  <Card title="命令白名单策略" extra={<Tag color="green">服务层实时生效</Tag>}>
+                    <Space direction="vertical" size={16} style={{ width: '100%' }}>
                       <Alert
                         type="warning"
                         showIcon
-                        message="Python 业务脚本"
-                        description="参数支持 JSON 数组或空格分隔字符串；stdin 可传入 JSON 负载。脚本路径支持绝对路径、相对 server 目录路径，或仓库根目录相对路径。"
+                        message="固定安全规则仍然生效"
+                        description="这里仅管理基础命令白名单。危险模式拦截、只读限制和特殊命令约束仍由服务层强制执行，UI 不能关闭。"
                       />
-                      {activePlaybook.businessActions.map((action) => (
-                        <Card
-                          key={action.id}
-                          size="small"
-                          title={action.name}
-                          extra={<Button size="small" danger icon={<DeleteOutlined />} onClick={() => removeBusinessAction(action.id)} />}
-                        >
-                          <Space direction="vertical" size={8} style={{ width: '100%' }}>
-                            <Input value={action.name} onChange={(e) => updateBusinessAction(action.id, { name: e.target.value })} placeholder="动作名称" />
-                            <Input value={action.scriptPath} onChange={(e) => updateBusinessAction(action.id, { scriptPath: e.target.value })} placeholder="Python 脚本路径" />
-                            <Input value={action.argsText} onChange={(e) => updateBusinessAction(action.id, { argsText: e.target.value })} placeholder='例如 ["--action","health-check"]' />
-                            <TextArea
-                              value={action.stdinPayload}
-                              onChange={(e) => updateBusinessAction(action.id, { stdinPayload: e.target.value })}
-                              autoSize={{ minRows: 2, maxRows: 4 }}
-                              placeholder="传给脚本 stdin 的内容，可为空"
-                            />
-                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
-                              <Select
-                                value={action.runMode}
-                                options={[
-                                  { label: '采集前执行', value: 'before_collection' },
-                                  { label: '采集后执行', value: 'after_collection' },
-                                ]}
-                                onChange={(value) => updateBusinessAction(action.id, { runMode: value as DiagnosticBusinessAction['runMode'] })}
-                              />
+
+                      {loadingPolicy ? (
+                        <div style={{ textAlign: 'center', padding: '24px 0' }}>
+                          <Spin />
+                        </div>
+                      ) : !commandPolicy ? (
+                        <Alert type="error" showIcon message="未能加载命令策略" />
+                      ) : (
+                        <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+                            <Card size="small">
+                              <Text type="secondary">当前允许命令</Text>
+                              <Title level={4} style={{ margin: '8px 0 0' }}>{commandPolicy.allowedBaseCommands.length}</Title>
+                            </Card>
+                            <Card size="small">
+                              <Text type="secondary">动态新增</Text>
+                              <Title level={4} style={{ margin: '8px 0 0' }}>{commandPolicy.customAddedCommands.length}</Title>
+                            </Card>
+                            <Card size="small">
+                              <Text type="secondary">移出默认</Text>
+                              <Title level={4} style={{ margin: '8px 0 0' }}>{commandPolicy.customRemovedCommands.length}</Title>
+                            </Card>
+                          </div>
+
+                          <div>
+                            <Text type="secondary">快速新增允许命令</Text>
+                            <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
                               <Input
-                                value={String(action.timeoutMs)}
-                                onChange={(e) => updateBusinessAction(action.id, { timeoutMs: Number(e.target.value || 0) })}
-                                placeholder="超时毫秒"
+                                value={newAllowedCommand}
+                                onChange={(e) => setNewAllowedCommand(e.target.value)}
+                                placeholder="例如 kubectl"
+                                style={{ flex: 1, minWidth: 220 }}
+                                onPressEnter={() => void addAllowedCommand()}
                               />
+                              <Button type="primary" icon={<PlusOutlined />} loading={savingPolicy} onClick={() => void addAllowedCommand()}>
+                                加入白名单
+                              </Button>
+                              <Button icon={<ReloadOutlined />} loading={loadingPolicy} onClick={() => void fetchCommandPolicy()}>
+                                刷新策略
+                              </Button>
+                              <Popconfirm title="恢复默认白名单？" onConfirm={() => void resetPolicyToDefault()}>
+                                <Button loading={savingPolicy}>恢复默认</Button>
+                              </Popconfirm>
                             </div>
-                          </Space>
-                        </Card>
-                      ))}
-                      <Button icon={<PlusOutlined />} onClick={addBusinessAction}>添加业务动作</Button>
-                    </Space>
-                  ),
-                },
-              ]}
-            />
-          )}
-        </Card>
+                          </div>
 
-        <Card title="运行结果与知识库" extra={<HistoryOutlined />}>
-          <Space direction="vertical" size={16} style={{ width: '100%' }}>
-            <div>
-              <Text strong>最近归档</Text>
-              <div style={{ marginTop: 12 }}>
-                {loadingRuns ? (
-                  <div style={{ textAlign: 'center', padding: '24px 0' }}>
-                    <Spin />
-                  </div>
-                ) : historyRuns.length === 0 ? (
-                  <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="知识库还没有历史 Run" />
-                ) : (
-                  <List
-                    size="small"
-                    dataSource={historyRuns}
-                    renderItem={(run) => (
-                      <List.Item
-                        actions={[
-                          <Button key="view" type="link" onClick={() => void loadRun(run.id)}>
-                            查看详情
-                          </Button>,
-                        ]}
-                      >
-                        <List.Item.Meta
-                          title={
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                              <Text strong>{run.title}</Text>
-                              <Tag color={statusColorMap[run.status] || 'default'}>{run.status}</Tag>
+                          <div>
+                            <Text type="secondary">批量编辑基础命令白名单</Text>
+                            <TextArea
+                              value={policyEditorValue}
+                              onChange={(e) => setPolicyEditorValue(e.target.value)}
+                              autoSize={{ minRows: 6, maxRows: 12 }}
+                              style={{ marginTop: 8 }}
+                              placeholder={'一行一个命令，例如\ncurl\njournalctl\nkubectl'}
+                            />
+                            <div style={{ marginTop: 8 }}>
+                              <Button type="primary" icon={<SaveOutlined />} loading={savingPolicy} onClick={() => void saveCommandPolicy()}>
+                                保存整套白名单
+                              </Button>
                             </div>
-                          }
-                          description={
-                            <Space direction="vertical" size={2}>
-                              <Text type="secondary">{run.summary || run.symptom}</Text>
-                              <Text type="secondary">{formatTs(run.startedAt)}</Text>
-                            </Space>
-                          }
-                        />
-                      </List.Item>
-                    )}
-                  />
-                )}
-              </div>
-            </div>
+                          </div>
 
-            {!detailRun ? (
-              <Alert type="info" showIcon message="执行一次编排或点开历史 Run 后，这里会展示结构化详情。" />
-            ) : (
-              <Space direction="vertical" size={16} style={{ width: '100%' }}>
-                <Card size="small" title={detailRun.title} extra={<Tag color={statusColorMap[detailRun.status] || 'default'}>{detailRun.status}</Tag>}>
-                  <Space direction="vertical" size={8} style={{ width: '100%' }}>
-                    {detailRun.scenarioType && (
-                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                        <Tag color={SCENARIO_META[detailRun.scenarioType]?.color || 'default'}>
-                          {SCENARIO_META[detailRun.scenarioType]?.label || detailRun.scenarioType}
-                        </Tag>
-                        {(detailRun.tags || []).map((tag) => (
-                          <Tag key={tag}>{tag}</Tag>
-                        ))}
-                      </div>
-                    )}
-                    <Text type="secondary">故障现象：{detailRun.symptom}</Text>
-                    {detailRun.objective && <Text type="secondary">目标：{detailRun.objective}</Text>}
-                    {detailRun.successCriteria && <Text type="secondary">成功判据：{detailRun.successCriteria}</Text>}
-                    {buildContextSummary(detailContextSnapshot) && (
-                      <Text type="secondary">定位上下文：{buildContextSummary(detailContextSnapshot)}</Text>
-                    )}
-                    <Text type="secondary">运行时间：{formatTs(detailRun.startedAt)} {detailRun.finishedAt ? `- ${formatTs(detailRun.finishedAt)}` : ''}</Text>
-                    <Text type="secondary">目标会话：{detailRun.sessionLabel || '未绑定 SSH 会话'}</Text>
-                  </Space>
-                </Card>
+                          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                            {commandPolicy.allowedBaseCommands.map((command) => (
+                              <Tag
+                                key={command}
+                                closable
+                                onClose={(event) => {
+                                  event.preventDefault();
+                                  void removeAllowedCommand(command);
+                                }}
+                                color={commandPolicy.customAddedCommands.includes(command) ? 'green' : 'blue'}
+                                style={{ paddingInline: 10 }}
+                              >
+                                {command}
+                              </Tag>
+                            ))}
+                          </div>
 
-                {detailRun.report && (
-                  <Card size="small" title="报告归纳 Agent">
-                    <Space direction="vertical" size={10} style={{ width: '100%' }}>
-                      <Alert type="success" showIcon message={detailRun.report.summary} />
-                      <div>
-                        <Text strong>根因假设</Text>
-                        <Paragraph style={{ marginBottom: 0 }}>{detailRun.report.rootCauseHypothesis}</Paragraph>
-                      </div>
-                      {detailRun.report.similarCaseHint && (
-                        <Text type="secondary">{detailRun.report.similarCaseHint}</Text>
-                      )}
-                      {detailRun.report.recommendations?.length > 0 && (
-                        <div>
-                          <Text strong>建议动作</Text>
-                          <List
-                            size="small"
-                            dataSource={detailRun.report.recommendations}
-                            renderItem={(item) => <List.Item>{item}</List.Item>}
-                          />
-                        </div>
-                      )}
-                      {detailRun.report.nextActions?.length > 0 && (
-                        <div>
-                          <Text strong>下一步</Text>
-                          <List
-                            size="small"
-                            dataSource={detailRun.report.nextActions}
-                            renderItem={(item) => <List.Item>{item}</List.Item>}
-                          />
-                        </div>
+                          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                            {commandPolicy.blockedRules.map((rule) => (
+                              <Tag key={rule.id} color="red">
+                                {rule.id}: {rule.reason}
+                              </Tag>
+                            ))}
+                          </div>
+                        </Space>
                       )}
                     </Space>
                   </Card>
-                )}
 
-                <Card size="small" title="日志分析 Agent Findings" extra={<Tag>{detailRun.findings?.length || 0}</Tag>}>
-                  {!detailRun.findings?.length ? (
-                    <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="本次未提取到明确 Finding" />
-                  ) : (
-                    <List
-                      dataSource={detailRun.findings || []}
-                      renderItem={(finding) => (
-                        <List.Item
-                          actions={[
-                            <Button
-                              key="lock"
-                              type="link"
-                              icon={<PushpinOutlined />}
-                              onClick={() => lockEvidence({
-                                sourceType: 'finding',
-                                sourceId: finding.id,
-                                title: finding.title,
-                                summary: finding.summary,
-                                content: finding.evidence || '',
-                                sessionLabel: detailRun.sessionLabel,
-                                tags: collectEvidenceTags([finding.title, finding.summary, finding.evidence]),
-                              })}
-                            >
-                              锁定证据
-                            </Button>,
-                          ]}
-                        >
-                          <List.Item.Meta
-                            title={
-                              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                                <Text strong>{finding.title}</Text>
-                                <Tag color={severityColorMap[finding.severity] || 'default'}>{finding.severity}</Tag>
-                                <Tag>{finding.sourceStepName}</Tag>
-                              </div>
-                            }
-                            description={
-                              <Space direction="vertical" size={6} style={{ width: '100%' }}>
-                                <Text>{finding.summary}</Text>
-                                <ResizableOutput content={finding.evidence || ''} isDark={isDark} minHeight={52} maxHeight={180} />
+                  <Card title="Playbook 设计" extra={<Tag color="processing">可持久化复用</Tag>}>
+                    {!activePlaybook ? (
+                      <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无可编辑 Playbook" />
+                    ) : (
+                      <Collapse
+                        defaultActiveKey={['collection', 'rules']}
+                        items={[
+                          {
+                            key: 'collection',
+                            label: `连接采集 Agent (${activePlaybook.collectionPlan.length})`,
+                            children: (
+                              <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                                {activePlaybook.collectionPlan.map((step) => (
+                                  <Card
+                                    key={step.id}
+                                    size="small"
+                                    title={
+                                      <Space wrap>
+                                        <Text strong>{step.name}</Text>
+                                        <Tag color={STEP_PHASE_META[step.phase].color}>{STEP_PHASE_META[step.phase].label}</Tag>
+                                      </Space>
+                                    }
+                                    extra={<Button size="small" danger icon={<DeleteOutlined />} onClick={() => removeCollectionStep(step.id)} />}
+                                  >
+                                    <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                                      <Input value={step.name} onChange={(e) => updateCollectionStep(step.id, { name: e.target.value })} placeholder="步骤名" />
+                                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                                        <Select
+                                          value={step.phase}
+                                          options={Object.entries(STEP_PHASE_META).map(([value, meta]) => ({
+                                            value,
+                                            label: meta.label,
+                                          }))}
+                                          onChange={(value) => updateCollectionStep(step.id, { phase: value as DiagnosticCollectionStep['phase'] })}
+                                        />
+                                        <Select
+                                          value={step.continueOnFailure ? 'continue' : 'stop'}
+                                          options={[
+                                            { label: '失败继续', value: 'continue' },
+                                            { label: '失败停下', value: 'stop' },
+                                          ]}
+                                          onChange={(value) => updateCollectionStep(step.id, { continueOnFailure: value === 'continue' })}
+                                        />
+                                      </div>
+                                      <TextArea
+                                        value={step.command}
+                                        onChange={(e) => updateCollectionStep(step.id, { command: e.target.value })}
+                                        autoSize={{ minRows: 2, maxRows: 4 }}
+                                        placeholder="填写远程采集命令"
+                                      />
+                                      <Input
+                                        value={step.expectedSignal}
+                                        onChange={(e) => updateCollectionStep(step.id, { expectedSignal: e.target.value })}
+                                        placeholder="预期抓到什么信号，例如 timeout / iostat util 飙升 / 恢复完成"
+                                      />
+                                      <Input
+                                        value={String(step.timeoutMs)}
+                                        onChange={(e) => updateCollectionStep(step.id, { timeoutMs: Number(e.target.value || 0) })}
+                                        placeholder="超时毫秒"
+                                      />
+                                    </Space>
+                                  </Card>
+                                ))}
+                                <Button icon={<PlusOutlined />} onClick={addCollectionStep}>添加采集步骤</Button>
                               </Space>
-                            }
-                          />
-                        </List.Item>
-                      )}
-                    />
-                  )}
-                </Card>
-
-                <Collapse
-                  defaultActiveKey={['collector']}
-                  items={[
-                    {
-                      key: 'collector',
-                      label: `连接采集结果 (${detailRun.collectionSteps?.length || 0})`,
-                      children: !detailRun.collectionSteps?.length ? (
-                        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有采集步骤结果" />
-                      ) : (
-                        <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                          {(detailRun.collectionSteps || []).map((step) => (
-                            <Card
-                              key={step.id}
-                              size="small"
+                            ),
+                          },
+                          {
+                            key: 'rules',
+                            label: `日志分析 Agent (${activePlaybook.analysisRules.length})`,
+                            children: (
+                              <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                                {activePlaybook.analysisRules.map((rule) => (
+                                  <Card
+                                    key={rule.id}
+                                    size="small"
+                                    title={rule.name}
+                                    extra={<Button size="small" danger icon={<DeleteOutlined />} onClick={() => removeAnalysisRule(rule.id)} />}
+                                  >
+                                    <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                                      <Input value={rule.name} onChange={(e) => updateAnalysisRule(rule.id, { name: e.target.value })} placeholder="规则名称" />
+                                      <Input value={rule.pattern} onChange={(e) => updateAnalysisRule(rule.id, { pattern: e.target.value })} placeholder="正则或关键词" />
+                                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                                        <Select
+                                          value={rule.source}
+                                          options={[
+                                            { label: 'stdout + stderr', value: 'all' },
+                                            { label: '仅 stdout', value: 'stdout' },
+                                            { label: '仅 stderr', value: 'stderr' },
+                                          ]}
+                                          onChange={(value) => updateAnalysisRule(rule.id, { source: value as DiagnosticAnalysisRule['source'] })}
+                                        />
+                                        <Select
+                                          value={rule.severity}
+                                          options={[
+                                            { label: 'Info', value: 'info' },
+                                            { label: 'Warning', value: 'warning' },
+                                            { label: 'Critical', value: 'critical' },
+                                          ]}
+                                          onChange={(value) => updateAnalysisRule(rule.id, { severity: value as DiagnosticAnalysisRule['severity'] })}
+                                        />
+                                      </div>
+                                      <Input value={rule.summary} onChange={(e) => updateAnalysisRule(rule.id, { summary: e.target.value })} placeholder="命中后的人类可读说明" />
+                                    </Space>
+                                  </Card>
+                                ))}
+                                <Button icon={<PlusOutlined />} onClick={addAnalysisRule}>添加分析规则</Button>
+                              </Space>
+                            ),
+                          },
+                          {
+                            key: 'biz',
+                            label: `业务测试控制 (${activePlaybook.businessActions.length})`,
+                            children: (
+                              <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                                <Alert
+                                  type="warning"
+                                  showIcon
+                                  message="Python 业务脚本"
+                                  description="参数支持 JSON 数组或空格分隔字符串；stdin 可传入 JSON 负载。脚本路径支持绝对路径、相对 server 目录路径，或仓库根目录相对路径。"
+                                />
+                                {activePlaybook.businessActions.map((action) => (
+                                  <Card
+                                    key={action.id}
+                                    size="small"
+                                    title={action.name}
+                                    extra={<Button size="small" danger icon={<DeleteOutlined />} onClick={() => removeBusinessAction(action.id)} />}
+                                  >
+                                    <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                                      <Input value={action.name} onChange={(e) => updateBusinessAction(action.id, { name: e.target.value })} placeholder="动作名称" />
+                                      <Input value={action.scriptPath} onChange={(e) => updateBusinessAction(action.id, { scriptPath: e.target.value })} placeholder="Python 脚本路径" />
+                                      <Input value={action.argsText} onChange={(e) => updateBusinessAction(action.id, { argsText: e.target.value })} placeholder='例如 ["--action","health-check"]' />
+                                      <TextArea
+                                        value={action.stdinPayload}
+                                        onChange={(e) => updateBusinessAction(action.id, { stdinPayload: e.target.value })}
+                                        autoSize={{ minRows: 2, maxRows: 4 }}
+                                        placeholder="传给脚本 stdin 的内容，可为空"
+                                      />
+                                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                                        <Select
+                                          value={action.runMode}
+                                          options={[
+                                            { label: '采集前执行', value: 'before_collection' },
+                                            { label: '采集后执行', value: 'after_collection' },
+                                          ]}
+                                          onChange={(value) => updateBusinessAction(action.id, { runMode: value as DiagnosticBusinessAction['runMode'] })}
+                                        />
+                                        <Input
+                                          value={String(action.timeoutMs)}
+                                          onChange={(e) => updateBusinessAction(action.id, { timeoutMs: Number(e.target.value || 0) })}
+                                          placeholder="超时毫秒"
+                                        />
+                                      </div>
+                                    </Space>
+                                  </Card>
+                                ))}
+                                <Button icon={<PlusOutlined />} onClick={addBusinessAction}>添加业务动作</Button>
+                              </Space>
+                            ),
+                          },
+                        ]}
+                      />
+                    )}
+                  </Card>
+                </Space>
+              ),
+            },
+            {
+              key: 'history',
+              label: '历史复盘',
+              children: (
+                <div style={{ display: 'grid', gridTemplateColumns: 'minmax(320px, 0.9fr) minmax(420px, 1.1fr)', gap: 16, alignItems: 'start' }}>
+                  <Card title="历史 Run" extra={<HistoryOutlined />}>
+                    {loadingRuns ? (
+                      <div style={{ textAlign: 'center', padding: '24px 0' }}>
+                        <Spin />
+                      </div>
+                    ) : historyRuns.length === 0 ? (
+                      <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="知识库还没有历史 Run" />
+                    ) : (
+                      <List
+                        size="small"
+                        dataSource={historyRuns}
+                        renderItem={(run) => (
+                          <List.Item
+                            actions={[
+                              <Button key="view" type="link" onClick={() => void loadRun(run.id)}>
+                                查看详情
+                              </Button>,
+                            ]}
+                          >
+                            <List.Item.Meta
                               title={
-                                <Space wrap>
-                                  <Text strong>{step.name}</Text>
-                                  {step.phase && (
-                                    <Tag color={STEP_PHASE_META[step.phase as keyof typeof STEP_PHASE_META]?.color || 'default'}>
-                                      {STEP_PHASE_META[step.phase as keyof typeof STEP_PHASE_META]?.label || step.phase}
-                                    </Tag>
-                                  )}
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                                  <Text strong>{run.title}</Text>
+                                  <Tag color={statusColorMap[run.status] || 'default'}>{run.status}</Tag>
+                                </div>
+                              }
+                              description={
+                                <Space direction="vertical" size={2}>
+                                  <Text type="secondary">{run.summary || run.symptom}</Text>
+                                  <Text type="secondary">{formatTs(run.startedAt)}</Text>
                                 </Space>
                               }
-                              extra={<Tag color={statusColorMap[step.status] || 'default'}>{step.status}</Tag>}
-                            >
-                              <Space direction="vertical" size={8} style={{ width: '100%' }}>
-                                <Text code>{step.resolvedCommand || step.command}</Text>
-                                <Text type="secondary">
-                                  exit={step.exitCode} / duration={step.durationMs}ms
-                                  {step.startedAt ? ` / start=${formatTs(step.startedAt)}` : ''}
-                                </Text>
-                                {step.expectedSignal && (
-                                  <Text type="secondary">预期信号：{step.expectedSignal}</Text>
-                                )}
-                                <ResizableOutput content={step.stdout || step.stderr || ''} isDark={isDark} minHeight={84} maxHeight={260} />
-                                {step.stderr && (
-                                  <>
-                                    <Text strong>stderr</Text>
-                                    <ResizableOutput content={step.stderr} isDark={isDark} minHeight={60} maxHeight={200} />
-                                  </>
-                                )}
-                                <Space wrap>
-                                  <Button
-                                    size="small"
-                                    icon={<PushpinOutlined />}
-                                    onClick={() => lockEvidence({
-                                      sourceType: 'collection_step',
-                                      sourceId: step.id,
-                                      title: `采集步骤: ${step.name}`,
-                                      summary: step.conclusion || step.expectedSignal || '采集输出已锁定',
-                                      content: [step.stdout, step.stderr].filter(Boolean).join('\n'),
-                                      command: step.resolvedCommand || step.command,
-                                      sessionLabel: detailRun.sessionLabel,
-                                      tags: collectEvidenceTags([step.name, step.expectedSignal, step.stdout, step.stderr]),
-                                    })}
-                                  >
-                                    锁定输出
-                                  </Button>
-                                  <Button
-                                    size="small"
-                                    icon={<SaveOutlined />}
-                                    onClick={() => saveCommandAsTemplate(
-                                      `${step.name} - 采集命令`,
-                                      step.resolvedCommand || step.command,
-                                      step.expectedSignal || step.conclusion || '来自诊断工作台的采集步骤',
-                                      '诊断/采集步骤'
-                                    )}
-                                  >
-                                    保存命令模板
-                                  </Button>
-                                </Space>
-                              </Space>
-                            </Card>
-                          ))}
-                        </Space>
-                      ),
-                    },
-                    {
-                      key: 'biz-actions',
-                      label: `业务脚本结果 (${detailRun.businessActions?.length || 0})`,
-                      children: !detailRun.businessActions?.length ? (
-                        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有业务脚本执行结果" />
-                      ) : (
-                        <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                          {(detailRun.businessActions || []).map((action) => (
-                            <Card key={action.id} size="small" title={action.name} extra={<Tag color={statusColorMap[action.status] || 'default'}>{action.status}</Tag>}>
-                              <Space direction="vertical" size={8} style={{ width: '100%' }}>
-                                <Text code>{action.scriptPath}</Text>
-                                <Text type="secondary">
-                                  phase={action.runMode} / exit={action.exitCode} / duration={action.durationMs}ms
-                                  {action.startedAt ? ` / start=${formatTs(action.startedAt)}` : ''}
-                                </Text>
-                                <ResizableOutput content={action.stdout || action.stderr || ''} isDark={isDark} minHeight={72} maxHeight={240} />
-                                {action.stdinPayload && (
-                                  <>
-                                    <Text strong>stdin payload</Text>
-                                    <ResizableOutput content={action.stdinPayload} isDark={isDark} minHeight={52} maxHeight={180} />
-                                  </>
-                                )}
-                                <Button
-                                  size="small"
-                                  icon={<PushpinOutlined />}
-                                  onClick={() => lockEvidence({
-                                    sourceType: 'business_action',
-                                    sourceId: action.id,
-                                    title: `业务动作: ${action.name}`,
-                                    summary: `phase=${action.runMode} / exit=${action.exitCode}`,
-                                    content: [action.stdout, action.stderr].filter(Boolean).join('\n'),
-                                    command: action.scriptPath,
-                                    sessionLabel: detailRun.sessionLabel,
-                                    tags: collectEvidenceTags([action.name, action.runMode, action.stdout, action.stderr]),
-                                  })}
-                                >
-                                  锁定输出
-                                </Button>
-                              </Space>
-                            </Card>
-                          ))}
-                        </Space>
-                      ),
-                    },
-                  ]}
-                />
-              </Space>
-            )}
-          </Space>
-        </Card>
-      </div>
+                            />
+                          </List.Item>
+                        )}
+                      />
+                    )}
+                  </Card>
 
-      <div style={{ marginTop: 16 }}>
+                  <Card title="Run 详情" extra={detailRun ? <Tag color={statusColorMap[detailRun.status] || 'default'}>{detailRun.status}</Tag> : null}>
+                    {historyDetailContent}
+                  </Card>
+                </div>
+              ),
+            },
+          ]}
+        />
+
         <Alert
           type="warning"
           showIcon
@@ -3895,7 +3952,68 @@ const DiagnosticWorkbench: React.FC = () => {
           message="MVP 范围说明"
           description="当前实现采用本地 JSON 知识库和可解释关键词召回，不依赖外部向量库或大模型；重点是先把每次 run 的结构化沉淀和编排闭环跑通。"
         />
-      </div>
+      </Space>
+
+      <Drawer
+        title="C 源码上下文"
+        placement="right"
+        width={900}
+        open={sourceDrawerOpen}
+        onClose={() => setSourceDrawerOpen(false)}
+        extra={
+          <Space size={8} wrap>
+            {sourcePreview && (
+              <Button size="small" onClick={() => setCompactSourcePreview((value) => !value)}>
+                {compactSourcePreview ? '展开全部上下文' : '折叠无关上下文'}
+              </Button>
+            )}
+            {compactSourcePreview && sourcePreviewFoldedLineCount > 0 && (
+              <Tag color="default">已折叠 {sourcePreviewFoldedLineCount} 行</Tag>
+            )}
+            {locatingSource
+              ? <Tag color="processing">定位中</Tag>
+              : sourcePreview
+                ? <Tag color="blue">{sourcePreview.lookupMode === 'location' ? 'path:line' : 'function'}</Tag>
+                : null}
+          </Space>
+        }
+      >
+        {sourcePreviewContent}
+      </Drawer>
+
+      <Drawer
+        title="原始会话日志"
+        placement="bottom"
+        height="72vh"
+        open={logsDrawerOpen}
+        onClose={() => setLogsDrawerOpen(false)}
+        extra={
+          <Space>
+            <Tag color={selectedSessionId ? 'processing' : 'default'}>{selectedSessionId || '未选择会话'}</Tag>
+            <Button
+              icon={<ReloadOutlined />}
+              size="small"
+              disabled={!selectedSessionId}
+              onClick={() => selectedSessionId && void fetchSessionLogs(selectedSessionId, true)}
+            >
+              刷新日志
+            </Button>
+          </Space>
+        }
+      >
+        {sessionLogsContent}
+      </Drawer>
+
+      <Drawer
+        title="证据篮"
+        placement="right"
+        width={720}
+        open={evidenceDrawerOpen}
+        onClose={() => setEvidenceDrawerOpen(false)}
+        extra={<Tag color={lockedEvidence.length > 0 ? 'processing' : 'default'}>{lockedEvidence.length} 条</Tag>}
+      >
+        {evidenceDrawerContent}
+      </Drawer>
     </div>
   );
 };

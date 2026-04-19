@@ -1,91 +1,85 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
 
 const {
-  buildPrepareRunMetrics,
-  normalizePreparePhase,
-  readPrepareStepCache,
-  writePrepareStepCache,
+  clearPrepareStepCache,
+  executeStructuredSteps,
 } = require('../lib/prepareRuntime');
 
-function makeTempCacheFile() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'prepare-runtime-'));
-  return path.join(dir, 'prepare-cache.json');
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-test('prepare runtime cache stores and reloads target-scoped successful steps', () => {
-  const filePath = makeTempCacheFile();
-  const session = { host: '10.0.0.8', port: 22, username: 'root' };
-  const step = { name: 'warm-common-tools', cacheScope: 'target', cacheTtlMs: 1000 };
-  const result = {
-    stdout: '[tool] journalctl=/usr/bin/journalctl',
-    stderr: '',
-    exitCode: 0,
-    durationMs: 187,
-    status: 'done',
-    statusReason: '正常退出',
+test('executeStructuredSteps parallelizes exec groups and reuses target-scoped cache', async () => {
+  clearPrepareStepCache();
+
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const calls = [];
+  const executeCommand = async (_session, cmd, _timeoutMs, mode) => {
+    calls.push({ cmd, mode });
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await sleep(mode === 'exec' ? 20 : 5);
+    inFlight -= 1;
+    return {
+      stdout: `${cmd}-stdout`,
+      stderr: '',
+      exitCode: 0,
+      durationMs: mode === 'exec' ? 20 : 5,
+    };
   };
 
-  writePrepareStepCache(session, 'linux-problem-localization-fast-path', step, 'command -v journalctl', result, {
-    filePath,
-    now: 100,
+  const session = { username: 'root', host: 'node-a', port: 22 };
+  const steps = [
+    { name: 'ready-shell', cmd: 'source /etc/profile >/dev/null 2>&1 || true', phase: 'ready' },
+    {
+      name: 'tool-paths',
+      cmd: 'command -v journalctl',
+      mode: 'exec',
+      phase: 'context',
+      parallelGroup: 'context',
+      cacheKey: 'tool-paths',
+      cacheTtlMs: 60_000,
+    },
+    {
+      name: 'os-release',
+      cmd: 'uname -a',
+      mode: 'exec',
+      phase: 'context',
+      parallelGroup: 'context',
+      cacheKey: 'os-release',
+      cacheTtlMs: 60_000,
+    },
+  ];
+
+  const firstRun = await executeStructuredSteps(session, steps, { profileId: 'localization' }, {
+    allowParallelExec: true,
+    executeCommand,
+    getBlockedCommandError: () => null,
   });
 
-  const cached = readPrepareStepCache(session, 'linux-problem-localization-fast-path', step, 'command -v journalctl', {
-    filePath,
-    now: 200,
+  assert.equal(firstRun.status, 'done');
+  assert.equal(firstRun.readyStepCount, 1);
+  assert.equal(firstRun.contextStepCount, 2);
+  assert.equal(firstRun.cachedStepCount, 0);
+  assert.equal(maxInFlight, 2);
+  assert.deepEqual(calls.map((item) => item.mode), ['pty', 'exec', 'exec']);
+
+  calls.length = 0;
+  maxInFlight = 0;
+  inFlight = 0;
+
+  const secondRun = await executeStructuredSteps(session, steps, { profileId: 'localization' }, {
+    allowParallelExec: true,
+    executeCommand,
+    getBlockedCommandError: () => null,
   });
 
-  assert.ok(cached);
-  assert.equal(cached.fromCache, true);
-  assert.equal(cached.cachedAt, 100);
-  assert.equal(cached.cacheTtlMs, 1000);
-  assert.equal(cached.stdout, result.stdout);
-  assert.equal(cached.durationMs, result.durationMs);
-});
-
-test('prepare runtime cache expires stale entries', () => {
-  const filePath = makeTempCacheFile();
-  const session = { host: '10.0.0.9', port: 22, username: 'root' };
-  const step = { name: 'warm-common-tools', cacheScope: 'target', cacheTtlMs: 300 };
-  const result = {
-    stdout: 'cached',
-    stderr: '',
-    exitCode: 0,
-    durationMs: 22,
-    status: 'done',
-  };
-
-  writePrepareStepCache(session, 'linux-problem-localization-fast-path', step, 'cached command', result, {
-    filePath,
-    now: 100,
-  });
-
-  const cached = readPrepareStepCache(session, 'linux-problem-localization-fast-path', step, 'cached command', {
-    filePath,
-    now: 450,
-  });
-
-  assert.equal(cached, null);
-});
-
-test('prepare metrics track ready/context boundaries and cached steps', () => {
-  const metrics = buildPrepareRunMetrics([
-    { phase: 'ready', startedAt: 100, finishedAt: 280 },
-    { phase: 'ready', startedAt: 120, finishedAt: 320 },
-    { phase: 'context', startedAt: 330, finishedAt: 600, fromCache: true },
-    { phase: 'context', startedAt: 340, finishedAt: 620 },
-  ], 520);
-
-  assert.equal(normalizePreparePhase('ready'), 'ready');
-  assert.equal(normalizePreparePhase('context'), 'context');
-  assert.equal(normalizePreparePhase('anything-else'), 'context');
-  assert.equal(metrics.readyStepCount, 2);
-  assert.equal(metrics.contextStepCount, 2);
-  assert.equal(metrics.cachedStepCount, 1);
-  assert.equal(metrics.readyDurationMs, 220);
-  assert.equal(metrics.totalDurationMs, 520);
+  assert.equal(secondRun.status, 'done');
+  assert.equal(secondRun.cachedStepCount, 2);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].mode, 'pty');
+  assert.equal(secondRun.steps.filter((item) => item.status === 'cached').length, 2);
+  assert.equal(secondRun.steps.filter((item) => item.status === 'cached').every((item) => item.durationMs === 0), true);
 });
