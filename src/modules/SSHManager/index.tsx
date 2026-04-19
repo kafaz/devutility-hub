@@ -68,7 +68,7 @@ import KeywordAnalyzer from './components/KeywordAnalyzer';
 import NodeContextPanel from './components/NodeContextPanel';
 import SessionJournal from './components/SessionJournal';
 import SessionGroupModal from './components/SessionGroupModal';
-import { useAnalyzerStore } from './store/analyzerStore';
+import { useAnalyzerStore, type HighlightRule } from './store/analyzerStore';
 import { useCronStore } from './store/cronStore';
 import { useJournalStore } from './store/journalStore';
 import type { NodeExecution, PlanStepResult, SessionGroup, SSHProfile, SSHSession } from './store/sshStore';
@@ -175,6 +175,179 @@ function formatDurationLabel(value?: number) {
   return `${Math.round(ms)}ms`;
 }
 
+interface TerminalScreenMatch {
+  end: number;
+  id: string;
+  keyword: string;
+  color: string;
+  start: number;
+}
+
+interface TerminalScreenLine {
+  matches: TerminalScreenMatch[];
+  row: number;
+  text: string;
+}
+
+interface TerminalRuleSummary {
+  color: string;
+  id: string;
+  keyword: string;
+  lineCount: number;
+  matchCount: number;
+}
+
+interface TerminalScreenSnapshot {
+  bufferType: 'normal' | 'alternate';
+  matchedLines: TerminalScreenLine[];
+  ruleSummaries: TerminalRuleSummary[];
+  scannedRows: number;
+  totalMatchCount: number;
+}
+
+const TERMINAL_HIGHLIGHT_DECORATION_LIMIT = 200;
+
+function buildHighlightRegex(keyword: string): RegExp | null {
+  if (!keyword.trim()) return null;
+  try {
+    const regex = new RegExp(keyword, 'gi');
+    if (regex.test('')) return null;
+    regex.lastIndex = 0;
+    return regex;
+  } catch {
+    return null;
+  }
+}
+
+function getReadableTextColor(color: string) {
+  const hex = color.replace('#', '');
+  if (hex.length !== 6) return '#111827';
+  const red = parseInt(hex.slice(0, 2), 16);
+  const green = parseInt(hex.slice(2, 4), 16);
+  const blue = parseInt(hex.slice(4, 6), 16);
+  if ([red, green, blue].some((value) => Number.isNaN(value))) return '#111827';
+  const luminance = (0.299 * red + 0.587 * green + 0.114 * blue) / 255;
+  return luminance > 0.6 ? '#111827' : '#f8fafc';
+}
+
+function createEmptyTerminalScreenSnapshot(): TerminalScreenSnapshot {
+  return {
+    bufferType: 'normal',
+    matchedLines: [],
+    ruleSummaries: [],
+    scannedRows: 0,
+    totalMatchCount: 0,
+  };
+}
+
+function collectTerminalScreenSnapshot(term: Terminal, rules: HighlightRule[]): TerminalScreenSnapshot {
+  const compiledRules = rules
+    .map((rule) => {
+      const regex = buildHighlightRegex(rule.keyword);
+      return regex ? { rule, regex } : null;
+    })
+    .filter(Boolean) as Array<{ rule: HighlightRule; regex: RegExp }>;
+
+  const activeBuffer = term.buffer.active;
+  const startRow = activeBuffer.viewportY;
+  const endRow = Math.min(activeBuffer.length, startRow + term.rows);
+  const ruleMatchCounts = new Map<string, number>();
+  const ruleLineCounts = new Map<string, number>();
+  const matchedLines: TerminalScreenLine[] = [];
+
+  for (let row = startRow; row < endRow; row += 1) {
+    const line = activeBuffer.getLine(row);
+    const text = line?.translateToString(true) ?? '';
+    if (!text) continue;
+
+    const matches: TerminalScreenMatch[] = [];
+    const matchedRuleIds = new Set<string>();
+
+    compiledRules.forEach(({ rule, regex }) => {
+      regex.lastIndex = 0;
+      const occurrences = Array.from(text.matchAll(regex));
+      if (occurrences.length === 0) return;
+
+      occurrences.forEach((occurrence) => {
+        const value = occurrence[0] ?? '';
+        if (!value) return;
+        const start = occurrence.index ?? 0;
+        matches.push({
+          id: rule.id,
+          keyword: rule.keyword,
+          color: rule.color,
+          start,
+          end: start + value.length,
+        });
+      });
+
+      matchedRuleIds.add(rule.id);
+      ruleMatchCounts.set(rule.id, (ruleMatchCounts.get(rule.id) || 0) + occurrences.length);
+    });
+
+    if (matches.length === 0) continue;
+
+    matchedRuleIds.forEach((ruleId) => {
+      ruleLineCounts.set(ruleId, (ruleLineCounts.get(ruleId) || 0) + 1);
+    });
+
+    matchedLines.push({
+      row,
+      text,
+      matches: matches.sort((left, right) => left.start - right.start || right.end - left.end),
+    });
+  }
+
+  return {
+    bufferType: activeBuffer.type,
+    matchedLines,
+    scannedRows: Math.max(0, endRow - startRow),
+    totalMatchCount: Array.from(ruleMatchCounts.values()).reduce((sum, count) => sum + count, 0),
+    ruleSummaries: compiledRules.map(({ rule }) => ({
+      id: rule.id,
+      keyword: rule.keyword,
+      color: rule.color,
+      matchCount: ruleMatchCounts.get(rule.id) || 0,
+      lineCount: ruleLineCounts.get(rule.id) || 0,
+    })),
+  };
+}
+
+function renderTerminalMatchText(text: string, matches: TerminalScreenMatch[]): React.ReactNode {
+  if (!matches.length) return text || '\u200b';
+
+  const nodes: React.ReactNode[] = [];
+  let cursor = 0;
+
+  matches.forEach((match, index) => {
+    if (match.end <= cursor || match.end <= match.start) return;
+    const start = Math.max(match.start, cursor);
+    if (start > cursor) {
+      nodes.push(text.slice(cursor, start));
+    }
+    nodes.push(
+      <span
+        key={`${match.id}-${match.start}-${index}`}
+        style={{
+          background: match.color,
+          color: getReadableTextColor(match.color),
+          borderRadius: 3,
+          padding: '0 2px',
+        }}
+      >
+        {text.slice(start, match.end)}
+      </span>
+    );
+    cursor = match.end;
+  });
+
+  if (cursor < text.length) {
+    nodes.push(text.slice(cursor));
+  }
+
+  return nodes.length > 0 ? nodes : text || '\u200b';
+}
+
 // ─── 单个 XTerm 终端实例（每会话挂载一次，CSS 控制显隐） ─────────────────
 
 const TerminalInstance: React.FC<{
@@ -190,44 +363,116 @@ const TerminalInstance: React.FC<{
 }> = ({ sessionId, isDark, visible, onInput, onResize, registerWrite, registerSnapshot, registerGetCurrentLine }) => {
   const ref = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
+  const fitAddonRef = useRef<FitAddon | null>(null);
+  const decorationDisposablesRef = useRef<Array<{ dispose: () => void }>>([]);
+  const refreshFrameRef = useRef<number | null>(null);
   const [searchOpen, setSearchOpen]   = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [highlightOpen, setHighlightOpen] = useState(false);
   const [highlightKeyword, setHighlightKeyword] = useState('');
   const [highlightColor, setHighlightColor] = useState('#ef4444');
+  const [screenSnapshot, setScreenSnapshot] = useState<TerminalScreenSnapshot>(() => createEmptyTerminalScreenSnapshot());
+  const [activeHighlightRuleId, setActiveHighlightRuleId] = useState<string | null>(null);
   const searchAddonRef = useRef<SearchAddon | null>(null);
   const { highlightRules, addHighlightRule, removeHighlightRule } = useAnalyzerStore();
   const highlightRulesRef = useRef(highlightRules);
   highlightRulesRef.current = highlightRules;
+  const activeHighlightRule = highlightRules.find((rule) => rule.id === activeHighlightRuleId) || highlightRules[0] || null;
 
-  const applyHighlights = (bin: string, rules: typeof highlightRules) => {
-    if (!rules.length) return bin;
-    let result = bin;
-    rules.forEach(rule => {
-      if (!rule.keyword) return;
-      try {
-        const hex = rule.color.replace('#', '');
-        const r = parseInt(hex.substring(0, 2), 16) || 255;
-        const g = parseInt(hex.substring(2, 4), 16) || 255;
-        const b = parseInt(hex.substring(4, 6), 16) || 255;
-        const regex = new RegExp(`(${rule.keyword})`, 'gi');
-        result = result.replace(regex, `\x1b[38;2;${r};${g};${b}m$1\x1b[0m`);
-      } catch {
-        // ignore bad regex
-      }
+  const clearScreenDecorations = React.useCallback(() => {
+    decorationDisposablesRef.current.forEach((disposable) => disposable.dispose());
+    decorationDisposablesRef.current = [];
+  }, []);
+
+  const refreshScreenHighlights = React.useCallback(() => {
+    const term = termRef.current;
+    if (!term) return;
+
+    clearScreenDecorations();
+    const nextSnapshot = collectTerminalScreenSnapshot(term, highlightRulesRef.current);
+    setScreenSnapshot(nextSnapshot);
+
+    if (nextSnapshot.bufferType !== 'normal') return;
+
+    let decorationCount = 0;
+    nextSnapshot.matchedLines.forEach((line) => {
+      line.matches.forEach((match) => {
+        if (decorationCount >= TERMINAL_HIGHLIGHT_DECORATION_LIMIT) return;
+        const marker = term.registerMarker(line.row - term.buffer.active.baseY - term.buffer.active.cursorY);
+        if (!marker) return;
+        const decoration = term.registerDecoration({
+          marker,
+          x: match.start,
+          width: Math.max(1, match.end - match.start),
+          backgroundColor: match.color,
+          foregroundColor: getReadableTextColor(match.color),
+          layer: 'top',
+        });
+        if (!decoration) {
+          marker.dispose();
+          return;
+        }
+        decorationCount += 1;
+        const renderDisposable = decoration.onRender((element) => {
+          element.style.borderRadius = '3px';
+          element.style.boxShadow = `inset 0 0 0 1px ${match.color}`;
+          element.style.opacity = '0.92';
+        });
+        decorationDisposablesRef.current.push({
+          dispose: () => {
+            renderDisposable.dispose();
+            decoration.dispose();
+            marker.dispose();
+          },
+        });
+      });
     });
-    return result;
+  }, [clearScreenDecorations]);
+
+  const scheduleScreenHighlightRefresh = React.useCallback(() => {
+    if (refreshFrameRef.current != null) {
+      cancelAnimationFrame(refreshFrameRef.current);
+    }
+    refreshFrameRef.current = requestAnimationFrame(() => {
+      refreshFrameRef.current = null;
+      refreshScreenHighlights();
+    });
+  }, [refreshScreenHighlights]);
+
+  const navigateHighlightRule = (direction: 'next' | 'prev') => {
+    if (!activeHighlightRule) return;
+    const searchOptions = {
+      caseSensitive: false,
+      decorations: {
+        matchBackground: activeHighlightRule.color,
+        activeMatchBackground: activeHighlightRule.color,
+        matchBorder: activeHighlightRule.color,
+        activeMatchBorder: activeHighlightRule.color,
+        matchOverviewRuler: activeHighlightRule.color,
+        activeMatchColorOverviewRuler: activeHighlightRule.color,
+      },
+    };
+    if (direction === 'prev') {
+      searchAddonRef.current?.findPrevious(activeHighlightRule.keyword, searchOptions);
+      return;
+    }
+    searchAddonRef.current?.findNext(activeHighlightRule.keyword, searchOptions);
   };
 
-  // Re-apply highlights to existing buffer when rules change
   useEffect(() => {
-    if (!termRef.current) return;
-    const rawBuffer = getTerminalBuffer(sessionId);
-    const highlighted = applyHighlights(rawBuffer, highlightRules);
-    termRef.current.clear();
-    const buf = new Uint8Array(highlighted.length);
-    for (let i = 0; i < highlighted.length; i++) buf[i] = highlighted.charCodeAt(i);
-    termRef.current.write(buf);
+    if (highlightRules.length === 0) {
+      setActiveHighlightRuleId(null);
+      clearScreenDecorations();
+      setScreenSnapshot(createEmptyTerminalScreenSnapshot());
+      searchAddonRef.current?.clearDecorations();
+      return;
+    }
+    setActiveHighlightRuleId((current) => (
+      current && highlightRules.some((rule) => rule.id === current)
+        ? current
+        : highlightRules[0].id
+    ));
+    scheduleScreenHighlightRefresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [highlightRules, sessionId]);
 
@@ -243,6 +488,7 @@ const TerminalInstance: React.FC<{
     });
     termRef.current = term;
     const fit = new FitAddon();
+    fitAddonRef.current = fit;
     const search = new SearchAddon();
     searchAddonRef.current = search;
     term.loadAddon(fit);
@@ -252,15 +498,21 @@ const TerminalInstance: React.FC<{
     // 恢复历史缓冲区（带高亮）
     const initBuffer = getTerminalBuffer(sessionId);
     if (initBuffer) {
-      const highlighted = applyHighlights(initBuffer, highlightRulesRef.current);
-      const buf = new Uint8Array(highlighted.length);
-      for (let i = 0; i < highlighted.length; i++) buf[i] = highlighted.charCodeAt(i);
+      const buf = new Uint8Array(initBuffer.length);
+      for (let i = 0; i < initBuffer.length; i++) buf[i] = initBuffer.charCodeAt(i);
       term.write(buf);
     }
 
-    requestAnimationFrame(() => { fit.fit(); onResize(term.cols, term.rows); });
+    requestAnimationFrame(() => {
+      fit.fit();
+      onResize(term.cols, term.rows);
+      scheduleScreenHighlightRefresh();
+    });
 
     const d1 = term.onData(onInput);
+    const d2 = term.onRender(() => scheduleScreenHighlightRefresh());
+    const d3 = term.onScroll(() => scheduleScreenHighlightRefresh());
+    const d4 = term.onResize(() => scheduleScreenHighlightRefresh());
     const ro = new ResizeObserver(() => { if (visible) { fit.fit(); onResize(term.cols, term.rows); } });
     ro.observe(ref.current);
 
@@ -276,9 +528,8 @@ const TerminalInstance: React.FC<{
 
     registerWrite((b64: string) => {
       const bin = atob(b64);
-      const highlighted = applyHighlights(bin, highlightRulesRef.current);
-      const bytes = new Uint8Array(highlighted.length);
-      for (let i = 0; i < highlighted.length; i++) bytes[i] = highlighted.charCodeAt(i);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
       term.write(bytes);
     });
 
@@ -300,11 +551,32 @@ const TerminalInstance: React.FC<{
     }
 
     return () => {
-      d1.dispose(); ro.disconnect(); term.dispose(); termRef.current = null;
+      d1.dispose();
+      d2.dispose();
+      d3.dispose();
+      d4.dispose();
+      ro.disconnect();
+      clearScreenDecorations();
+      if (refreshFrameRef.current != null) {
+        cancelAnimationFrame(refreshFrameRef.current);
+      }
+      term.dispose();
+      termRef.current = null;
+      fitAddonRef.current = null;
       document.removeEventListener('keydown', handleKeyDown);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, isDark]);
+
+  useEffect(() => {
+    if (!visible || !termRef.current || !fitAddonRef.current) return;
+    requestAnimationFrame(() => {
+      fitAddonRef.current?.fit();
+      if (!termRef.current) return;
+      onResize(termRef.current.cols, termRef.current.rows);
+      scheduleScreenHighlightRefresh();
+    });
+  }, [visible, onResize, scheduleScreenHighlightRefresh]);
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%', display: visible ? 'flex' : 'none', flexDirection: 'column' }}>
@@ -409,6 +681,97 @@ const TerminalInstance: React.FC<{
         </div>
       )}
 
+      {highlightRules.length > 0 && (
+        <div style={{
+          position: 'absolute',
+          top: 36,
+          left: 12,
+          zIndex: 100,
+          width: 340,
+          maxHeight: 220,
+          overflow: 'hidden',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 6,
+          background: isDark ? 'rgba(37, 37, 38, 0.94)' : 'rgba(255, 255, 255, 0.95)',
+          border: `1px solid ${screenSnapshot.bufferType === 'alternate' ? '#f59e0b' : '#3b82f6'}`,
+          borderRadius: 6,
+          padding: '8px 10px',
+          boxShadow: '0 2px 10px rgba(0,0,0,.28)',
+          backdropFilter: 'blur(4px)',
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+            <Space size={6} wrap>
+              <Text strong style={{ fontSize: 12 }}>屏幕命中</Text>
+              <Tag color={screenSnapshot.bufferType === 'alternate' ? 'gold' : 'blue'} style={{ margin: 0, fontSize: 10 }}>
+                {screenSnapshot.bufferType === 'alternate' ? 'Vim/全屏缓冲区' : '当前屏幕'}
+              </Tag>
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                {screenSnapshot.totalMatchCount} 命中 / {screenSnapshot.scannedRows} 行
+              </Text>
+            </Space>
+            <Space size={4}>
+              <Button size="small" disabled={!activeHighlightRule} onClick={() => navigateHighlightRule('prev')}>上一处</Button>
+              <Button size="small" disabled={!activeHighlightRule} onClick={() => navigateHighlightRule('next')}>下一处</Button>
+            </Space>
+          </div>
+
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {screenSnapshot.ruleSummaries.map((ruleSummary) => (
+              <button
+                key={ruleSummary.id}
+                type="button"
+                onClick={() => setActiveHighlightRuleId(ruleSummary.id)}
+                style={{
+                  border: `1px solid ${ruleSummary.color}`,
+                  background: ruleSummary.id === activeHighlightRule?.id ? ruleSummary.color : 'transparent',
+                  color: ruleSummary.id === activeHighlightRule?.id ? getReadableTextColor(ruleSummary.color) : (isDark ? '#e4e4e7' : '#111827'),
+                  borderRadius: 999,
+                  padding: '2px 8px',
+                  fontSize: 11,
+                  cursor: 'pointer',
+                }}
+              >
+                {ruleSummary.keyword} · {ruleSummary.matchCount}
+              </button>
+            ))}
+          </div>
+
+          <div style={{ overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {screenSnapshot.matchedLines.length === 0 ? (
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                当前屏幕还没有命中高亮词；如果在 `vim` 里继续翻页或搜索，这里会实时跟着更新。
+              </Text>
+            ) : (
+              screenSnapshot.matchedLines.slice(0, 8).map((line) => (
+                <div
+                  key={`${sessionId}-${line.row}`}
+                  style={{
+                    borderRadius: 4,
+                    background: isDark ? '#1f1f22' : '#f8fafc',
+                    border: `1px solid ${isDark ? '#3e3e42' : '#d4d4d8'}`,
+                    padding: '4px 6px',
+                    fontFamily: 'JetBrains Mono, Fira Code, Consolas, monospace',
+                    fontSize: 11,
+                    lineHeight: 1.5,
+                  }}
+                >
+                  <Text type="secondary" style={{ fontSize: 10, display: 'block', marginBottom: 2 }}>
+                    屏幕行 {line.row + 1}
+                  </Text>
+                  <span>{renderTerminalMatchText(line.text, line.matches)}</span>
+                </div>
+              ))
+            )}
+            {screenSnapshot.matchedLines.length > 8 && (
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                还有 {screenSnapshot.matchedLines.length - 8} 行命中，继续滚动终端可刷新当前屏幕视图。
+              </Text>
+            )}
+          </div>
+        </div>
+      )}
+
       <div
         ref={ref}
         style={{
@@ -487,7 +850,7 @@ const PlanStepRow: React.FC<{
       </div>
       {expanded && outputText && (
         <div style={{ marginTop: 4 }}>
-          <ResizableOutput content={outputText} isDark={isDark} minHeight={60} maxHeight={300} showCopy />
+          <ResizableOutput content={outputText} isDark={isDark} minHeight={60} maxHeight={300} showCopy threadFolding="auto" />
         </div>
       )}
     </div>

@@ -257,6 +257,7 @@ const EntryCard: React.FC<{
             minHeight={60}
             maxHeight={400}
             showCopy
+            threadFolding="auto"
           />
         </div>
       )}
