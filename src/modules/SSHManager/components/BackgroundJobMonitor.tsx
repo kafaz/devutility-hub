@@ -129,6 +129,7 @@ export const BackgroundJobMonitor: React.FC = () => {
   const [form] = Form.useForm();
   const pollingRef = useRef<number | null>(null);
   const notifiedRef = useRef<Set<string>>(new Set()); // track per-job notifications
+  const alertSignatureRef = useRef<Map<string, string>>(new Map());
 
   const connectedSessions = sessions.filter(s => s.status === 'connected');
 
@@ -140,19 +141,6 @@ export const BackgroundJobMonitor: React.FC = () => {
 
     for (const job of runningJobs) {
       try {
-        if (job.pid) {
-          const aliveRes = await execCommandOnSession(
-            job.sessionId,
-            `kill -0 ${job.pid} 2>/dev/null && echo alive || echo dead`,
-            3000,
-            { journal: false }
-          );
-          if (aliveRes.stdout.trim() === 'dead') {
-            updateJobStatus(job.id, 'done');
-            continue;
-          }
-        }
-
         const tailRes = await execCommandOnSession(
           job.sessionId,
           `tail -n ${TAIL_LINES} "${job.logPath}" 2>/dev/null`,
@@ -164,31 +152,51 @@ export const BackgroundJobMonitor: React.FC = () => {
 
         // Alert pattern detection
         if (job.alertPattern) {
-          let re: RegExp;
-          try { re = new RegExp(job.alertPattern, 'im'); } catch { continue; }
+          let re: RegExp | null = null;
+          try { re = new RegExp(job.alertPattern, 'im'); } catch { re = null; }
 
-          const newLines = output.split('\n').filter(l => re.test(l));
-          if (newLines.length > 0) {
-            const lastLine = newLines[newLines.length - 1];
-            recordAlertMatch(job.id, lastLine);
+          if (re) {
+            const matchedLines = output.split('\n').filter(l => re.test(l));
+            const matchSignature = matchedLines.join('\n');
+            if (matchedLines.length > 0 && alertSignatureRef.current.get(job.id) !== matchSignature) {
+              alertSignatureRef.current.set(job.id, matchSignature);
+              const lastLine = matchedLines[matchedLines.length - 1];
+              recordAlertMatch(job.id, lastLine);
 
-            // Fire notification (throttle: once per unique line content)
-            const notifKey = `${job.id}::${lastLine}`;
-            if (!notifiedRef.current.has(notifKey)) {
-              notifiedRef.current.add(notifKey);
-              // Limit set size
-              if (notifiedRef.current.size > 200) {
-                const first = notifiedRef.current.values().next().value;
-                if (first) notifiedRef.current.delete(first);
+              // Fire notification (throttle: once per unique line content)
+              const notifKey = `${job.id}::${lastLine}`;
+              if (!notifiedRef.current.has(notifKey)) {
+                notifiedRef.current.add(notifKey);
+                // Limit set size
+                if (notifiedRef.current.size > 200) {
+                  const first = notifiedRef.current.values().next().value;
+                  if (first) notifiedRef.current.delete(first);
+                }
+                notification.error({
+                  message: `${job.sessionName} — 告警命中`,
+                  description: lastLine,
+                  duration: 8,
+                  placement: 'topRight',
+                  key: notifKey,
+                });
               }
-              notification.error({
-                message: `${job.sessionName} — 告警命中`,
-                description: lastLine,
-                duration: 8,
-                placement: 'topRight',
-                key: notifKey,
-              });
+            } else if (matchedLines.length === 0) {
+              alertSignatureRef.current.delete(job.id);
             }
+          } else {
+            alertSignatureRef.current.delete(job.id);
+          }
+        }
+
+        if (job.pid) {
+          const aliveRes = await execCommandOnSession(
+            job.sessionId,
+            `kill -0 ${job.pid} 2>/dev/null && echo alive || echo dead`,
+            3000,
+            { journal: false }
+          );
+          if (aliveRes.stdout.trim() === 'dead') {
+            updateJobStatus(job.id, 'done');
           }
         }
       } catch {

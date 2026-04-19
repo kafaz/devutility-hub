@@ -785,7 +785,14 @@ export const useSSHStore = create<SSHStore>()(
       updateCredential: (id, c) =>
         set((s) => ({ credentials: s.credentials.map((x) => x.id === id ? { ...x, ...c } : x) })),
       deleteCredential: (id) =>
-        set((s) => ({ credentials: s.credentials.filter((x) => x.id !== id) })),
+        set((s) => ({
+          credentials: s.credentials.filter((x) => x.id !== id),
+          profiles: s.profiles.map((profile) =>
+            profile.credentialId === id
+              ? { ...profile, credentialId: undefined }
+              : profile
+          ),
+        })),
 
       // ── 档案管理 ──────────────────────────────────────────────────────────
 
@@ -1116,10 +1123,20 @@ export const useSSHStore = create<SSHStore>()(
       // ── 建立 SSH 连接 ─────────────────────────────────────────────────────
 
       connectSession: (sessionId, { credentialId, passphrase, password, agent, jumpPassphrase, jumpPassword, jumpAgent, cols = 220, rows = 50 }) => {
+        const session = get().sessions.find((s) => s.id === sessionId);
         const profile = get().profiles.find(
-          (p) => p.id === get().sessions.find((s) => s.id === sessionId)?.profileId
+          (p) => p.id === session?.profileId
         );
-        if (!profile) return;
+        if (!session || !profile) return;
+
+        const failConnection = (statusMsg: string) => {
+          set((s) => ({
+            sessions: s.sessions.map((x) =>
+              x.id === sessionId ? { ...x, status: 'error', statusMsg } : x
+            ),
+          }));
+          addSessionJournalEvent(sessionId, '连接配置异常', statusMsg);
+        };
 
         let targetUser = profile.username ?? '';
         let targetAuth = profile.authType ?? 'password';
@@ -1134,7 +1151,14 @@ export const useSSHStore = create<SSHStore>()(
             targetAuth = cred.authType;
             targetKey = cred.keyFilePath;
             targetPass = cred.password || password;
+          } else {
+            failConnection('绑定的登录凭证已不存在，请重新绑定凭证后再连接');
+            return;
           }
+        }
+        if (!targetUser.trim()) {
+          failConnection('连接档案缺少用户名，请补充用户名或重新绑定凭证');
+          return;
         }
 
         let jumpHostConfig = undefined;
@@ -1150,7 +1174,14 @@ export const useSSHStore = create<SSHStore>()(
                const jc = get().credentials.find(c => c.id === jp.credentialId);
                if (jc) {
                  jpUser = jc.username; jpAuth = jc.authType; jpKey = jc.keyFilePath; jpPass = jc.password || jumpPassword;
+               } else {
+                 failConnection(`跳板机档案「${jp.name}」绑定的凭证已不存在，请重新绑定后再连接`);
+                 return;
                }
+            }
+            if (!jpUser.trim()) {
+              failConnection(`跳板机档案「${jp.name}」缺少用户名，请补充用户名或重新绑定凭证`);
+              return;
             }
 
             jumpHostConfig = {

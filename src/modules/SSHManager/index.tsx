@@ -114,6 +114,7 @@ interface PrepareResultStep {
   name: string;
   cmd: string;
   cachedAt?: number;
+  cacheAgeMs?: number;
   cacheTtlMs?: number;
   finishedAt?: number;
   fromCache?: boolean;
@@ -127,7 +128,7 @@ interface PrepareResultStep {
   stderr: string;
   exitCode: number;
   durationMs: number;
-  status: 'done' | 'failed';
+  status: 'done' | 'failed' | 'cached';
   statusReason?: string;
 }
 
@@ -1435,20 +1436,24 @@ const SSHManager: React.FC = () => {
       const startedAt = Date.now();
 
       steps.forEach((step, index) => {
+        const stepTimestamp = startedAt + index;
         const stepStatusReason = [
-          step.fromCache ? '命中缓存' : '',
+          step.fromCache && !String(step.statusReason || '').includes('命中缓存') ? '命中缓存' : '',
           step.statusReason || '',
         ].filter(Boolean).join(' · ');
         addEntry({
           sessionId,
           sessionName: session.name,
           type: 'prepare_step',
-          timestamp: startedAt + index,
+          timestamp: stepTimestamp,
           command: step.resolvedCmd || step.cmd,
           output: [step.stdout, step.stderr].filter(Boolean).join('\n').trim(),
           exitCode: step.exitCode,
           durationMs: step.durationMs,
           statusReason: stepStatusReason || undefined,
+          stepStatus: step.fromCache ? 'cached' : step.status,
+          stepPhase: step.phase,
+          cacheAgeMs: step.cacheAgeMs ?? (step.cachedAt ? Math.max(0, stepTimestamp - step.cachedAt) : undefined),
           prepareProfileName: profileName,
           prepareStepName: step.name,
           nodeHost: profile?.host,
