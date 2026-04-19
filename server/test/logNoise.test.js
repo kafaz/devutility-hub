@@ -18,6 +18,19 @@ test('log noise filter removes info-prefixed lines but keeps risk signals', () =
   assert.equal(filtered.text, 'ERROR disk timeout on nvme0n1');
 });
 
+test('log noise filter folds structured prepare chatter and bracketed info lines by default', () => {
+  const filtered = filterNoiseText([
+    '[2026-04-20 10:00:00] INFO background probe',
+    '[context] shell=/bin/bash',
+    '[tool] journalctl=/usr/bin/journalctl',
+    'WINDOW ts=2026-04-20T10:00:00+0800 uptime=12:34 shell=/bin/bash',
+    'panic: disk detached',
+  ].join('\n'));
+
+  assert.equal(filtered.suppressedCount, 4);
+  assert.equal(filtered.text, 'panic: disk detached');
+});
+
 test('session log suppression drops low-signal info events and keeps failures', () => {
   assert.equal(shouldSuppressSessionLog({
     type: 'command_started',
@@ -72,5 +85,16 @@ test('focus mode suppresses debug/trace noise without hiding risky lines', () =>
       exitCode: 0,
     }, { builtinMode: 'focus', customKeywords: [] }),
     false
+  );
+});
+
+test('matchLogNoise detects common structured info emitters', () => {
+  assert.deepEqual(
+    matchLogNoise('time="2026-04-20T10:00:00Z" level=info msg="sync ok"'),
+    {
+      kind: 'builtin',
+      id: 'info-level-pair',
+      label: 'level=info',
+    }
   );
 });

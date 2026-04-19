@@ -36,6 +36,19 @@ test('filterNoiseText removes info lines but preserves risky lines', () => {
   assert.equal(filtered.text, 'panic: disk detached');
 });
 
+test('filterNoiseText folds structured prepare chatter in default info mode', () => {
+  const filtered = filterNoiseText([
+    '[2026-04-20 10:00:00] INFO bootstrap ready',
+    '[context] shell=/bin/bash',
+    '[tool] journalctl=/usr/bin/journalctl',
+    'WINDOW ts=2026-04-20T10:00:00+0800 uptime=12:34 shell=/bin/bash',
+    'panic: disk detached',
+  ].join('\n'));
+
+  assert.equal(filtered.suppressedCount, 4);
+  assert.equal(filtered.text, 'panic: disk detached');
+});
+
 test('focus mode suppresses debug lines and keeps nearby risk signals visible', () => {
   assert.deepEqual(
     matchLogNoise('DEBUG warmup started', { builtinMode: 'focus', customKeywords: [] }),
@@ -69,4 +82,15 @@ test('focus mode suppresses debug lines and keeps nearby risk signals visible', 
     builtinMode: 'focus',
     customKeywords: [],
   }), false);
+});
+
+test('matchLogNoise recognizes level=info style emitters', () => {
+  assert.deepEqual(
+    matchLogNoise('time="2026-04-20T10:00:00Z" level=info msg="sync ok"'),
+    {
+      kind: 'builtin',
+      id: 'info-level-pair',
+      label: 'level=info',
+    }
+  );
 });

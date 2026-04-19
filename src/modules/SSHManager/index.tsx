@@ -92,6 +92,7 @@ const STATUS: Record<ConnStatus, { badge: 'default' | 'processing' | 'success' |
 interface PrepareProfileStep {
   name: string;
   cmd: string;
+  cacheKey?: string;
   cacheScope?: string;
   cacheTtlMs?: number;
   mode?: 'exec' | 'pty';
@@ -100,6 +101,10 @@ interface PrepareProfileStep {
   timeoutMs?: number;
   timeout?: number;
 }
+
+type PrepareStage = 'all' | 'essential' | 'background';
+type PrepareSummaryStatus = 'ready' | 'done' | 'failed';
+type PrepareBackgroundStatus = 'idle' | 'running' | 'done' | 'failed';
 
 interface PrepareProfile {
   profileId: string;
@@ -140,6 +145,7 @@ interface PrepareRunResult {
   readyDurationMs?: number;
   readyStepCount?: number;
   status: 'done' | 'failed';
+  stage?: PrepareStage;
   steps: PrepareResultStep[];
   totalDurationMs?: number;
 }
@@ -151,16 +157,18 @@ interface PrepareSettings {
 }
 
 interface PrepareRunSummary {
+  backgroundStatus: PrepareBackgroundStatus;
   cachedStepCount: number;
   contextStepCount: number;
   profileId: string;
   profileName: string;
   readyDurationMs: number;
   readyStepCount: number;
-  status: 'done' | 'failed';
+  status: PrepareSummaryStatus;
   stepCount: number;
   failedCount: number;
   finishedAt: number;
+  lastStage: PrepareStage;
   totalDurationMs: number;
   connectedAt?: number;
   trigger: 'auto' | 'manual';
@@ -174,6 +182,27 @@ function formatDurationLabel(value?: number) {
     return seconds >= 10 ? `${seconds.toFixed(0)}s` : `${seconds.toFixed(1)}s`;
   }
   return `${Math.round(ms)}ms`;
+}
+
+function countPrepareSteps(profile: PrepareProfile | null, fallbackSteps: PrepareProfileStep[] = []) {
+  const steps = profile?.steps?.length ? profile.steps : fallbackSteps;
+  const readyStepCount = steps.filter((step) => step.phase === 'ready').length;
+  const contextStepCount = steps.filter((step) => step.phase === 'context').length;
+  return {
+    stepCount: steps.length,
+    readyStepCount,
+    contextStepCount,
+  };
+}
+
+function canSplitAutoPrepare(profile: PrepareProfile | null) {
+  if (!profile) return false;
+  const backgroundSteps = profile.steps.filter((step) => step.phase === 'context');
+  return backgroundSteps.length > 0 && backgroundSteps.every((step) => (step.mode || 'pty') === 'exec');
+}
+
+function isPrepareReadyStatus(status?: PrepareSummaryStatus) {
+  return status === 'ready' || status === 'done';
 }
 
 interface TerminalScreenMatch {
@@ -1086,6 +1115,7 @@ const SSHManager: React.FC = () => {
   const [prepareProfiles, setPrepareProfiles] = useState<PrepareProfile[]>([]);
   const [loadingPrepareProfiles, setLoadingPrepareProfiles] = useState(false);
   const [prepareRunningIds, setPrepareRunningIds] = useState<string[]>([]);
+  const [prepareBackgroundIds, setPrepareBackgroundIds] = useState<string[]>([]);
   const [prepareSummaries, setPrepareSummaries] = useState<Record<string, PrepareRunSummary>>({});
   const [prepareSettings, setPrepareSettings] = useLocalStorage<PrepareSettings>('devutility-ssh-prepare-settings', {
     profileId: 'linux-problem-localization-fast-path',
@@ -1337,7 +1367,7 @@ const SSHManager: React.FC = () => {
         summary.pending += 1;
         return summary;
       }
-      if (runSummary.status === 'done') {
+      if (isPrepareReadyStatus(runSummary.status)) {
         summary.ready += 1;
       } else {
         summary.failed += 1;
@@ -1378,7 +1408,8 @@ const SSHManager: React.FC = () => {
   async function requestPrepare(
     sessionId: string,
     profileId: string,
-    continueOnError: boolean
+    continueOnError: boolean,
+    stage: PrepareStage = 'all'
   ) {
     let lastError = '预处理失败';
 
@@ -1390,6 +1421,7 @@ const SSHManager: React.FC = () => {
           body: JSON.stringify({
             profileId,
             continueOnError,
+            stage,
           }),
         });
         const data = await response.json();
@@ -1409,9 +1441,19 @@ const SSHManager: React.FC = () => {
 
   async function runPrepareOnSession(
     sessionId: string,
-    trigger: 'auto' | 'manual',
-    silent = false
+    options: {
+      trigger: 'auto' | 'manual';
+      silent?: boolean;
+      stage?: PrepareStage;
+      background?: boolean;
+    }
   ) {
+    const {
+      trigger,
+      silent = false,
+      stage = 'all',
+      background = false,
+    } = options;
     const profileId = prepareSettings.profileId;
     if (!profileId) {
       if (!silent) messageApi.warning('请先选择预处理模板');
@@ -1420,19 +1462,37 @@ const SSHManager: React.FC = () => {
 
     const session = sessions.find((item) => item.id === sessionId);
     const profile = profiles.find((item) => item.id === session?.profileId);
+    const requestedProfile = prepareProfiles.find((item) => item.profileId === profileId) || activePrepareProfile;
     if (!session || session.status !== 'connected') {
       if (!silent) messageApi.warning('目标会话尚未连接');
       return false;
     }
 
-    setPrepareRunningIds((current) => current.includes(sessionId) ? current : [...current, sessionId]);
+    const setRunningIds = background ? setPrepareBackgroundIds : setPrepareRunningIds;
+    setRunningIds((current) => current.includes(sessionId) ? current : [...current, sessionId]);
+
+    if (background) {
+      setPrepareSummaries((current) => {
+        const previous = current[sessionId];
+        if (!previous || previous.connectedAt !== session.connectedAt) return current;
+        return {
+          ...current,
+          [sessionId]: {
+            ...previous,
+            backgroundStatus: 'running',
+          },
+        };
+      });
+    }
 
     try {
-      const result = await requestPrepare(sessionId, profileId, prepareSettings.continueOnError);
-      const resolvedProfile = result.profile || prepareProfiles.find((item) => item.profileId === profileId) || activePrepareProfile;
+      const result = await requestPrepare(sessionId, profileId, prepareSettings.continueOnError, stage);
+      const resolvedProfile = result.profile || requestedProfile;
       const profileName = resolvedProfile?.name || profileId;
       const steps = Array.isArray(result.steps) ? result.steps : [];
-      const readyStepCount = result.readyStepCount || resolvedProfile?.steps.filter((step) => step.phase === 'ready').length || 0;
+      const resultStage = result.stage || stage;
+      const profileStepCounts = countPrepareSteps(resolvedProfile, steps);
+      const hasBackgroundSteps = profileStepCounts.contextStepCount > 0;
       const startedAt = Date.now();
 
       steps.forEach((step, index) => {
@@ -1463,62 +1523,150 @@ const SSHManager: React.FC = () => {
       });
 
       const failedCount = steps.filter((step) => step.status === 'failed' || step.exitCode !== 0).length;
-      setPrepareSummaries((current) => ({
-        ...current,
-        [sessionId]: {
-          cachedStepCount: result.cachedStepCount || 0,
-          contextStepCount: result.contextStepCount || Math.max(0, steps.length - readyStepCount),
-          profileId,
-          profileName,
-          readyDurationMs: result.readyDurationMs || 0,
-          readyStepCount,
-          status: result.status,
-          stepCount: steps.length,
-          failedCount,
-          finishedAt: Date.now(),
-          totalDurationMs: result.totalDurationMs || 0,
-          connectedAt: session.connectedAt,
-          trigger,
-        },
-      }));
+      const finishedAt = Date.now();
+      setPrepareSummaries((current) => {
+        const previous = current[sessionId];
+        const previousForConnection = previous?.connectedAt === session.connectedAt ? previous : undefined;
+
+        if (resultStage === 'essential') {
+          return {
+            ...current,
+            [sessionId]: {
+              backgroundStatus: failedCount > 0 ? 'failed' : (hasBackgroundSteps ? 'idle' : 'done'),
+              cachedStepCount: result.cachedStepCount || 0,
+              contextStepCount: profileStepCounts.contextStepCount,
+              profileId,
+              profileName,
+              readyDurationMs: result.readyDurationMs || 0,
+              readyStepCount: profileStepCounts.readyStepCount || result.readyStepCount || 0,
+              status: failedCount > 0 ? 'failed' : (hasBackgroundSteps ? 'ready' : 'done'),
+              stepCount: profileStepCounts.stepCount,
+              failedCount,
+              finishedAt,
+              lastStage: resultStage,
+              totalDurationMs: result.totalDurationMs || 0,
+              connectedAt: session.connectedAt,
+              trigger,
+            },
+          };
+        }
+
+        if (resultStage === 'background') {
+          const previousReadyDurationMs = previousForConnection?.readyDurationMs || result.readyDurationMs || 0;
+          const previousCachedStepCount = previousForConnection?.cachedStepCount || 0;
+          const previousTotalDurationMs = previousForConnection?.totalDurationMs || 0;
+          const previousFailedCount = previousForConnection?.failedCount || 0;
+          const preservedReadyStatus = previousForConnection && isPrepareReadyStatus(previousForConnection.status);
+
+          return {
+            ...current,
+            [sessionId]: {
+              backgroundStatus: failedCount > 0 ? 'failed' : 'done',
+              cachedStepCount: previousCachedStepCount + (result.cachedStepCount || 0),
+              contextStepCount: profileStepCounts.contextStepCount,
+              profileId,
+              profileName,
+              readyDurationMs: previousReadyDurationMs,
+              readyStepCount: profileStepCounts.readyStepCount || result.readyStepCount || 0,
+              status: failedCount > 0 ? (preservedReadyStatus ? 'ready' : 'failed') : 'done',
+              stepCount: profileStepCounts.stepCount,
+              failedCount: previousFailedCount + failedCount,
+              finishedAt,
+              lastStage: resultStage,
+              totalDurationMs: previousTotalDurationMs + (result.totalDurationMs || 0),
+              connectedAt: session.connectedAt,
+              trigger,
+            },
+          };
+        }
+
+        return {
+          ...current,
+          [sessionId]: {
+            backgroundStatus: hasBackgroundSteps ? (failedCount > 0 ? 'failed' : 'done') : 'done',
+            cachedStepCount: result.cachedStepCount || 0,
+            contextStepCount: profileStepCounts.contextStepCount,
+            profileId,
+            profileName,
+            readyDurationMs: result.readyDurationMs || 0,
+            readyStepCount: profileStepCounts.readyStepCount || result.readyStepCount || 0,
+            status: failedCount > 0 ? 'failed' : 'done',
+            stepCount: profileStepCounts.stepCount,
+            failedCount,
+            finishedAt,
+            lastStage: resultStage,
+            totalDurationMs: result.totalDurationMs || 0,
+            connectedAt: session.connectedAt,
+            trigger,
+          },
+        };
+      });
 
       if (!silent) {
         const readyText = result.readyDurationMs
           ? `ready ${formatDurationLabel(result.readyDurationMs)}`
           : null;
         const cacheText = result.cachedStepCount ? `缓存 ${result.cachedStepCount} 步` : null;
+        const stageLabel = resultStage === 'essential'
+          ? 'ready 预热'
+          : resultStage === 'background'
+            ? '背景补全'
+            : '预处理';
         const text = failedCount > 0
-          ? `${session.name} 预处理完成，${failedCount} 个步骤需要关注${readyText ? `，${readyText}` : ''}${cacheText ? `，${cacheText}` : ''}`
-          : `${session.name} 预处理完成${readyText ? `，${readyText}` : ''}${cacheText ? `，${cacheText}` : ''}`;
+          ? `${session.name} ${stageLabel}完成，${failedCount} 个步骤需要关注${readyText ? `，${readyText}` : ''}${cacheText ? `，${cacheText}` : ''}`
+          : `${session.name} ${stageLabel}完成${readyText ? `，${readyText}` : ''}${cacheText ? `，${cacheText}` : ''}`;
         messageApi[failedCount > 0 ? 'warning' : 'success'](text);
       }
       return true;
     } catch (error) {
-      const fallbackReadyStepCount = activePrepareProfile?.steps.filter((step) => step.phase === 'ready').length || 0;
-      setPrepareSummaries((current) => ({
-        ...current,
-        [sessionId]: {
-          cachedStepCount: 0,
-          contextStepCount: Math.max(0, (activePrepareProfile?.steps.length || 0) - fallbackReadyStepCount),
-          profileId,
-          profileName: activePrepareProfile?.name || profileId,
-          readyDurationMs: 0,
-          readyStepCount: fallbackReadyStepCount,
-          status: 'failed',
-          stepCount: activePrepareProfile?.steps.length || 0,
-          failedCount: activePrepareProfile?.steps.length || 0,
-          finishedAt: Date.now(),
-          totalDurationMs: 0,
-          connectedAt: session.connectedAt,
-          trigger,
-        },
-      }));
-      if (!silent || trigger === 'auto') {
+      const fallbackCounts = countPrepareSteps(requestedProfile);
+      setPrepareSummaries((current) => {
+        const previous = current[sessionId];
+        const previousForConnection = previous?.connectedAt === session.connectedAt ? previous : undefined;
+
+        if (stage === 'background' && previousForConnection && isPrepareReadyStatus(previousForConnection.status)) {
+          return {
+            ...current,
+            [sessionId]: {
+              ...previousForConnection,
+              backgroundStatus: 'failed',
+              finishedAt: Date.now(),
+              lastStage: stage,
+            },
+          };
+        }
+
+        return {
+          ...current,
+          [sessionId]: {
+            backgroundStatus: stage === 'essential'
+              ? 'failed'
+              : fallbackCounts.contextStepCount > 0 ? 'failed' : 'done',
+            cachedStepCount: 0,
+            contextStepCount: fallbackCounts.contextStepCount,
+            profileId,
+            profileName: requestedProfile?.name || profileId,
+            readyDurationMs: previousForConnection?.readyDurationMs || 0,
+            readyStepCount: fallbackCounts.readyStepCount,
+            status: stage === 'background' && previousForConnection && isPrepareReadyStatus(previousForConnection.status)
+              ? previousForConnection.status
+              : 'failed',
+            stepCount: fallbackCounts.stepCount,
+            failedCount: fallbackCounts.stepCount || 1,
+            finishedAt: Date.now(),
+            lastStage: stage,
+            totalDurationMs: previousForConnection?.totalDurationMs || 0,
+            connectedAt: session.connectedAt,
+            trigger,
+          },
+        };
+      });
+      if (!silent) {
         messageApi.warning(`${session.name} 预处理失败: ${error instanceof Error ? error.message : '未知错误'}`);
       }
       return false;
     } finally {
-      setPrepareRunningIds((current) => current.filter((item) => item !== sessionId));
+      setRunningIds((current) => current.filter((item) => item !== sessionId));
     }
   }
 
@@ -1533,7 +1681,11 @@ const SSHManager: React.FC = () => {
     }
 
     const results = await Promise.allSettled(
-      connectedSelectedNodes.map((sessionId) => runPrepareOnSession(sessionId, 'manual', true))
+      connectedSelectedNodes.map((sessionId) => runPrepareOnSession(sessionId, {
+        trigger: 'manual',
+        silent: true,
+        stage: 'all',
+      }))
     );
     const successCount = results.filter((item) => item.status === 'fulfilled' && item.value).length;
     const failedCount = results.length - successCount;
@@ -1557,9 +1709,31 @@ const SSHManager: React.FC = () => {
       if (autoPreparedAtRef.current[session.id] === session.connectedAt) return;
 
       autoPreparedAtRef.current[session.id] = session.connectedAt;
-      void runPrepareOnSession(session.id, 'auto', true);
+      void (async () => {
+        if (canSplitAutoPrepare(activePrepareProfile)) {
+          const readyOk = await runPrepareOnSession(session.id, {
+            trigger: 'auto',
+            silent: true,
+            stage: 'essential',
+          });
+          if (!readyOk) return;
+          void runPrepareOnSession(session.id, {
+            trigger: 'auto',
+            silent: true,
+            stage: 'background',
+            background: true,
+          });
+          return;
+        }
+
+        await runPrepareOnSession(session.id, {
+          trigger: 'auto',
+          silent: true,
+          stage: 'all',
+        });
+      })();
     });
-  }, [prepareRunningIds, prepareSettings.autoRun, prepareSettings.profileId, sessions]);
+  }, [activePrepareProfile, prepareRunningIds, prepareSettings.autoRun, prepareSettings.profileId, sessions]);
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? null;
   const activeNodeContext = activeSessionId ? (nodeContexts[activeSessionId] ?? null) : null;
   const sessionGroupsMap = React.useMemo(() => {
@@ -2088,6 +2262,8 @@ const SSHManager: React.FC = () => {
                 const prepareSummary = prepareSummaries[sess.id];
                 const prepareStatusMatchesCurrentConnection = prepareSummary?.connectedAt && prepareSummary.connectedAt === sess.connectedAt;
                 const prepareRunning = prepareRunningIds.includes(sess.id);
+                const prepareBackgroundRunning = prepareBackgroundIds.includes(sess.id);
+                const prepareReady = prepareStatusMatchesCurrentConnection && isPrepareReadyStatus(prepareSummary?.status);
                 const uptimeStr = uptimeMs > 0 ? (
                   uptimeMs > 3600000 ? `${Math.floor(uptimeMs / 3600000)}h${Math.floor((uptimeMs % 3600000) / 60000)}m`
                   : uptimeMs > 60000 ? `${Math.floor(uptimeMs / 60000)}m`
@@ -2139,15 +2315,20 @@ const SSHManager: React.FC = () => {
                               预处理中
                             </Tag>
                           )}
-                          {!prepareRunning && prepareStatusMatchesCurrentConnection && prepareSummary?.status === 'done' && (
+                          {!prepareRunning && prepareReady && prepareSummary && (
                             <>
                               <Tooltip
-                                title={`${prepareSummary.profileName} · ready ${formatDurationLabel(prepareSummary.readyDurationMs)} · 总耗时 ${formatDurationLabel(prepareSummary.totalDurationMs)} · ${prepareSummary.stepCount} 步`}
+                                title={`${prepareSummary.profileName} · ready ${formatDurationLabel(prepareSummary.readyDurationMs)} · 总耗时 ${formatDurationLabel(prepareSummary.totalDurationMs)} · ${prepareSummary.stepCount} 步${prepareBackgroundRunning ? ' · 后台补全中' : prepareSummary.backgroundStatus === 'failed' ? ' · 后台补全未完成' : ''}`}
                               >
-                                <Tag color="success" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
-                                  已预热
+                                <Tag color={prepareBackgroundRunning ? 'processing' : 'success'} style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
+                                  {prepareSummary.status === 'done' && !prepareBackgroundRunning ? '已预热' : '已就绪'}
                                 </Tag>
                               </Tooltip>
+                              {prepareBackgroundRunning && (
+                                <Tag color="gold" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
+                                  补全中
+                                </Tag>
+                              )}
                               {prepareSummary.readyDurationMs > 0 && (
                                 <Tag color="processing" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
                                   ready {formatDurationLabel(prepareSummary.readyDurationMs)}
@@ -2156,6 +2337,11 @@ const SSHManager: React.FC = () => {
                               {prepareSummary.cachedStepCount > 0 && (
                                 <Tag color="default" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
                                   缓存 {prepareSummary.cachedStepCount}
+                                </Tag>
+                              )}
+                              {prepareSummary.backgroundStatus === 'failed' && !prepareBackgroundRunning && (
+                                <Tag color="orange" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
+                                  补全未完成
                                 </Tag>
                               )}
                             </>
@@ -2707,7 +2893,7 @@ const SSHManager: React.FC = () => {
                             {step.name}
                             {step.phase === 'ready' ? ' · ready' : ''}
                             {step.mode === 'exec' ? ' · exec' : ''}
-                            {step.cacheScope ? ' · cache' : ''}
+                            {(step.cacheKey || step.cacheScope) ? ' · cache' : ''}
                           </Tag>
                         ))}
                       </div>
@@ -2758,7 +2944,7 @@ const SSHManager: React.FC = () => {
                     message={
                       <div>
                         <Text strong style={{ fontSize: 12 }}>自动预处理负责：</Text>
-                        {['优先让节点尽快进入 ready 状态', '并行完成只读上下文探测', '缓存稳定的工具探测结果', '把预热噪声与真正排查信号分开'].map((text, index) => (
+                        {['先执行 essential ready 步骤，尽快进入可定位状态', '再在后台补齐只读上下文探测，减少首屏等待', '缓存稳定的工具探测结果，重复登录直接复用', '把预热噪声与真正排查信号分开，默认少看低价值 INFO'].map((text, index) => (
                           <Text key={text} type="secondary" style={{ fontSize: 11, display: 'block' }}>{index + 1}. {text}</Text>
                         ))}
                         <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>

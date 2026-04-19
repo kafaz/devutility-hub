@@ -52,14 +52,12 @@ const {
   resolveNode,
   saveNode,
   savePrepareProfile,
+  selectPrepareProfileSteps,
   updateNode,
   updatePrepareProfile,
 } = require('./lib/agentRegistry');
 const {
-  buildPrepareRunMetrics,
-  normalizePreparePhase,
-  readPrepareStepCache,
-  writePrepareStepCache,
+  executeStructuredSteps: executePrepareSteps,
 } = require('./lib/prepareRuntime');
 const {
   appendRun,
@@ -1385,180 +1383,19 @@ function materializeConnectionSpec(body) {
 }
 
 async function executeStructuredSteps(session, steps, opts = {}) {
-  const varContext = { ...(opts.variables || {}) };
-  const results = [];
-  const continueOnError = opts.continueOnError === true;
-  const startedAt = Date.now();
-  const profileId = opts.profileId || null;
+  return executePrepareSteps(session, steps, {
+    continueOnError: opts.continueOnError,
+    profileId: opts.profileId || null,
+    variables: opts.variables,
+  }, {
+    executeCommand: executeSingleCommand,
+    getBlockedCommandError,
+    runPythonScript,
+  });
+}
 
-  const resolveStructuredCommand = (cmd) => String(cmd || '').replace(
-    /\$\{([^}]+)\}/g,
-    (_, name) => varContext[name] !== undefined ? varContext[name] : `\${${name}}`
-  );
-
-  const executePreparedStep = async (step) => {
-    const resolvedCmd = resolveStructuredCommand(step.cmd);
-    const phase = normalizePreparePhase(step.phase);
-    const mode = String(step.mode || 'pty').trim().toLowerCase() === 'exec' ? 'exec' : 'pty';
-    const stepStartedAt = Date.now();
-    const baseResult = {
-      name: step.name || resolvedCmd,
-      cmd: step.cmd,
-      resolvedCmd,
-      phase,
-      mode,
-      parallelGroup: step.parallelGroup ? String(step.parallelGroup) : undefined,
-      startedAt: stepStartedAt,
-      finishedAt: stepStartedAt,
-      fromCache: false,
-    };
-
-    const blocked = getBlockedCommandError(resolvedCmd, 'structured-steps');
-    if (blocked) {
-      return {
-        ...baseResult,
-        stdout: '',
-        stderr: blocked,
-        exitCode: -1,
-        durationMs: 0,
-        status: 'failed',
-        statusReason: blocked,
-      };
-    }
-
-    const cached = readPrepareStepCache(session, profileId, step, resolvedCmd);
-    if (cached) {
-      if (cached.status !== 'failed' && cached.capturedVar?.name) {
-        varContext[cached.capturedVar.name] = cached.capturedVar.value;
-      }
-      const finishedAt = Date.now();
-      return {
-        ...baseResult,
-        ...cached,
-        durationMs: 0,
-        statusReason: cached.statusReason || '命中预处理缓存',
-        startedAt: stepStartedAt,
-        finishedAt,
-      };
-    }
-
-    const executor = mode === 'exec'
-      ? executeSingleCommand(session, resolvedCmd, step.timeoutMs || step.timeout || 30000, 'exec')
-      : session.enqueueShellCmd(resolvedCmd, step.timeoutMs || step.timeout || 30000);
-    const result = await executor;
-    let processedOutput = result.stdout;
-    let scriptResult;
-    let scriptError;
-
-    if (step.scriptPath) {
-      const sr = await runPythonScript(step.scriptPath, result.stdout, 15000);
-      if (sr.exitCode === 0) {
-        processedOutput = sr.stdout;
-        scriptResult = { exitCode: sr.exitCode, stdout: sr.stdout };
-      } else {
-        scriptError = `脚本执行失败(exit ${sr.exitCode}): ${sr.stderr}`;
-      }
-    }
-
-    const evalResult = evalOutputStatus(processedOutput, {
-      abnormalRegex: step.abnormalRegex,
-      normalRegex: step.normalRegex,
-      exitCode: result.exitCode,
-    });
-
-    let capturedVar;
-    if (step.captureVar && evalResult.status !== 'failed') {
-      let value = processedOutput.trim();
-      if (step.capturePattern) {
-        try {
-          const matched = new RegExp(step.capturePattern).exec(processedOutput);
-          if (matched) value = matched[1] !== undefined ? matched[1] : matched[0];
-        } catch {
-          // ignore invalid regex
-        }
-      }
-      if (value) {
-        capturedVar = { name: step.captureVar, value };
-      }
-    }
-
-    const finalResult = {
-      ...baseResult,
-      stdout: result.stdout,
-      processedOutput: step.scriptPath ? processedOutput : undefined,
-      stderr: result.stderr,
-      exitCode: result.exitCode,
-      durationMs: result.durationMs,
-      status: evalResult.status,
-      statusReason: evalResult.reason,
-      capturedVar,
-      scriptResult,
-      scriptError,
-      finishedAt: Date.now(),
-    };
-
-    if (evalResult.status !== 'failed' && capturedVar) {
-      varContext[capturedVar.name] = capturedVar.value;
-    }
-    writePrepareStepCache(session, profileId, step, resolvedCmd, finalResult);
-    return finalResult;
-  };
-
-  for (let index = 0; index < (steps || []).length; index += 1) {
-    const step = steps[index];
-    if (!step?.cmd) continue;
-
-    const canParallelize = String(step.mode || 'pty').trim().toLowerCase() === 'exec'
-      && step.parallelGroup
-      && !step.captureVar;
-
-    if (canParallelize) {
-      const groupId = String(step.parallelGroup);
-      const group = [];
-      let cursor = index;
-      while (cursor < steps.length) {
-        const candidate = steps[cursor];
-        const sameGroup = candidate?.cmd
-          && String(candidate.mode || 'pty').trim().toLowerCase() === 'exec'
-          && String(candidate.parallelGroup || '') === groupId
-          && !candidate.captureVar;
-        if (!sameGroup) break;
-        group.push(candidate);
-        cursor += 1;
-      }
-
-      const groupResults = await Promise.all(group.map((item) => executePreparedStep(item)));
-      let shouldStop = false;
-      groupResults.forEach((result) => {
-        results.push({
-          ...result,
-          varSnapshot: { ...varContext },
-        });
-        if (result.status === 'failed' && !continueOnError) {
-          shouldStop = true;
-        }
-      });
-      index = cursor - 1;
-      if (shouldStop) break;
-      continue;
-    }
-
-    const result = await executePreparedStep(step);
-    results.push({
-      ...result,
-      varSnapshot: { ...varContext },
-    });
-
-    if (result.status === 'failed' && !continueOnError) break;
-  }
-
-  const totalDurationMs = Date.now() - startedAt;
-  return {
-    status: results.some((item) => item.status === 'failed') ? 'failed' : 'done',
-    steps: results,
-    finalVarContext: varContext,
-    ...buildPrepareRunMetrics(results, totalDurationMs),
-  };
+function normalizePrepareStage(value) {
+  return value === 'essential' || value === 'background' ? value : 'all';
 }
 
 async function executeSingleCommand(session, cmd, timeout, mode) {
@@ -1843,9 +1680,11 @@ app.post('/api/agent/sessions/:sessionId/prepare', async (req, res) => {
   }
 
   const profile = req.body?.profileId ? getPrepareProfile(req.body.profileId) : null;
-  const steps = req.body?.steps || profile?.steps;
+  const stage = normalizePrepareStage(req.body?.stage);
+  const steps = selectPrepareProfileSteps(req.body?.steps || profile?.steps, stage);
   if (!steps || !Array.isArray(steps) || steps.length === 0) {
-    return res.status(400).json({ ok: false, error: '缺少 prepare steps' });
+    const stageLabel = stage === 'all' ? '' : `${stage} `;
+    return res.status(400).json({ ok: false, error: `缺少 ${stageLabel}prepare steps`.trim() });
   }
 
   try {
@@ -1857,6 +1696,7 @@ app.post('/api/agent/sessions/:sessionId/prepare', async (req, res) => {
     res.json({
       ok: true,
       data: {
+        stage,
         session: describeSession(req.params.sessionId, session),
         profile: profile || null,
         ...result,

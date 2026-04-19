@@ -12,6 +12,9 @@ test('problem localization boost splits fast readiness steps from background war
   const boost = DEFAULT_PREPARE_PROFILES.find((item) => item.profileId === 'linux-problem-localization-boost');
   assert.ok(fastPath, 'expected builtin fast-path localization profile');
   assert.ok(boost, 'expected builtin boost localization profile');
+  assert.match(fastPath.steps.find((step) => step.name === 'collect-fast-context').cmd, /\[context\] shell=/);
+  assert.equal(fastPath.steps.find((step) => step.name === 'warm-common-tools').cacheKey, 'warm-common-tools');
+  assert.match(boost.steps.find((step) => step.name === 'collect-runtime-window').cmd, /WINDOW ts=/);
 
   assert.deepEqual(
     selectPrepareProfileSteps(fastPath, 'essential').map((step) => step.name),
@@ -57,7 +60,7 @@ test('legacy builtin localization profile is upgraded to staged system defaults'
   assert.ok(upgraded, 'expected upgraded localization profile');
   assert.equal(upgraded.createdAt, 123);
   assert.equal(upgraded.managedBy, 'system');
-  assert.equal(upgraded.version, 2);
+  assert.equal(upgraded.version, 3);
   assert.deepEqual(
     selectPrepareProfileSteps(upgraded, 'background').map((step) => step.name),
     ['collect-fast-context', 'warm-common-tools', 'collect-runtime-window']

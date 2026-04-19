@@ -64,6 +64,12 @@ export const BUILTIN_LOG_NOISE_RULES: BuiltinLogNoiseRule[] = [
     pattern: /^\s*(?:\d{4}[-/]\d{2}[-/]\d{2}[ t]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?\s+)?info(?=\s|:|-|\||$)/i,
   },
   {
+    id: 'bracketed-info-prefix',
+    label: '[ts] INFO 前缀',
+    level: 'info',
+    pattern: /^\s*(?:\[[^\]\n]+\]\s*)+info(?=\s|:|-|\||$)/i,
+  },
+  {
     id: 'info-level-pair',
     label: 'level=info',
     level: 'info',
@@ -76,10 +82,28 @@ export const BUILTIN_LOG_NOISE_RULES: BuiltinLogNoiseRule[] = [
     pattern: /"(?:level|lvl|severity)"\s*:\s*"info"/i,
   },
   {
+    id: 'logrus-info-prefix',
+    label: 'time=... level=info',
+    level: 'info',
+    pattern: /^\s*time="[^"\n]+"\s+level=info\b/i,
+  },
+  {
+    id: 'klog-info-prefix',
+    label: 'I0420 风格 INFO',
+    level: 'info',
+    pattern: /^\s*i\d{4}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?\b/i,
+  },
+  {
     id: 'prepare-ready-line',
     label: 'READY 上下文',
     level: 'info',
     pattern: /^\s*READY\s+user=\S+\s+host=\S+\s+pwd=.+$/i,
+  },
+  {
+    id: 'prepare-context-line',
+    label: '上下文探测输出',
+    level: 'info',
+    pattern: /^\s*\[context\]\s+(?:user|host|pwd|shell)=/i,
   },
   {
     id: 'bracket-debug-prefix',
@@ -132,19 +156,19 @@ export const BUILTIN_LOG_NOISE_RULES: BuiltinLogNoiseRule[] = [
   {
     id: 'prepare-tools-ready',
     label: '工具预热清单',
-    level: 'debug',
+    level: 'info',
     pattern: /^\s*TOOLS_READY(?:\s|$)/i,
   },
   {
     id: 'prepare-tool-path',
     label: '工具路径探测',
-    level: 'debug',
+    level: 'info',
     pattern: /^\s*\[tool\]\s+[a-z0-9._-]+=.+$/i,
   },
   {
     id: 'prepare-window',
     label: '运行窗口快照',
-    level: 'debug',
+    level: 'info',
     pattern: /^\s*WINDOW\s+ts=.*\bshell=.*$/i,
   },
   {
