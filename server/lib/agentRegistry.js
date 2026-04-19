@@ -18,16 +18,20 @@ const READY_SHELL_PROFILE_CMD = [
   'unset __codex_shell_name',
 ].join('; ');
 
+const READY_SHELL_BOOTSTRAP_CMD = [
+  READY_SHELL_PROFILE_CMD,
+  'export LANG=C.UTF-8',
+  'export LC_ALL=C.UTF-8',
+  'export TERM=xterm-256color',
+  'export LESS=-SR',
+  'alias ll="ls -alF" >/dev/null 2>&1 || true',
+  'printf "READY user=%s host=%s pwd=%s\\n" "$(whoami)" "$(hostname)" "$(pwd)"',
+].join('; ');
+
 const READY_SHELL_STEPS = [
   {
-    name: 'load-shell-profile',
-    cmd: READY_SHELL_PROFILE_CMD,
-    phase: 'ready',
-    mode: 'pty',
-  },
-  {
-    name: 'set-diagnostic-env',
-    cmd: 'export LANG=C.UTF-8; export LC_ALL=C.UTF-8; export TERM=xterm-256color; export LESS=-SR; alias ll=\"ls -alF\" >/dev/null 2>&1 || true; printf \"READY user=%s host=%s pwd=%s\\n\" \"$(whoami)\" \"$(hostname)\" \"$(pwd)\"',
+    name: 'ready-shell-bootstrap',
+    cmd: READY_SHELL_BOOTSTRAP_CMD,
     phase: 'ready',
     mode: 'pty',
   },
@@ -41,6 +45,7 @@ const FAST_CONTEXT_STEPS = [
     mode: 'exec',
     parallelGroup: 'fast-context',
     cacheKey: 'collect-target-identity',
+    cacheScope: 'target',
     cacheTtlMs: 600000,
   },
   {
@@ -100,7 +105,7 @@ const DEFAULT_PREPARE_PROFILES = [
     profileId: 'linux-readonly-context',
     name: 'Linux Readonly Context',
     description: 'Collect current identity and host context without mutating shell state.',
-    builtinVersion: 3,
+    builtinVersion: 4,
     managedBy: 'system',
     version: DEFAULT_PREPARE_PROFILE_VERSION,
     steps: SAFE_CONTEXT_STEPS,
@@ -111,7 +116,7 @@ const DEFAULT_PREPARE_PROFILES = [
     profileId: 'linux-problem-localization-fast-path',
     name: 'Linux Problem Localization Fast Path',
     description: 'Prioritize shell readiness first, then parallelize read-only probes so issue localization can start faster after login.',
-    builtinVersion: 4,
+    builtinVersion: 5,
     managedBy: 'system',
     version: DEFAULT_PREPARE_PROFILE_VERSION,
     steps: LOCALIZATION_FAST_PATH_STEPS,
@@ -122,7 +127,7 @@ const DEFAULT_PREPARE_PROFILES = [
     profileId: 'linux-problem-localization-boost',
     name: 'Linux Problem Localization Boost',
     description: 'Warm the shell profile, parallelize safe context probes, and collect a broader runtime snapshot for deeper follow-up localization.',
-    builtinVersion: 5,
+    builtinVersion: 6,
     managedBy: 'system',
     version: DEFAULT_PREPARE_PROFILE_VERSION,
     steps: LOCALIZATION_BOOST_STEPS,

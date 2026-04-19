@@ -163,6 +163,10 @@ const LOW_SIGNAL_SESSION_LOG_TYPES = {
   command_started: '命令开始事件',
 };
 
+const STRUCTURED_LOG_BOUNDARY_RE = /^(?:\[[^\]\n]+\]\s*)*(?:trace|debug|info|warn|warning|error|fatal)\b/i;
+const TIMESTAMPED_LOG_BOUNDARY_RE = /^(?:\d{4}[-/]\d{2}[-/]\d{2}[ t]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?|[a-z]\d{4}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?|time="[^"\n]+")/i;
+const PREPARE_LOG_BOUNDARY_RE = /^(?:READY|WINDOW|TOOLS_READY|\[context\]|\[tool\]|\[log\])\b/i;
+
 function normalizeNoiseKeyword(value) {
   return String(value || '').trim().toLowerCase();
 }
@@ -228,26 +232,56 @@ function shouldSuppressLogLine(text, options = []) {
   return Boolean(matchLogNoise(text, options));
 }
 
+function looksLikeStandaloneLogBoundary(text, options = []) {
+  const normalizedText = String(text || '').trim();
+  if (!normalizedText) return false;
+  if (shouldSuppressLogLine(normalizedText, options)) return true;
+  if (RISK_SIGNAL_RE.test(normalizedText)) return true;
+  return STRUCTURED_LOG_BOUNDARY_RE.test(normalizedText)
+    || TIMESTAMPED_LOG_BOUNDARY_RE.test(normalizedText)
+    || PREPARE_LOG_BOUNDARY_RE.test(normalizedText);
+}
+
+function isNoiseContinuationLine(text, options = []) {
+  const rawText = String(text || '');
+  if (!rawText.trim()) return false;
+  if (!/^\s+/.test(rawText)) return false;
+  const normalizedText = rawText.trim();
+  if (RISK_SIGNAL_RE.test(normalizedText)) return false;
+  return !looksLikeStandaloneLogBoundary(normalizedText, options);
+}
+
 function inspectNoiseText(text, options = []) {
   const lines = String(text || '').split(/\r?\n/);
   const kept = [];
   let suppressedCount = 0;
   let visibleLineCount = 0;
 
-  lines.forEach((line) => {
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
     if (!line.trim()) {
       kept.push(line);
-      return;
+      continue;
     }
 
     if (shouldSuppressLogLine(line, options)) {
       suppressedCount += 1;
-      return;
+      while (index + 1 < lines.length) {
+        const nextLine = lines[index + 1];
+        if (!nextLine.trim()) break;
+        if (shouldSuppressLogLine(nextLine, options) || isNoiseContinuationLine(nextLine, options)) {
+          suppressedCount += 1;
+          index += 1;
+          continue;
+        }
+        break;
+      }
+      continue;
     }
 
     kept.push(line);
     visibleLineCount += 1;
-  });
+  }
 
   return {
     text: kept.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd(),
@@ -300,6 +334,20 @@ function getSessionLogSuppressionInfo(log, options = []) {
       kind: 'builtin',
       id: `session-event:${log.eventTitle}`,
       label: '会话生命周期事件',
+    };
+  }
+
+  if (
+    logType === 'command_result'
+    && typeof (log && log.exitCode) === 'number'
+    && log.exitCode === 0
+    && !String((log && log.stdout) || '').trim()
+    && !String((log && log.stderr) || '').trim()
+  ) {
+    return {
+      kind: 'builtin',
+      id: 'session-type:command-result-empty',
+      label: '命令完成且无输出',
     };
   }
 

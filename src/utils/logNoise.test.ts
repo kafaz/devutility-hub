@@ -16,6 +16,19 @@ test('shouldSuppressSessionLog suppresses session logs whose stdout is only info
   assert.equal(suppressed, true);
 });
 
+test('shouldSuppressSessionLog suppresses empty successful command results', () => {
+  const suppressed = shouldSuppressSessionLog({
+    type: 'command_result',
+    level: 'info',
+    message: '命令执行完成，exit=0，duration=4ms',
+    stdout: '   ',
+    stderr: '',
+    exitCode: 0,
+  });
+
+  assert.equal(suppressed, true);
+});
+
 test('shouldSuppressSessionLog keeps mixed logs when a risk signal appears beside info noise', () => {
   const suppressed = shouldSuppressSessionLog({
     type: 'command_result',
@@ -46,6 +59,18 @@ test('filterNoiseText folds structured prepare chatter in default info mode', ()
   ].join('\n'));
 
   assert.equal(filtered.suppressedCount, 4);
+  assert.equal(filtered.text, 'panic: disk detached');
+});
+
+test('filterNoiseText removes indented continuation lines that belong to info noise blocks', () => {
+  const filtered = filterNoiseText([
+    '[INFO] background probe started',
+    '  node=node-a',
+    '  phase=warmup',
+    'panic: disk detached',
+  ].join('\n'));
+
+  assert.equal(filtered.suppressedCount, 3);
   assert.equal(filtered.text, 'panic: disk detached');
 });
 

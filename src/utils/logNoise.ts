@@ -192,6 +192,10 @@ const LOW_SIGNAL_SESSION_LOG_TYPES: Record<string, string> = {
   command_started: '命令开始事件',
 };
 
+const STRUCTURED_LOG_BOUNDARY_RE = /^(?:\[[^\]\n]+\]\s*)*(?:trace|debug|info|warn|warning|error|fatal)\b/i;
+const TIMESTAMPED_LOG_BOUNDARY_RE = /^(?:\d{4}[-/]\d{2}[-/]\d{2}[ t]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?|[a-z]\d{4}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?|time="[^"\n]+")/i;
+const PREPARE_LOG_BOUNDARY_RE = /^(?:READY|WINDOW|TOOLS_READY|\[context\]|\[tool\]|\[log\])\b/i;
+
 export function normalizeNoiseKeyword(value: string) {
   return String(value || '').trim().toLowerCase();
 }
@@ -257,26 +261,56 @@ export function shouldSuppressLogLine(text: string, options: LogNoiseOptions | s
   return Boolean(matchLogNoise(text, options));
 }
 
+function looksLikeStandaloneLogBoundary(text: string, options: LogNoiseOptions | string[] = []) {
+  const normalizedText = String(text || '').trim();
+  if (!normalizedText) return false;
+  if (shouldSuppressLogLine(normalizedText, options)) return true;
+  if (RISK_SIGNAL_RE.test(normalizedText)) return true;
+  return STRUCTURED_LOG_BOUNDARY_RE.test(normalizedText)
+    || TIMESTAMPED_LOG_BOUNDARY_RE.test(normalizedText)
+    || PREPARE_LOG_BOUNDARY_RE.test(normalizedText);
+}
+
+function isNoiseContinuationLine(text: string, options: LogNoiseOptions | string[] = []) {
+  const rawText = String(text || '');
+  if (!rawText.trim()) return false;
+  if (!/^\s+/.test(rawText)) return false;
+  const normalizedText = rawText.trim();
+  if (RISK_SIGNAL_RE.test(normalizedText)) return false;
+  return !looksLikeStandaloneLogBoundary(normalizedText, options);
+}
+
 export function inspectNoiseText(text: string, options: LogNoiseOptions | string[] = []): NoiseTextInspection {
   const lines = String(text || '').split(/\r?\n/);
   const kept: string[] = [];
   let suppressedCount = 0;
   let visibleLineCount = 0;
 
-  lines.forEach((line) => {
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
     if (!line.trim()) {
       kept.push(line);
-      return;
+      continue;
     }
 
     if (shouldSuppressLogLine(line, options)) {
       suppressedCount += 1;
-      return;
+      while (index + 1 < lines.length) {
+        const nextLine = lines[index + 1];
+        if (!nextLine.trim()) break;
+        if (shouldSuppressLogLine(nextLine, options) || isNoiseContinuationLine(nextLine, options)) {
+          suppressedCount += 1;
+          index += 1;
+          continue;
+        }
+        break;
+      }
+      continue;
     }
 
     kept.push(line);
     visibleLineCount += 1;
-  });
+  }
 
   return {
     text: kept.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd(),
@@ -345,6 +379,20 @@ export function getSessionLogSuppressionInfo(
       kind: 'builtin',
       id: `session-event:${log.eventTitle}`,
       label: '会话生命周期事件',
+    };
+  }
+
+  if (
+    logType === 'command_result'
+    && typeof log.exitCode === 'number'
+    && log.exitCode === 0
+    && !String(log.stdout || '').trim()
+    && !String(log.stderr || '').trim()
+  ) {
+    return {
+      kind: 'builtin',
+      id: 'session-type:command-result-empty',
+      label: '命令完成且无输出',
     };
   }
 

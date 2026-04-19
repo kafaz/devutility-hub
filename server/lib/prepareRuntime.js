@@ -16,6 +16,14 @@ function normalizePreparePhase(value) {
   return 'ready';
 }
 
+function normalizePrepareCacheScope(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'target' || normalized === 'connection') {
+    return normalized;
+  }
+  return 'profile';
+}
+
 function evalOutputStatus(stdout, opts = {}) {
   const text = stdout ?? '';
 
@@ -75,8 +83,26 @@ function getTargetCacheKey(session, opts = {}) {
 function buildPrepareStepCacheKey(session, step, resolvedCmd, opts = {}) {
   const cacheKey = String(step?.cacheKey || '').trim();
   if (!cacheKey) return '';
+  const targetCacheKey = getTargetCacheKey(session, opts);
+  const cacheScope = normalizePrepareCacheScope(step?.cacheScope);
+
+  if (cacheScope === 'target') {
+    return `${targetCacheKey}::target::${cacheKey}::${resolvedCmd}`;
+  }
+
+  if (cacheScope === 'connection') {
+    const connectionId = String(
+      session?.connectedAt
+      || session?.sessionId
+      || session?.nodeId
+      || session?.host
+      || 'connection'
+    );
+    return `${targetCacheKey}::connection::${connectionId}::${cacheKey}::${resolvedCmd}`;
+  }
+
   const profileId = String(opts.profileId || 'adhoc');
-  return `${getTargetCacheKey(session, opts)}::${profileId}::${cacheKey}::${resolvedCmd}`;
+  return `${targetCacheKey}::profile::${profileId}::${cacheKey}::${resolvedCmd}`;
 }
 
 function prunePrepareStepCache(now = Date.now()) {

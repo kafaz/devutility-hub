@@ -83,3 +83,63 @@ test('executeStructuredSteps parallelizes exec groups and reuses target-scoped c
   assert.equal(secondRun.steps.filter((item) => item.status === 'cached').length, 2);
   assert.equal(secondRun.steps.filter((item) => item.status === 'cached').every((item) => item.durationMs === 0), true);
 });
+
+test('target-scoped cache survives profile switches while profile-scoped cache stays isolated', async () => {
+  clearPrepareStepCache();
+
+  const calls = [];
+  const executeCommand = async (_session, cmd, _timeoutMs, mode) => {
+    calls.push({ cmd, mode });
+    await sleep(5);
+    return {
+      stdout: `${cmd}-stdout`,
+      stderr: '',
+      exitCode: 0,
+      durationMs: 5,
+    };
+  };
+
+  const session = { username: 'root', host: 'node-a', port: 22 };
+  const steps = [
+    {
+      name: 'collect-target-identity',
+      cmd: 'printf "[context] user=%s\\n" "$(whoami)"',
+      mode: 'exec',
+      phase: 'context',
+      cacheKey: 'collect-target-identity',
+      cacheScope: 'target',
+      cacheTtlMs: 60_000,
+    },
+    {
+      name: 'collect-working-dir',
+      cmd: 'pwd',
+      mode: 'exec',
+      phase: 'context',
+      cacheKey: 'collect-working-dir',
+      cacheTtlMs: 60_000,
+    },
+  ];
+
+  const firstRun = await executeStructuredSteps(session, steps, { profileId: 'fast-path' }, {
+    allowParallelExec: true,
+    executeCommand,
+    getBlockedCommandError: () => null,
+  });
+
+  assert.equal(firstRun.cachedStepCount, 0);
+  assert.equal(calls.length, 2);
+
+  calls.length = 0;
+
+  const secondRun = await executeStructuredSteps(session, steps, { profileId: 'boost' }, {
+    allowParallelExec: true,
+    executeCommand,
+    getBlockedCommandError: () => null,
+  });
+
+  assert.equal(secondRun.cachedStepCount, 1);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].cmd, 'pwd');
+  assert.equal(secondRun.steps[0].status, 'cached');
+  assert.equal(secondRun.steps[1].status, 'done');
+});

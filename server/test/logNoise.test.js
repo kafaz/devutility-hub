@@ -32,6 +32,18 @@ test('log noise filter folds structured prepare chatter and bracketed info lines
   assert.equal(filtered.text, 'panic: disk detached');
 });
 
+test('log noise filter removes indented continuation lines that belong to info noise blocks', () => {
+  const filtered = filterNoiseText([
+    '[INFO] background probe started',
+    '  node=node-a',
+    '  phase=warmup',
+    'panic: disk detached',
+  ].join('\n'));
+
+  assert.equal(filtered.suppressedCount, 3);
+  assert.equal(filtered.text, 'panic: disk detached');
+});
+
 test('session log suppression drops low-signal info events and keeps failures', () => {
   assert.equal(shouldSuppressSessionLog({
     type: 'command_started',
@@ -43,6 +55,15 @@ test('session log suppression drops low-signal info events and keeps failures', 
     type: 'command_result',
     level: 'info',
     stdout: '[INFO] background sync',
+    stderr: '',
+    exitCode: 0,
+  }), true);
+
+  assert.equal(shouldSuppressSessionLog({
+    type: 'command_result',
+    level: 'info',
+    message: '命令执行完成，exit=0，duration=4ms',
+    stdout: '   ',
     stderr: '',
     exitCode: 0,
   }), true);
