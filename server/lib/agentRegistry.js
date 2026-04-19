@@ -5,29 +5,78 @@ const DATA_DIR = path.join(__dirname, '..', 'data');
 const NODE_FILE = path.join(DATA_DIR, 'agent-nodes.json');
 const PREPARE_FILE = path.join(DATA_DIR, 'prepare-profiles.json');
 
-const SAFE_CONTEXT_STEPS = [
-  { name: 'whoami', cmd: 'whoami' },
-  { name: 'host', cmd: 'hostname' },
-  { name: 'pwd', cmd: 'pwd' },
-  { name: 'uptime', cmd: 'uptime' },
-];
-
-const LOCALIZATION_BOOST_STEPS = [
+const READY_SHELL_STEPS = [
   {
     name: 'load-shell-profile',
     cmd: 'source /etc/profile >/dev/null 2>&1 || true; [ -f ~/.bashrc ] && source ~/.bashrc >/dev/null 2>&1 || true; [ -f ~/.zshrc ] && source ~/.zshrc >/dev/null 2>&1 || true',
+    phase: 'ready',
+    mode: 'pty',
   },
   {
     name: 'set-diagnostic-env',
     cmd: 'export LANG=C.UTF-8; export LC_ALL=C.UTF-8; export TERM=xterm-256color; export LESS=-SR; alias ll=\"ls -alF\" >/dev/null 2>&1 || true; printf \"READY user=%s host=%s pwd=%s\\n\" \"$(whoami)\" \"$(hostname)\" \"$(pwd)\"',
+    phase: 'ready',
+    mode: 'pty',
+  },
+];
+
+const FAST_CONTEXT_STEPS = [
+  {
+    name: 'whoami',
+    cmd: 'whoami',
+    phase: 'context',
+    mode: 'exec',
+    parallelGroup: 'fast-context',
+  },
+  {
+    name: 'host',
+    cmd: 'hostname',
+    phase: 'context',
+    mode: 'exec',
+    parallelGroup: 'fast-context',
+  },
+  {
+    name: 'pwd',
+    cmd: 'pwd',
+    phase: 'context',
+    mode: 'exec',
+    parallelGroup: 'fast-context',
   },
   {
     name: 'warm-common-tools',
     cmd: 'for cmd in journalctl dmesg ss ps top iostat vmstat tail grep awk sed; do if command -v \"$cmd\" >/dev/null 2>&1; then printf \"[tool] %s=%s\\n\" \"$cmd\" \"$(command -v \"$cmd\")\"; fi; done',
+    phase: 'context',
+    mode: 'exec',
+    parallelGroup: 'fast-context',
+    cacheScope: 'target',
+    cacheTtlMs: 600000,
   },
+];
+
+const SAFE_CONTEXT_STEPS = [
+  ...FAST_CONTEXT_STEPS,
+  {
+    name: 'uptime',
+    cmd: 'uptime',
+    phase: 'context',
+    mode: 'exec',
+    parallelGroup: 'fast-context',
+  },
+];
+
+const LOCALIZATION_FAST_PATH_STEPS = [
+  ...READY_SHELL_STEPS,
+  ...FAST_CONTEXT_STEPS,
+];
+
+const LOCALIZATION_BOOST_STEPS = [
+  ...LOCALIZATION_FAST_PATH_STEPS,
   {
     name: 'collect-runtime-window',
     cmd: 'date && uptime && printf \"shell=%s\\n\" \"${SHELL:-unknown}\"',
+    phase: 'context',
+    mode: 'exec',
+    parallelGroup: 'boost-context',
   },
 ];
 
@@ -42,19 +91,44 @@ const DEFAULT_PREPARE_PROFILES = [
     profileId: 'linux-readonly-context',
     name: 'Linux Readonly Context',
     description: 'Collect current identity and host context without mutating shell state.',
+    builtinVersion: 2,
     steps: SAFE_CONTEXT_STEPS,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  },
+  {
+    profileId: 'linux-problem-localization-fast-path',
+    name: 'Linux Problem Localization Fast Path',
+    description: 'Prioritize shell readiness first, then parallelize read-only probes so issue localization can start faster after login.',
+    builtinVersion: 1,
+    steps: LOCALIZATION_FAST_PATH_STEPS,
     createdAt: Date.now(),
     updatedAt: Date.now(),
   },
   {
     profileId: 'linux-problem-localization-boost',
     name: 'Linux Problem Localization Boost',
-    description: 'Warm the shell profile, set diagnostic-friendly environment variables, and snapshot the host so issue localization starts faster.',
+    description: 'Warm the shell profile, parallelize safe context probes, and collect a broader runtime snapshot for deeper follow-up localization.',
+    builtinVersion: 2,
     steps: LOCALIZATION_BOOST_STEPS,
     createdAt: Date.now(),
     updatedAt: Date.now(),
   },
 ];
+
+function cloneSteps(steps) {
+  return Array.isArray(steps) ? steps.map((step) => ({ ...step })) : [];
+}
+
+function materializeBuiltinProfile(profile, createdAt) {
+  const now = Date.now();
+  return {
+    ...profile,
+    steps: cloneSteps(profile.steps),
+    createdAt: createdAt || now,
+    updatedAt: now,
+  };
+}
 
 function ensureFile(filePath, defaultValue) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -79,6 +153,7 @@ function writeJson(filePath, value) {
 
 function mergeDefaultPrepareProfiles(profiles) {
   const current = Array.isArray(profiles) ? profiles : [];
+  const builtinProfiles = new Map(DEFAULT_PREPARE_PROFILES.map((profile) => [profile.profileId, profile]));
   let changed = false;
   const merged = current.map((profile) => {
     const steps = Array.isArray(profile?.steps) ? profile.steps.map((step) => step?.cmd) : [];
@@ -93,20 +168,37 @@ function mergeDefaultPrepareProfiles(profiles) {
       ...profile,
       name: 'Linux Default Context',
       description: 'Collect current identity and host context without mutating shell state.',
-      steps: SAFE_CONTEXT_STEPS,
+      builtinVersion: 2,
+      steps: cloneSteps(SAFE_CONTEXT_STEPS),
       updatedAt: Date.now(),
     };
   });
-  const existingIds = new Set(merged.map((profile) => profile.profileId));
+
+  const upgraded = merged.map((profile) => {
+    const builtin = builtinProfiles.get(profile?.profileId);
+    if (!builtin) return profile;
+
+    const currentVersion = Number(profile?.builtinVersion || 0);
+    const nextVersion = Number(builtin.builtinVersion || 0);
+    if (currentVersion >= nextVersion) return profile;
+
+    changed = true;
+    return {
+      ...profile,
+      ...materializeBuiltinProfile(builtin, profile?.createdAt),
+    };
+  });
+
+  const existingIds = new Set(upgraded.map((profile) => profile.profileId));
 
   for (const profile of DEFAULT_PREPARE_PROFILES) {
     if (existingIds.has(profile.profileId)) continue;
-    merged.push(profile);
+    upgraded.push(materializeBuiltinProfile(profile));
     changed = true;
   }
 
   return {
-    profiles: merged,
+    profiles: upgraded,
     changed,
   };
 }

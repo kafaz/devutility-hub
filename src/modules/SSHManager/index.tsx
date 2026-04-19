@@ -89,6 +89,11 @@ const STATUS: Record<ConnStatus, { badge: 'default' | 'processing' | 'success' |
 interface PrepareProfileStep {
   name: string;
   cmd: string;
+  cacheScope?: string;
+  cacheTtlMs?: number;
+  mode?: 'exec' | 'pty';
+  parallelGroup?: string;
+  phase?: 'ready' | 'context';
   timeoutMs?: number;
   timeout?: number;
 }
@@ -105,7 +110,16 @@ interface PrepareProfile {
 interface PrepareResultStep {
   name: string;
   cmd: string;
+  cachedAt?: number;
+  cacheTtlMs?: number;
+  finishedAt?: number;
+  fromCache?: boolean;
+  mode?: 'exec' | 'pty';
+  parallelGroup?: string;
+  phase?: 'ready' | 'context';
+  processedOutput?: string;
   resolvedCmd?: string;
+  startedAt?: number;
   stdout: string;
   stderr: string;
   exitCode: number;
@@ -115,10 +129,15 @@ interface PrepareResultStep {
 }
 
 interface PrepareRunResult {
+  cachedStepCount?: number;
+  contextStepCount?: number;
+  finalVarContext?: Record<string, string>;
+  profile?: PrepareProfile | null;
+  readyDurationMs?: number;
+  readyStepCount?: number;
   status: 'done' | 'failed';
   steps: PrepareResultStep[];
-  profile?: PrepareProfile | null;
-  finalVarContext?: Record<string, string>;
+  totalDurationMs?: number;
 }
 
 interface PrepareSettings {
@@ -128,14 +147,29 @@ interface PrepareSettings {
 }
 
 interface PrepareRunSummary {
+  cachedStepCount: number;
+  contextStepCount: number;
   profileId: string;
   profileName: string;
+  readyDurationMs: number;
+  readyStepCount: number;
   status: 'done' | 'failed';
   stepCount: number;
   failedCount: number;
   finishedAt: number;
+  totalDurationMs: number;
   connectedAt?: number;
   trigger: 'auto' | 'manual';
+}
+
+function formatDurationLabel(value?: number) {
+  const ms = Number(value || 0);
+  if (!Number.isFinite(ms) || ms <= 0) return '0ms';
+  if (ms >= 1000) {
+    const seconds = ms / 1000;
+    return seconds >= 10 ? `${seconds.toFixed(0)}s` : `${seconds.toFixed(1)}s`;
+  }
+  return `${Math.round(ms)}ms`;
 }
 
 // ─── 单个 XTerm 终端实例（每会话挂载一次，CSS 控制显隐） ─────────────────
@@ -684,7 +718,7 @@ const SSHManager: React.FC = () => {
   const [prepareRunningIds, setPrepareRunningIds] = useState<string[]>([]);
   const [prepareSummaries, setPrepareSummaries] = useState<Record<string, PrepareRunSummary>>({});
   const [prepareSettings, setPrepareSettings] = useLocalStorage<PrepareSettings>('devutility-ssh-prepare-settings', {
-    profileId: 'linux-problem-localization-boost',
+    profileId: 'linux-problem-localization-fast-path',
     autoRun: true,
     continueOnError: true,
   });
@@ -927,8 +961,10 @@ const SSHManager: React.FC = () => {
       if (nextProfiles.length > 0 && !nextProfiles.some((item) => item.profileId === prepareSettings.profileId)) {
         setPrepareSettings((current) => ({
           ...current,
-          profileId: nextProfiles.some((item) => item.profileId === 'linux-problem-localization-boost')
-            ? 'linux-problem-localization-boost'
+          profileId: nextProfiles.some((item) => item.profileId === 'linux-problem-localization-fast-path')
+            ? 'linux-problem-localization-fast-path'
+            : nextProfiles.some((item) => item.profileId === 'linux-problem-localization-boost')
+              ? 'linux-problem-localization-boost'
             : nextProfiles[0].profileId,
         }));
       }
@@ -998,9 +1034,14 @@ const SSHManager: React.FC = () => {
       const resolvedProfile = result.profile || prepareProfiles.find((item) => item.profileId === profileId) || activePrepareProfile;
       const profileName = resolvedProfile?.name || profileId;
       const steps = Array.isArray(result.steps) ? result.steps : [];
+      const readyStepCount = result.readyStepCount || resolvedProfile?.steps.filter((step) => step.phase === 'ready').length || 0;
       const startedAt = Date.now();
 
       steps.forEach((step, index) => {
+        const stepStatusReason = [
+          step.fromCache ? '命中缓存' : '',
+          step.statusReason || '',
+        ].filter(Boolean).join(' · ');
         addEntry({
           sessionId,
           sessionName: session.name,
@@ -1010,7 +1051,7 @@ const SSHManager: React.FC = () => {
           output: [step.stdout, step.stderr].filter(Boolean).join('\n').trim(),
           exitCode: step.exitCode,
           durationMs: step.durationMs,
-          statusReason: step.statusReason,
+          statusReason: stepStatusReason || undefined,
           prepareProfileName: profileName,
           prepareStepName: step.name,
           nodeHost: profile?.host,
@@ -1023,34 +1064,49 @@ const SSHManager: React.FC = () => {
       setPrepareSummaries((current) => ({
         ...current,
         [sessionId]: {
+          cachedStepCount: result.cachedStepCount || 0,
+          contextStepCount: result.contextStepCount || Math.max(0, steps.length - readyStepCount),
           profileId,
           profileName,
+          readyDurationMs: result.readyDurationMs || 0,
+          readyStepCount,
           status: result.status,
           stepCount: steps.length,
           failedCount,
           finishedAt: Date.now(),
+          totalDurationMs: result.totalDurationMs || 0,
           connectedAt: session.connectedAt,
           trigger,
         },
       }));
 
       if (!silent) {
+        const readyText = result.readyDurationMs
+          ? `ready ${formatDurationLabel(result.readyDurationMs)}`
+          : null;
+        const cacheText = result.cachedStepCount ? `缓存 ${result.cachedStepCount} 步` : null;
         const text = failedCount > 0
-          ? `${session.name} 预处理完成，${failedCount} 个步骤需要关注`
-          : `${session.name} 预处理完成`;
+          ? `${session.name} 预处理完成，${failedCount} 个步骤需要关注${readyText ? `，${readyText}` : ''}${cacheText ? `，${cacheText}` : ''}`
+          : `${session.name} 预处理完成${readyText ? `，${readyText}` : ''}${cacheText ? `，${cacheText}` : ''}`;
         messageApi[failedCount > 0 ? 'warning' : 'success'](text);
       }
       return true;
     } catch (error) {
+      const fallbackReadyStepCount = activePrepareProfile?.steps.filter((step) => step.phase === 'ready').length || 0;
       setPrepareSummaries((current) => ({
         ...current,
         [sessionId]: {
+          cachedStepCount: 0,
+          contextStepCount: Math.max(0, (activePrepareProfile?.steps.length || 0) - fallbackReadyStepCount),
           profileId,
           profileName: activePrepareProfile?.name || profileId,
+          readyDurationMs: 0,
+          readyStepCount: fallbackReadyStepCount,
           status: 'failed',
           stepCount: activePrepareProfile?.steps.length || 0,
           failedCount: activePrepareProfile?.steps.length || 0,
           finishedAt: Date.now(),
+          totalDurationMs: 0,
           connectedAt: session.connectedAt,
           trigger,
         },
@@ -1552,14 +1608,28 @@ const SSHManager: React.FC = () => {
                             </Tag>
                           )}
                           {!prepareRunning && prepareStatusMatchesCurrentConnection && prepareSummary?.status === 'done' && (
-                            <Tooltip title={`${prepareSummary.profileName} · ${prepareSummary.stepCount} 步`}>
-                              <Tag color="success" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
-                                已预热
-                              </Tag>
-                            </Tooltip>
+                            <>
+                              <Tooltip
+                                title={`${prepareSummary.profileName} · ready ${formatDurationLabel(prepareSummary.readyDurationMs)} · 总耗时 ${formatDurationLabel(prepareSummary.totalDurationMs)} · ${prepareSummary.stepCount} 步`}
+                              >
+                                <Tag color="success" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
+                                  已预热
+                                </Tag>
+                              </Tooltip>
+                              {prepareSummary.readyDurationMs > 0 && (
+                                <Tag color="processing" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
+                                  ready {formatDurationLabel(prepareSummary.readyDurationMs)}
+                                </Tag>
+                              )}
+                              {prepareSummary.cachedStepCount > 0 && (
+                                <Tag color="default" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
+                                  缓存 {prepareSummary.cachedStepCount}
+                                </Tag>
+                              )}
+                            </>
                           )}
                           {!prepareRunning && prepareStatusMatchesCurrentConnection && prepareSummary?.status === 'failed' && (
-                            <Tooltip title={`${prepareSummary.profileName} 需要重新执行`}>
+                            <Tooltip title={`${prepareSummary.profileName} 需要重新执行${prepareSummary.failedCount > 0 ? ` · ${prepareSummary.failedCount} 步失败` : ''}`}>
                               <Tag color="error" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
                                 预热失败
                               </Tag>
@@ -2040,6 +2110,9 @@ const SSHManager: React.FC = () => {
                         {activePrepareProfile.steps.map((step) => (
                           <Tag key={`${activePrepareProfile.profileId}-${step.name}`} color="default" style={{ fontSize: 10 }}>
                             {step.name}
+                            {step.phase === 'ready' ? ' · ready' : ''}
+                            {step.mode === 'exec' ? ' · exec' : ''}
+                            {step.cacheScope ? ' · cache' : ''}
                           </Tag>
                         ))}
                       </div>
@@ -2090,7 +2163,7 @@ const SSHManager: React.FC = () => {
                     message={
                       <div>
                         <Text strong style={{ fontSize: 12 }}>自动预处理负责：</Text>
-                        {['加载 shell/profile', '设置便于诊断的环境变量', '预热常用排查命令路径', '记录当前节点上下文'].map((text, index) => (
+                        {['优先让节点尽快进入 ready 状态', '并行完成只读上下文探测', '缓存稳定的工具探测结果', '把预热噪声与真正排查信号分开'].map((text, index) => (
                           <Text key={text} type="secondary" style={{ fontSize: 11, display: 'block' }}>{index + 1}. {text}</Text>
                         ))}
                         <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
@@ -2181,6 +2254,7 @@ const SSHManager: React.FC = () => {
       <BatchLoginModal
         open={batchLoginModal}
         onCancel={() => setBatchLoginModal(false)}
+        onSessionsPrepared={(sessionIds) => setSelectedNodes((current) => Array.from(new Set([...current, ...sessionIds])))}
         onSuccess={() => setBatchLoginModal(false)}
       />
 

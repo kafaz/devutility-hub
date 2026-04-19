@@ -42,9 +42,11 @@ import {
     Tooltip,
     Typography,
 } from 'antd';
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import ResizableOutput from '../../../components/shared/ResizableOutput';
 import { useGlobalStore } from '../../../store/globalStore';
+import { filterNoiseText } from '../../../utils/logNoise';
+import { useAnalyzerStore } from '../store/analyzerStore';
 import type { JournalEntry, JournalEntryType } from '../store/journalStore';
 import { useJournalStore } from '../store/journalStore';
 import { getTermRecording, startTermRecording } from '../store/sshStore';
@@ -71,8 +73,10 @@ const TYPE_CONFIG: Record<JournalEntryType, {
 const EntryCard: React.FC<{
   entry:    JournalEntry;
   isDark:   boolean;
+  noiseKeywords: string[];
   onDelete: () => void;
-}> = ({ entry, isDark, onDelete }) => {
+  showRawOutput: boolean;
+}> = ({ entry, isDark, noiseKeywords, onDelete, showRawOutput }) => {
   const [expanded, setExpanded] = useState(false);
   const tc  = TYPE_CONFIG[entry.type];
   const bg  = isDark ? '#2d2d30' : '#fafafa';
@@ -80,7 +84,13 @@ const EntryCard: React.FC<{
   const ts  = new Date(entry.timestamp).toLocaleTimeString('zh-CN');
 
   const outputText = entry.output?.trimEnd() ?? '';
+  const outputView = useMemo(
+    () => filterNoiseText(outputText, noiseKeywords),
+    [noiseKeywords, outputText]
+  );
+  const displayOutput = showRawOutput ? outputText : outputView.text.trimEnd();
   const hasOutput  = outputText.length > 0;
+  const hiddenNoiseLineCount = showRawOutput ? 0 : outputView.suppressedCount;
 
   return (
     <div
@@ -174,6 +184,11 @@ const EntryCard: React.FC<{
           )}
         </div>
         <Space size={4}>
+          {hiddenNoiseLineCount > 0 && (
+            <Tag color="default" style={{ fontSize: 10, margin: 0 }}>
+              折叠 {hiddenNoiseLineCount} 行噪声
+            </Tag>
+          )}
           {hasOutput && (
             <Button
               type="link" size="small" style={{ padding: 0, fontSize: 11 }}
@@ -226,13 +241,19 @@ const EntryCard: React.FC<{
       {/* 输出（可展开，可拖拽） */}
       {expanded && hasOutput && (
         <div style={{ marginTop: 6 }}>
-          <ResizableOutput
-            content={outputText}
-            isDark={isDark}
-            minHeight={60}
-            maxHeight={400}
-            showCopy
-          />
+          {displayOutput ? (
+            <ResizableOutput
+              content={displayOutput}
+              isDark={isDark}
+              minHeight={60}
+              maxHeight={400}
+              showCopy
+            />
+          ) : (
+            <Text type="secondary" style={{ fontSize: 11 }}>
+              当前输出已按低信号规则折叠，可切换到“原始输出”查看完整内容。
+            </Text>
+          )}
         </div>
       )}
     </div>
@@ -251,18 +272,25 @@ interface Props {
 const SessionJournal: React.FC<Props> = ({ sessionId, sessionName, onSnapshotRequest }) => {
   const { theme }              = useGlobalStore();
   const isDark                 = theme === 'dark';
+  const { noiseKeywords }      = useAnalyzerStore();
   const { journals, addEntry, deleteEntry, clearSession } = useJournalStore();
   const [messageApi, ctx]      = message.useMessage();
   const [filterType, setFilterType] = useState<JournalEntryType | 'all'>('all');
   const [noteModalOpen, setNoteModalOpen] = useState(false);
   const [noteText, setNoteText] = useState('');
   const [isRecording, setIsRecording] = useState(false);
+  const [focusMode, setFocusMode] = useState<'focus' | 'all'>('focus');
+  const [showRawOutput, setShowRawOutput] = useState(false);
 
   const entries = journals[sessionId] ?? [];
 
-  const filtered = filterType === 'all'
+  const typeFiltered = filterType === 'all'
     ? entries
     : entries.filter((e) => e.type === filterType);
+  const filtered = focusMode === 'focus'
+    ? typeFiltered.filter((entry) => entry.type !== 'session_evt')
+    : typeFiltered;
+  const foldedCount = typeFiltered.length - filtered.length;
 
   // ── 添加终端快照 ────────────────────────────────────────────────────────
   const handleSnapshot = () => {
@@ -424,6 +452,25 @@ const SessionJournal: React.FC<Props> = ({ sessionId, sessionName, onSnapshotReq
             size="small"
             overflowCount={999}
           />
+          <Button
+            size="small"
+            type={focusMode === 'focus' ? 'primary' : 'default'}
+            onClick={() => setFocusMode((current) => current === 'focus' ? 'all' : 'focus')}
+          >
+            {focusMode === 'focus' ? '聚焦视图' : '显示全部'}
+          </Button>
+          <Button
+            size="small"
+            type={showRawOutput ? 'default' : 'primary'}
+            onClick={() => setShowRawOutput((current) => !current)}
+          >
+            {showRawOutput ? '原始输出' : '降噪输出'}
+          </Button>
+          {foldedCount > 0 && (
+            <Tag color="gold" style={{ fontSize: 10, margin: 0 }}>
+              隐藏事件 {foldedCount}
+            </Tag>
+          )}
           {/* 类型统计小标签 */}
           {Object.entries(typeCounts).map(([type, count]) => (
             <Tag
@@ -509,7 +556,9 @@ const SessionJournal: React.FC<Props> = ({ sessionId, sessionName, onSnapshotReq
               key={entry.id}
               entry={entry}
               isDark={isDark}
+              noiseKeywords={noiseKeywords}
               onDelete={() => deleteEntry(sessionId, entry.id)}
+              showRawOutput={showRawOutput}
             />
           ))
         )}

@@ -5,6 +5,8 @@ export interface BuiltinLogNoiseRule {
 }
 
 export const RISK_SIGNAL_RE = /timeout|timed out|超时|refused|拒绝|panic|fatal|exception|异常|failed|失败|error|reset|segfault|readonly|read-only|unreachable|i\/o|oom/i;
+const LOW_SIGNAL_SESSION_TYPES = new Set(['session_opened', 'session_reused', 'session_closed', 'command_started']);
+const LOW_SIGNAL_SESSION_MESSAGE_RE = /会话已(?:建立|复用|被 api 主动关闭)|开始执行命令|命令执行完成，exit=0/i;
 
 export const BUILTIN_LOG_NOISE_RULES: BuiltinLogNoiseRule[] = [
   {
@@ -21,6 +23,31 @@ export const BUILTIN_LOG_NOISE_RULES: BuiltinLogNoiseRule[] = [
     id: 'info-level-pair',
     label: 'level=info',
     pattern: /\b(?:level|lvl|severity)\s*=\s*info\b/i,
+  },
+  {
+    id: 'prepare-ready-prefix',
+    label: 'READY 预热提示',
+    pattern: /^\s*READY\b/i,
+  },
+  {
+    id: 'tools-ready-prefix',
+    label: 'TOOLS_READY 预热提示',
+    pattern: /^\s*TOOLS_READY\b/i,
+  },
+  {
+    id: 'window-prefix',
+    label: 'WINDOW 预热窗口',
+    pattern: /^\s*WINDOW\b/i,
+  },
+  {
+    id: 'tool-probe-prefix',
+    label: '[tool] 工具探测',
+    pattern: /^\s*\[(?:tool|log)\]\b/i,
+  },
+  {
+    id: 'shell-env-line',
+    label: 'shell= 环境提示',
+    pattern: /^\s*shell=\S+/i,
   },
 ];
 
@@ -99,7 +126,21 @@ export function shouldSuppressSessionLog(
 ) {
   if (typeof log.exitCode === 'number' && log.exitCode !== 0) return false;
   if (log.level === 'warning' || log.level === 'error') return false;
+  const type = String(log.type || '').trim();
+  const message = String(log.message || '');
+  const outputs = [log.stdout, log.stderr].filter(Boolean).join('\n');
+  const combined = [type, message, outputs].filter(Boolean).join('\n');
 
-  const combined = [log.type, log.message, log.stdout, log.stderr].filter(Boolean).join('\n');
+  if (LOW_SIGNAL_SESSION_TYPES.has(type) && !RISK_SIGNAL_RE.test(combined)) {
+    return true;
+  }
+
+  if (type === 'command_result' && LOW_SIGNAL_SESSION_MESSAGE_RE.test(message)) {
+    const outputView = filterNoiseText(outputs, customKeywords);
+    if (!outputView.text.trim()) {
+      return true;
+    }
+  }
+
   return shouldSuppressLogLine(combined, customKeywords);
 }
