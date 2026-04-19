@@ -42,6 +42,7 @@ import {
     Segmented,
     Select, Space,
     Spin,
+    Switch,
     Tag,
     Tooltip,
     Typography,
@@ -52,6 +53,7 @@ import { FitAddon } from 'xterm-addon-fit';
 import 'xterm/css/xterm.css';
 
 import ResizableOutput from '../../components/shared/ResizableOutput';
+import { useLocalStorage } from '../../hooks/useLocalStorage';
 import { useGlobalStore } from '../../store/globalStore';
 import type { NodeReportData } from '../../utils';
 import {
@@ -71,6 +73,7 @@ import { getTerminalBuffer, recordManualCommandStart, useSSHStore } from './stor
 
 const { Title, Text } = Typography;
 const { Password } = Input;
+const PROXY_HTTP = 'http://127.0.0.1:3001';
 
 // ─── 状态配置 ─────────────────────────────────────────────────────────────
 
@@ -82,6 +85,58 @@ const STATUS: Record<ConnStatus, { badge: 'default' | 'processing' | 'success' |
   error:        { badge: 'error',      color: '#ef4444', label: '失败'   },
   disconnected: { badge: 'default',    color: '#6b7280', label: '已断开' },
 };
+
+interface PrepareProfileStep {
+  name: string;
+  cmd: string;
+  timeoutMs?: number;
+  timeout?: number;
+}
+
+interface PrepareProfile {
+  profileId: string;
+  name: string;
+  description?: string;
+  steps: PrepareProfileStep[];
+  createdAt?: number;
+  updatedAt?: number;
+}
+
+interface PrepareResultStep {
+  name: string;
+  cmd: string;
+  resolvedCmd?: string;
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  durationMs: number;
+  status: 'done' | 'failed';
+  statusReason?: string;
+}
+
+interface PrepareRunResult {
+  status: 'done' | 'failed';
+  steps: PrepareResultStep[];
+  profile?: PrepareProfile | null;
+  finalVarContext?: Record<string, string>;
+}
+
+interface PrepareSettings {
+  profileId: string;
+  autoRun: boolean;
+  continueOnError: boolean;
+}
+
+interface PrepareRunSummary {
+  profileId: string;
+  profileName: string;
+  status: 'done' | 'failed';
+  stepCount: number;
+  failedCount: number;
+  finishedAt: number;
+  connectedAt?: number;
+  trigger: 'auto' | 'manual';
+}
 
 // ─── 单个 XTerm 终端实例（每会话挂载一次，CSS 控制显隐） ─────────────────
 
@@ -624,13 +679,23 @@ const SSHManager: React.FC = () => {
   const [activeView,  setActiveView]      = useState<'terminal' | 'progress' | 'journal' | 'analyzer' | 'bgjobs'>('terminal');
   const [activeTab, setActiveTab] = useState('connect'); // 'connect' | 'multi_node' | 'cron'
   const [terminalHeight, setTerminalHeight] = useState(720);
+  const [prepareProfiles, setPrepareProfiles] = useState<PrepareProfile[]>([]);
+  const [loadingPrepareProfiles, setLoadingPrepareProfiles] = useState(false);
+  const [prepareRunningIds, setPrepareRunningIds] = useState<string[]>([]);
+  const [prepareSummaries, setPrepareSummaries] = useState<Record<string, PrepareRunSummary>>({});
+  const [prepareSettings, setPrepareSettings] = useLocalStorage<PrepareSettings>('devutility-ssh-prepare-settings', {
+    profileId: 'linux-problem-localization-boost',
+    autoRun: true,
+    continueOnError: true,
+  });
 
   // ── 终端写入函数 Map（每会话一个） ────────────────────────────────────────
   const writeCallbacks    = useRef<Map<string, (b64: string) => void>>(new Map());
   const snapshotCallbacks = useRef<Map<string, () => string>>(new Map());
   const getLineFns        = useRef<Record<string, () => string>>({});
+  const autoPreparedAtRef = useRef<Record<string, number>>({});
 
-  const { addSOPNodeResults } = useJournalStore();
+  const { addEntry, addSOPNodeResults } = useJournalStore();
   const { evaluateJobs } = useCronStore();
 
   useEffect(() => {
@@ -820,6 +885,223 @@ const SSHManager: React.FC = () => {
   const borderColor = isDark ? '#3e3e42' : '#e4e4e7';
 
   const connectedSessions = sessions.filter((s) => s.status === 'connected');
+  const activePrepareProfile = React.useMemo(
+    () => prepareProfiles.find((profile) => profile.profileId === prepareSettings.profileId) || null,
+    [prepareProfiles, prepareSettings.profileId]
+  );
+  const connectedSelectedNodes = React.useMemo(
+    () => selectedNodes.filter((sessionId) => sessions.find((sess) => sess.id === sessionId)?.status === 'connected'),
+    [selectedNodes, sessions]
+  );
+  const selectedPrepareStats = React.useMemo(() => {
+    return connectedSelectedNodes.reduce((summary, sessionId) => {
+      if (prepareRunningIds.includes(sessionId)) {
+        summary.running += 1;
+        return summary;
+      }
+      const currentSession = sessions.find((item) => item.id === sessionId);
+      const runSummary = prepareSummaries[sessionId];
+      if (!runSummary || runSummary.connectedAt !== currentSession?.connectedAt) {
+        summary.pending += 1;
+        return summary;
+      }
+      if (runSummary.status === 'done') {
+        summary.ready += 1;
+      } else {
+        summary.failed += 1;
+      }
+      return summary;
+    }, { ready: 0, failed: 0, running: 0, pending: 0 });
+  }, [connectedSelectedNodes, prepareRunningIds, prepareSummaries, sessions]);
+
+  async function fetchPrepareProfiles(silent = false) {
+    setLoadingPrepareProfiles(true);
+    try {
+      const response = await fetch(`${PROXY_HTTP}/api/agent/prepare-profiles`);
+      const data = await response.json();
+      if (!data.ok) {
+        throw new Error(data.error || '预处理模板加载失败');
+      }
+      const nextProfiles = Array.isArray(data.data) ? data.data as PrepareProfile[] : [];
+      setPrepareProfiles(nextProfiles);
+      if (nextProfiles.length > 0 && !nextProfiles.some((item) => item.profileId === prepareSettings.profileId)) {
+        setPrepareSettings((current) => ({
+          ...current,
+          profileId: nextProfiles.some((item) => item.profileId === 'linux-problem-localization-boost')
+            ? 'linux-problem-localization-boost'
+            : nextProfiles[0].profileId,
+        }));
+      }
+    } catch (error) {
+      if (!silent) {
+        messageApi.warning(error instanceof Error ? error.message : '预处理模板加载失败');
+      }
+    } finally {
+      setLoadingPrepareProfiles(false);
+    }
+  }
+
+  async function requestPrepare(
+    sessionId: string,
+    profileId: string,
+    continueOnError: boolean
+  ) {
+    let lastError = '预处理失败';
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        const response = await fetch(`${PROXY_HTTP}/api/agent/sessions/${encodeURIComponent(sessionId)}/prepare`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            profileId,
+            continueOnError,
+          }),
+        });
+        const data = await response.json();
+        if (response.ok && data.ok) {
+          return data.data as PrepareRunResult;
+        }
+        lastError = data.error || `HTTP ${response.status}`;
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : '预处理失败';
+      }
+
+      await new Promise((resolve) => window.setTimeout(resolve, 250 * (attempt + 1)));
+    }
+
+    throw new Error(lastError);
+  }
+
+  async function runPrepareOnSession(
+    sessionId: string,
+    trigger: 'auto' | 'manual',
+    silent = false
+  ) {
+    const profileId = prepareSettings.profileId;
+    if (!profileId) {
+      if (!silent) messageApi.warning('请先选择预处理模板');
+      return false;
+    }
+
+    const session = sessions.find((item) => item.id === sessionId);
+    const profile = profiles.find((item) => item.id === session?.profileId);
+    if (!session || session.status !== 'connected') {
+      if (!silent) messageApi.warning('目标会话尚未连接');
+      return false;
+    }
+
+    setPrepareRunningIds((current) => current.includes(sessionId) ? current : [...current, sessionId]);
+
+    try {
+      const result = await requestPrepare(sessionId, profileId, prepareSettings.continueOnError);
+      const resolvedProfile = result.profile || prepareProfiles.find((item) => item.profileId === profileId) || activePrepareProfile;
+      const profileName = resolvedProfile?.name || profileId;
+      const steps = Array.isArray(result.steps) ? result.steps : [];
+      const startedAt = Date.now();
+
+      steps.forEach((step, index) => {
+        addEntry({
+          sessionId,
+          sessionName: session.name,
+          type: 'prepare_step',
+          timestamp: startedAt + index,
+          command: step.resolvedCmd || step.cmd,
+          output: [step.stdout, step.stderr].filter(Boolean).join('\n').trim(),
+          exitCode: step.exitCode,
+          durationMs: step.durationMs,
+          statusReason: step.statusReason,
+          prepareProfileName: profileName,
+          prepareStepName: step.name,
+          nodeHost: profile?.host,
+          nodePort: profile?.port,
+          nodeUser: profile?.username,
+        });
+      });
+
+      const failedCount = steps.filter((step) => step.status === 'failed' || step.exitCode !== 0).length;
+      setPrepareSummaries((current) => ({
+        ...current,
+        [sessionId]: {
+          profileId,
+          profileName,
+          status: result.status,
+          stepCount: steps.length,
+          failedCount,
+          finishedAt: Date.now(),
+          connectedAt: session.connectedAt,
+          trigger,
+        },
+      }));
+
+      if (!silent) {
+        const text = failedCount > 0
+          ? `${session.name} 预处理完成，${failedCount} 个步骤需要关注`
+          : `${session.name} 预处理完成`;
+        messageApi[failedCount > 0 ? 'warning' : 'success'](text);
+      }
+      return true;
+    } catch (error) {
+      setPrepareSummaries((current) => ({
+        ...current,
+        [sessionId]: {
+          profileId,
+          profileName: activePrepareProfile?.name || profileId,
+          status: 'failed',
+          stepCount: activePrepareProfile?.steps.length || 0,
+          failedCount: activePrepareProfile?.steps.length || 0,
+          finishedAt: Date.now(),
+          connectedAt: session.connectedAt,
+          trigger,
+        },
+      }));
+      if (!silent || trigger === 'auto') {
+        messageApi.warning(`${session.name} 预处理失败: ${error instanceof Error ? error.message : '未知错误'}`);
+      }
+      return false;
+    } finally {
+      setPrepareRunningIds((current) => current.filter((item) => item !== sessionId));
+    }
+  }
+
+  async function handleRunPrepareOnSelected() {
+    if (!activePrepareProfile) {
+      messageApi.warning('请先选择可用的预处理模板');
+      return;
+    }
+    if (connectedSelectedNodes.length === 0) {
+      messageApi.warning('请先勾选已连接的节点');
+      return;
+    }
+
+    const results = await Promise.allSettled(
+      connectedSelectedNodes.map((sessionId) => runPrepareOnSession(sessionId, 'manual', true))
+    );
+    const successCount = results.filter((item) => item.status === 'fulfilled' && item.value).length;
+    const failedCount = results.length - successCount;
+    if (failedCount > 0) {
+      messageApi.warning(`预处理完成：${successCount} 个成功，${failedCount} 个失败`);
+    } else {
+      messageApi.success(`预处理完成：${successCount} 个节点已进入定位就绪状态`);
+    }
+  }
+
+  useEffect(() => {
+    void fetchPrepareProfiles(true);
+  }, []);
+
+  useEffect(() => {
+    if (!prepareSettings.autoRun || !prepareSettings.profileId) return;
+
+    sessions.forEach((session) => {
+      if (session.status !== 'connected' || !session.connectedAt) return;
+      if (prepareRunningIds.includes(session.id)) return;
+      if (autoPreparedAtRef.current[session.id] === session.connectedAt) return;
+
+      autoPreparedAtRef.current[session.id] = session.connectedAt;
+      void runPrepareOnSession(session.id, 'auto', true);
+    });
+  }, [prepareRunningIds, prepareSettings.autoRun, prepareSettings.profileId, sessions]);
 
   // ── 变量收集（来自选中实例中的占位符和预定义配置） ──────────────────────────
   const definedVars = React.useMemo(() => {
@@ -1176,7 +1458,13 @@ const SSHManager: React.FC = () => {
                     <Tooltip title="复制档案">
                       <CopyOutlined style={{ cursor: 'pointer', color: '#3b82f6', fontSize: 12 }}
                         onClick={() => {
-                          setEditingProfile({ ...p, id: '', name: `${p.name} (副本)`, host: '' } as any);
+                          setEditingProfile({
+                            ...p,
+                            id: '',
+                            createdAt: p.createdAt || Date.now(),
+                            name: `${p.name} (副本)`,
+                            host: '',
+                          });
                           setProfileModal(true);
                         }} />
                     </Tooltip>
@@ -1209,6 +1497,9 @@ const SSHManager: React.FC = () => {
                 const prf = profiles.find((p) => p.id === sess.profileId);
                 const isDisconnectedOrError = sess.status === 'disconnected' || sess.status === 'error';
                 const uptimeMs = sess.status === 'connected' && sess.connectedAt ? Date.now() - sess.connectedAt : 0;
+                const prepareSummary = prepareSummaries[sess.id];
+                const prepareStatusMatchesCurrentConnection = prepareSummary?.connectedAt && prepareSummary.connectedAt === sess.connectedAt;
+                const prepareRunning = prepareRunningIds.includes(sess.id);
                 const uptimeStr = uptimeMs > 0 ? (
                   uptimeMs > 3600000 ? `${Math.floor(uptimeMs / 3600000)}h${Math.floor((uptimeMs % 3600000) / 60000)}m`
                   : uptimeMs > 60000 ? `${Math.floor(uptimeMs / 60000)}m`
@@ -1255,6 +1546,25 @@ const SSHManager: React.FC = () => {
                             {sess.name}
                           </Text>
                           {uptimeStr && <Tag color="processing" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>{uptimeStr}</Tag>}
+                          {prepareRunning && (
+                            <Tag color="gold" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
+                              预处理中
+                            </Tag>
+                          )}
+                          {!prepareRunning && prepareStatusMatchesCurrentConnection && prepareSummary?.status === 'done' && (
+                            <Tooltip title={`${prepareSummary.profileName} · ${prepareSummary.stepCount} 步`}>
+                              <Tag color="success" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
+                                已预热
+                              </Tag>
+                            </Tooltip>
+                          )}
+                          {!prepareRunning && prepareStatusMatchesCurrentConnection && prepareSummary?.status === 'failed' && (
+                            <Tooltip title={`${prepareSummary.profileName} 需要重新执行`}>
+                              <Tag color="error" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
+                                预热失败
+                              </Tag>
+                            </Tooltip>
+                          )}
                         </Space>
                       )}
                       <Space size={3} onClick={(e) => e.stopPropagation()}>
@@ -1700,19 +2010,97 @@ const SSHManager: React.FC = () => {
 
               <Divider style={{ margin: '2px 0' }} />
 
-              {/* 预处理提示 */}
-              {selectedNodes.length > 0 && (
-                <Alert type="info" showIcon={false} style={{ fontSize: 11, padding: '6px 10px' }}
-                  message={
+              <Card size="small" title="登录预处理" extra={
+                <Button size="small" icon={<ReloadOutlined />} loading={loadingPrepareProfiles} onClick={() => void fetchPrepareProfiles()}>
+                  刷新模板
+                </Button>
+              }>
+                <Space direction="vertical" size={10} style={{ width: '100%' }}>
+                  <Text type="secondary" style={{ fontSize: 11 }}>
+                    把原来依赖人工完成的 shell/profile/env 预热前置化。这样用户登录节点后能更快进入“可执行、可采集、可定位”的状态。
+                  </Text>
+                  <Select
+                    size="small"
+                    value={activePrepareProfile?.profileId}
+                    placeholder="选择预处理模板"
+                    loading={loadingPrepareProfiles}
+                    onChange={(value) => setPrepareSettings((current) => ({ ...current, profileId: value }))}
+                    style={{ width: '100%' }}
+                    options={prepareProfiles.map((profile) => ({
+                      label: `${profile.name} (${profile.steps.length} 步)`,
+                      value: profile.profileId,
+                    }))}
+                  />
+                  {activePrepareProfile && (
+                    <>
+                      <Text type="secondary" style={{ fontSize: 11 }}>
+                        {activePrepareProfile.description || '无描述'}
+                      </Text>
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        {activePrepareProfile.steps.map((step) => (
+                          <Tag key={`${activePrepareProfile.profileId}-${step.name}`} color="default" style={{ fontSize: 10 }}>
+                            {step.name}
+                          </Tag>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
                     <div>
-                      <Text strong style={{ fontSize: 12 }}>执行前请在对应终端完成：</Text>
-                      {['堡垒机跳转 / 切换目标主机', 'sudo su - root（如需）', 'cd 目标目录', 'source 环境变量'].map((s, i) => (
-                        <Text key={i} type="secondary" style={{ fontSize: 11, display: 'block' }}>{i + 1}. {s}</Text>
-                      ))}
+                      <Text style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>连接后自动执行</Text>
+                      <Switch
+                        size="small"
+                        checked={prepareSettings.autoRun}
+                        onChange={(checked) => setPrepareSettings((current) => ({ ...current, autoRun: checked }))}
+                      />
                     </div>
-                  }
-                />
-              )}
+                    <div>
+                      <Text style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>失败后继续后续步骤</Text>
+                      <Switch
+                        size="small"
+                        checked={prepareSettings.continueOnError}
+                        onChange={(checked) => setPrepareSettings((current) => ({ ...current, continueOnError: checked }))}
+                      />
+                    </div>
+                  </div>
+                  <Space wrap>
+                    <Tag color={connectedSelectedNodes.length > 0 ? 'blue' : 'default'}>
+                      选中已连接 {connectedSelectedNodes.length}
+                    </Tag>
+                    <Tag color={selectedPrepareStats.ready > 0 ? 'success' : 'default'}>
+                      就绪 {selectedPrepareStats.ready}
+                    </Tag>
+                    {selectedPrepareStats.running > 0 && <Tag color="gold">执行中 {selectedPrepareStats.running}</Tag>}
+                    {selectedPrepareStats.failed > 0 && <Tag color="error">失败 {selectedPrepareStats.failed}</Tag>}
+                    {selectedPrepareStats.pending > 0 && <Tag color="default">待执行 {selectedPrepareStats.pending}</Tag>}
+                  </Space>
+                  <Button
+                    icon={<ThunderboltOutlined />}
+                    block
+                    onClick={() => void handleRunPrepareOnSelected()}
+                    disabled={connectedSelectedNodes.length === 0 || !activePrepareProfile}
+                    loading={connectedSelectedNodes.length > 0 && connectedSelectedNodes.every((sessionId) => prepareRunningIds.includes(sessionId))}
+                  >
+                    对选中节点执行预处理
+                  </Button>
+                  <Alert
+                    type="info"
+                    showIcon={false}
+                    style={{ fontSize: 11, padding: '6px 10px' }}
+                    message={
+                      <div>
+                        <Text strong style={{ fontSize: 12 }}>自动预处理负责：</Text>
+                        {['加载 shell/profile', '设置便于诊断的环境变量', '预热常用排查命令路径', '记录当前节点上下文'].map((text, index) => (
+                          <Text key={text} type="secondary" style={{ fontSize: 11, display: 'block' }}>{index + 1}. {text}</Text>
+                        ))}
+                        <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
+                          如果现场还需要 `sudo su -`、`cd` 到业务目录或额外 source 私有 env，仍可继续在终端手动补充。
+                        </Text>
+                      </div>
+                    }
+                  />
+                </Space>
+              </Card>
 
               {/* 执行按钮 */}
               {!executing ? (

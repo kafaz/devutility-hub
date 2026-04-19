@@ -2390,9 +2390,6 @@ wss.on('connection', (ws) => {
         }
 
         const handleReady = () => {
-          send({ type: 'status', status: 'connected',
-                 host: cfg.host, port: cfg.port, username: cfg.username });
-
           // 打开唯一的交互式 Shell PTY
           ssh.shell(
             { term: 'xterm-256color', cols: msg.cols || 220, rows: msg.rows || 50 },
@@ -2402,6 +2399,8 @@ wss.on('connection', (ws) => {
                 return;
               }
               shell = stream;
+              send({ type: 'status', status: 'connected',
+                     host: cfg.host, port: cfg.port, username: cfg.username });
 
               // Shell 输出同时用于：终端显示 + 标记捕获
               stream.on('data', onShellData);

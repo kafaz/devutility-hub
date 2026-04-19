@@ -12,6 +12,25 @@ const SAFE_CONTEXT_STEPS = [
   { name: 'uptime', cmd: 'uptime' },
 ];
 
+const LOCALIZATION_BOOST_STEPS = [
+  {
+    name: 'load-shell-profile',
+    cmd: 'source /etc/profile >/dev/null 2>&1 || true; [ -f ~/.bashrc ] && source ~/.bashrc >/dev/null 2>&1 || true; [ -f ~/.zshrc ] && source ~/.zshrc >/dev/null 2>&1 || true',
+  },
+  {
+    name: 'set-diagnostic-env',
+    cmd: 'export LANG=C.UTF-8; export LC_ALL=C.UTF-8; export TERM=xterm-256color; export LESS=-SR; alias ll=\"ls -alF\" >/dev/null 2>&1 || true; printf \"READY user=%s host=%s pwd=%s\\n\" \"$(whoami)\" \"$(hostname)\" \"$(pwd)\"',
+  },
+  {
+    name: 'warm-common-tools',
+    cmd: 'for cmd in journalctl dmesg ss ps top iostat vmstat tail grep awk sed; do if command -v \"$cmd\" >/dev/null 2>&1; then printf \"[tool] %s=%s\\n\" \"$cmd\" \"$(command -v \"$cmd\")\"; fi; done',
+  },
+  {
+    name: 'collect-runtime-window',
+    cmd: 'date && uptime && printf \"shell=%s\\n\" \"${SHELL:-unknown}\"',
+  },
+];
+
 const LEGACY_ROOT_STEPS = [
   { name: 'become-root', cmd: 'sudo su -' },
   { name: 'load-profile', cmd: 'source /etc/profile >/dev/null 2>&1 || true' },
@@ -24,6 +43,14 @@ const DEFAULT_PREPARE_PROFILES = [
     name: 'Linux Readonly Context',
     description: 'Collect current identity and host context without mutating shell state.',
     steps: SAFE_CONTEXT_STEPS,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  },
+  {
+    profileId: 'linux-problem-localization-boost',
+    name: 'Linux Problem Localization Boost',
+    description: 'Warm the shell profile, set diagnostic-friendly environment variables, and snapshot the host so issue localization starts faster.',
+    steps: LOCALIZATION_BOOST_STEPS,
     createdAt: Date.now(),
     updatedAt: Date.now(),
   },

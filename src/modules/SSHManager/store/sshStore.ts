@@ -15,6 +15,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { generateId } from '../../../utils';
+import { matchLogNoise } from '../../../utils/logNoise';
 import { useAnalyzerStore } from './analyzerStore';
 import { useJournalStore } from './journalStore';
 
@@ -406,6 +407,7 @@ function makeWSHandler(
 
           if (lines.length > 0) {
             const keywords = analyzerStore.keywords;
+            const noiseKeywords = analyzerStore.noiseKeywords;
             const sess = get().sessions.find(s => s.id === sessionId);
             const lineListeners = get().termLineListeners[sessionId] || [];
 
@@ -417,6 +419,12 @@ function makeWSHandler(
               }
 
               if (!cleanLine) continue;
+
+              const noiseMatch = matchLogNoise(cleanLine, noiseKeywords);
+              if (noiseMatch) {
+                analyzerStore.recordSuppressedLog();
+                continue;
+              }
 
               const cleanLower = cleanLine.toLowerCase();
               const matched = keywords.filter(k => cleanLower.includes(k));

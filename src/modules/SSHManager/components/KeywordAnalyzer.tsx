@@ -10,12 +10,27 @@ import dayjs from 'dayjs';
 import React, { useState } from 'react';
 import { useGlobalStore } from '../../../store/globalStore';
 import { useAnalyzerStore } from '../store/analyzerStore';
+import { BUILTIN_LOG_NOISE_RULES } from '../../../utils/logNoise';
 
 const { Text } = Typography;
 
 const KeywordAnalyzer: React.FC = () => {
   const isDark = useGlobalStore((s) => s.theme === 'dark');
-  const { logs, keywords, addKeyword, removeKeyword, clearLogs, highlightRules, addHighlightRule, removeHighlightRule } = useAnalyzerStore();
+  const {
+    logs,
+    keywords,
+    addKeyword,
+    removeKeyword,
+    clearLogs,
+    highlightRules,
+    addHighlightRule,
+    removeHighlightRule,
+    noiseKeywords,
+    addNoiseKeyword,
+    removeNoiseKeyword,
+    suppressedCount,
+    clearSuppressedCount,
+  } = useAnalyzerStore();
   
   const [filterSession, setFilterSession] = useState<string | null>(null);
   const [filterType, setFilterType] = useState<string | null>(null);
@@ -23,6 +38,7 @@ const KeywordAnalyzer: React.FC = () => {
   const [newKeyword, setNewKeyword] = useState('');
   const [newRuleKeyword, setNewRuleKeyword] = useState('');
   const [newRuleColor, setNewRuleColor] = useState('#ef4444');
+  const [newNoiseKeyword, setNewNoiseKeyword] = useState('');
 
   const sessions = Array.from(new Set(logs.map((l) => l.sessionName)));
 
@@ -43,6 +59,13 @@ const KeywordAnalyzer: React.FC = () => {
     if (newRuleKeyword.trim()) {
       addHighlightRule({ keyword: newRuleKeyword.trim(), color: newRuleColor });
       setNewRuleKeyword('');
+    }
+  };
+
+  const handleAddNoiseKeyword = () => {
+    if (newNoiseKeyword.trim()) {
+      addNoiseKeyword(newNoiseKeyword.trim());
+      setNewNoiseKeyword('');
     }
   };
 
@@ -76,6 +99,7 @@ const KeywordAnalyzer: React.FC = () => {
         <Space>
           <Text strong style={{ fontSize: 13 }}>智能监控面板</Text>
           <Tag color="blue">{logs.length} 条记录</Tag>
+          <Tag color="gold">{suppressedCount} 条已忽略</Tag>
           
           <Select
             size="small"
@@ -104,9 +128,9 @@ const KeywordAnalyzer: React.FC = () => {
 
         <Space>
           <Button size="small" icon={<SettingOutlined />} onClick={() => setSettingsOpen(true)}>
-            关键词配置
+            关键词与降噪
           </Button>
-          <Popconfirm title="确定清空所有抓取的日志吗？" onConfirm={() => clearLogs()}>
+          <Popconfirm title="确定清空所有抓取的日志吗？" onConfirm={() => { clearLogs(); clearSuppressedCount(); }}>
             <Button size="small" danger icon={<DeleteOutlined />}>清空记录</Button>
           </Popconfirm>
         </Space>
@@ -196,6 +220,54 @@ const KeywordAnalyzer: React.FC = () => {
         />
 
         <Divider style={{ margin: '16px 0' }} />
+
+        <Text strong style={{ display: 'block', marginBottom: 8 }}>日志降噪规则</Text>
+        <Space.Compact style={{ width: '100%', marginBottom: 16 }}>
+          <Input
+            placeholder="自定义忽略词，例如 heartbeat"
+            value={newNoiseKeyword}
+            onChange={e => setNewNoiseKeyword(e.target.value)}
+            onPressEnter={handleAddNoiseKeyword}
+          />
+          <Button type="primary" onClick={handleAddNoiseKeyword}>添加</Button>
+        </Space.Compact>
+
+        <Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>
+          内建规则会自动忽略常见 INFO 级日志，自定义规则按子串匹配，且不会覆盖 error/timeout 等高风险信号。
+        </Text>
+
+        <List
+          size="small"
+          bordered
+          header={<Text strong>内建规则</Text>}
+          dataSource={BUILTIN_LOG_NOISE_RULES}
+          renderItem={(item) => (
+            <List.Item>
+              <Space>
+                <Tag color="default">默认</Tag>
+                <Text>{item.label}</Text>
+              </Space>
+            </List.Item>
+          )}
+          style={{ marginBottom: 12 }}
+        />
+
+        <List
+          size="small"
+          bordered
+          header={<Text strong>自定义忽略词</Text>}
+          locale={{ emptyText: '暂无自定义忽略词' }}
+          dataSource={noiseKeywords}
+          renderItem={(item) => (
+            <List.Item actions={[
+              <Button type="text" danger size="small" icon={<DeleteOutlined />} onClick={() => removeNoiseKeyword(item)} />
+            ]}>
+              <Text code>{item}</Text>
+            </List.Item>
+          )}
+        />
+
+        <Divider style={{ margin: '16px 0' }} />
         
         <Text strong style={{ display: 'block', marginBottom: 8 }}>原终端高亮规则 (实时变色)</Text>
         <Space.Compact style={{ width: '100%', marginBottom: 16 }}>
@@ -232,7 +304,7 @@ const KeywordAnalyzer: React.FC = () => {
         
         <Alert
           message="基于实时输出流的正则/子串匹配"
-          description="系统会在命令执行期间实时捕获节点输出，任何包含以下关键词的行将被抽取并展示到监控面板中。"
+          description="系统会先过滤默认 INFO 噪音和自定义忽略词，再把命中关键字的日志抽取到监控面板里。"
           type="info"
           showIcon
           style={{ marginTop: 24, fontSize: 12 }}

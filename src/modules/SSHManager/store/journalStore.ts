@@ -19,6 +19,7 @@ import { generateId } from '../../../utils';
 // ─── 类型 ──────────────────────────────────────────────────────────────────
 
 export type JournalEntryType =
+  | 'prepare_step' // 登录后预处理步骤
   | 'sop_step'     // SOP 步骤自动记录
   | 'quick_exec'   // 快速执行命令
   | 'manual_cmd'   // 终端手动输入命令
@@ -42,6 +43,8 @@ export interface JournalEntry {
   capturedVar?:  { name: string; value: string };
 
   // SOP 关联
+  prepareProfileName?: string;
+  prepareStepName?: string;
   sopStepName?:   string;
   sopInstanceId?: string;
   sopNodeName?:   string;        // 多节点执行时的节点标识（会话名称）

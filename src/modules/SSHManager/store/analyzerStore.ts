@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { generateId } from '../../../utils';
+import { normalizeNoiseKeyword, normalizeNoiseKeywords } from '../../../utils/logNoise';
 
 export interface CriticalLog {
   id: string;
@@ -29,12 +30,20 @@ interface AnalyzerStore {
   logs: CriticalLog[];
   addLog: (log: Omit<CriticalLog, 'id'>) => void;
   clearLogs: (sessionId?: string) => void;
+  suppressedCount: number;
+  recordSuppressedLog: () => void;
+  clearSuppressedCount: () => void;
 
   // 终端动态高亮规则
   highlightRules: HighlightRule[];
   addHighlightRule: (rule: Omit<HighlightRule, 'id'>) => void;
   removeHighlightRule: (id: string) => void;
   updateHighlightRule: (id: string, rule: Partial<Omit<HighlightRule, 'id'>>) => void;
+
+  // 日志降噪规则（大小写不敏感的子串匹配，内建规则始终生效）
+  noiseKeywords: string[];
+  addNoiseKeyword: (keyword: string) => void;
+  removeNoiseKeyword: (keyword: string) => void;
 }
 
 const DEFAULT_KEYWORDS = [
@@ -78,6 +87,9 @@ export const useAnalyzerStore = create<AnalyzerStore>()(
       clearLogs: (sessionId) => set((state) => ({
         logs: sessionId ? state.logs.filter((l) => l.sessionId !== sessionId) : []
       })),
+      suppressedCount: 0,
+      recordSuppressedLog: () => set((state) => ({ suppressedCount: state.suppressedCount + 1 })),
+      clearSuppressedCount: () => set({ suppressedCount: 0 }),
 
       highlightRules: DEFAULT_HIGHLIGHT_RULES,
       addHighlightRule: (rule) => set((state) => ({
@@ -89,10 +101,24 @@ export const useAnalyzerStore = create<AnalyzerStore>()(
       updateHighlightRule: (id, updates) => set((state) => ({
         highlightRules: state.highlightRules.map((r) => r.id === id ? { ...r, ...updates } : r),
       })),
+
+      noiseKeywords: [],
+      addNoiseKeyword: (keyword) => set((state) => {
+        const normalized = normalizeNoiseKeyword(keyword);
+        if (!normalized || state.noiseKeywords.includes(normalized)) return state;
+        return { noiseKeywords: normalizeNoiseKeywords([...state.noiseKeywords, normalized]) };
+      }),
+      removeNoiseKeyword: (keyword) => set((state) => ({
+        noiseKeywords: state.noiseKeywords.filter((item) => item !== normalizeNoiseKeyword(keyword)),
+      })),
     }),
     {
       name: 'devutility-analyzer-store',
-      partialize: (s) => ({ keywords: s.keywords, highlightRules: s.highlightRules }),
+      partialize: (s) => ({
+        keywords: s.keywords,
+        highlightRules: s.highlightRules,
+        noiseKeywords: s.noiseKeywords,
+      }),
     }
   )
 );

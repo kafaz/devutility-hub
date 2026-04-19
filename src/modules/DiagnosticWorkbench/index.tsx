@@ -34,11 +34,13 @@ import { useClipboard } from '../../hooks/useClipboard';
 import { useLocalStorage } from '../../hooks/useLocalStorage';
 import { useGlobalStore } from '../../store/globalStore';
 import { useCommandStore } from '../CommandBuilder/store/commandStore';
+import { useAnalyzerStore } from '../SSHManager/store/analyzerStore';
 import {
   extractCLookupHints,
   type FunctionCandidateToken,
   type SourceLocationCandidate,
 } from '../../utils/sourceLookupHints';
+import { filterNoiseText, RISK_SIGNAL_RE, shouldSuppressSessionLog } from '../../utils/logNoise';
 import { highlightCLines } from '../CodeContextExplorer/cHighlight';
 import { generateId } from '../../utils';
 import {
@@ -393,7 +395,6 @@ const severityColorMap: Record<string, string> = {
   critical: 'red',
 };
 
-const RISK_SIGNAL_RE = /timeout|timed out|超时|refused|拒绝|panic|fatal|exception|异常|failed|失败|error|reset|segfault|readonly|read-only|unreachable|i\/o|oom/i;
 const SOURCE_PREVIEW_BEFORE_CONTEXT = 12;
 const SOURCE_PREVIEW_AFTER_CONTEXT = 28;
 const DEFAULT_CONTEXT_SNAPSHOT: DiagnosticContextSnapshot = {
@@ -530,13 +531,18 @@ function collectEvidenceTags(texts: Array<string | undefined>, seedTags: string[
   return Array.from(bucket);
 }
 
-function isSuspiciousSessionLog(log: AgentSessionLogItem) {
-  const text = [log.message, log.stdout, log.stderr, log.cmd].join('\n');
-  return log.level === 'error' || log.level === 'warning' || (typeof log.exitCode === 'number' && log.exitCode !== 0) || RISK_SIGNAL_RE.test(text);
+function isSuspiciousSessionLog(log: AgentSessionLogItem, noiseKeywords: string[] = []) {
+  const rawText = [log.message, log.stdout, log.stderr, log.cmd].join('\n');
+  const filteredText = buildSessionLogEvidence(log, noiseKeywords) || rawText;
+  return log.level === 'error'
+    || log.level === 'warning'
+    || (typeof log.exitCode === 'number' && log.exitCode !== 0)
+    || RISK_SIGNAL_RE.test(filteredText);
 }
 
-function buildSessionLogEvidence(log: AgentSessionLogItem) {
-  return [log.message, log.stdout, log.stderr].filter(Boolean).join('\n').trim();
+function buildSessionLogEvidence(log: AgentSessionLogItem, noiseKeywords: string[] = []) {
+  const combined = [log.message, log.stdout, log.stderr].filter(Boolean).join('\n').trim();
+  return filterNoiseText(combined, noiseKeywords).text;
 }
 
 function doesNoiseRuleMatchCluster(cluster: Pick<EffectiveErrorCluster, 'fingerprint' | 'representative' | 'tags'>, rule: NoiseSuppressionRule) {
@@ -858,7 +864,11 @@ function buildSourcePreviewDisplayRows(
   return rows;
 }
 
-function inferFirstAnomaly(run: DiagnosticRunRecord | null, sessionLogs: AgentSessionLogItem[]): DerivedAnomaly | null {
+function inferFirstAnomaly(
+  run: DiagnosticRunRecord | null,
+  sessionLogs: AgentSessionLogItem[],
+  noiseKeywords: string[] = []
+): DerivedAnomaly | null {
   const candidates: Array<{ order: number; anomaly: DerivedAnomaly }> = [];
 
   if (run) {
@@ -933,8 +943,8 @@ function inferFirstAnomaly(run: DiagnosticRunRecord | null, sessionLogs: AgentSe
     .slice()
     .sort((left, right) => left.ts - right.ts)
     .forEach((log, index) => {
-      if (!isSuspiciousSessionLog(log)) return;
-      const content = buildSessionLogEvidence(log);
+      if (!isSuspiciousSessionLog(log, noiseKeywords)) return;
+      const content = buildSessionLogEvidence(log, noiseKeywords);
       candidates.push({
         order: 50 + index,
         anomaly: {
@@ -962,7 +972,11 @@ function inferFirstAnomaly(run: DiagnosticRunRecord | null, sessionLogs: AgentSe
   return candidates[0].anomaly;
 }
 
-function buildExecutionTimeline(run: DiagnosticRunRecord | null, sessionLogs: AgentSessionLogItem[]) {
+function buildExecutionTimeline(
+  run: DiagnosticRunRecord | null,
+  sessionLogs: AgentSessionLogItem[],
+  noiseKeywords: string[] = []
+) {
   if (!run) return [] as TimelineEvent[];
 
   const events: TimelineEvent[] = [
@@ -1013,12 +1027,12 @@ function buildExecutionTimeline(run: DiagnosticRunRecord | null, sessionLogs: Ag
   const runEnd = run.finishedAt || Date.now();
   sessionLogs
     .filter((log) => log.ts >= run.startedAt - 60_000 && log.ts <= runEnd + 60_000)
-    .filter((log) => isSuspiciousSessionLog(log))
+    .filter((log) => isSuspiciousSessionLog(log, noiseKeywords))
     .slice()
     .sort((left, right) => left.ts - right.ts)
     .slice(0, 20)
     .forEach((log) => {
-      const content = buildSessionLogEvidence(log);
+      const content = buildSessionLogEvidence(log, noiseKeywords);
       events.push({
         id: `log-${log.id}`,
         ts: log.ts,
@@ -1048,7 +1062,8 @@ function buildExecutionTimeline(run: DiagnosticRunRecord | null, sessionLogs: Ag
 function extractEffectiveErrorLogs(
   run: DiagnosticRunRecord | null,
   sessionLogs: AgentSessionLogItem[],
-  context: DiagnosticContextSnapshot
+  context: DiagnosticContextSnapshot,
+  noiseKeywords: string[] = []
 ) {
   if (!run) return [] as EffectiveErrorLog[];
 
@@ -1120,9 +1135,9 @@ function extractEffectiveErrorLogs(
   const runEnd = run.finishedAt || Date.now();
   sessionLogs
     .filter((log) => log.ts >= run.startedAt - 60_000 && log.ts <= runEnd + 60_000)
-    .filter((log) => isSuspiciousSessionLog(log))
+    .filter((log) => isSuspiciousSessionLog(log, noiseKeywords))
     .forEach((log) => {
-      const content = buildSessionLogEvidence(log);
+      const content = buildSessionLogEvidence(log, noiseKeywords);
       pushItem({
         id: `effective-log-${log.id}`,
         source: 'session_log',
@@ -1179,6 +1194,7 @@ const DiagnosticWorkbench: React.FC = () => {
   const { theme } = useGlobalStore();
   const isDark = theme === 'dark';
   const { playbooks, activePlaybookId, setActivePlaybook, addPlaybook, updatePlaybook, deletePlaybook } = useDiagnosticStore();
+  const analyzerNoiseKeywords = useAnalyzerStore((state) => state.noiseKeywords);
   const addTemplate = useCommandStore((state) => state.addTemplate);
   const { lockedEvidence, addEvidence, removeEvidence, clearEvidence } = useEvidenceStore();
   const { copy: copyEvidenceMarkdown } = useClipboard();
@@ -1247,11 +1263,27 @@ const DiagnosticWorkbench: React.FC = () => {
     () => normalizeContextSnapshot(detailRun?.contextSnapshot),
     [detailRun?.contextSnapshot]
   );
-  const firstAnomaly = useMemo(() => inferFirstAnomaly(detailRun, sessionLogs), [detailRun, sessionLogs]);
-  const executionTimeline = useMemo(() => buildExecutionTimeline(detailRun, sessionLogs), [detailRun, sessionLogs]);
+  const filteredSessionLogs = useMemo(
+    () => sessionLogs.filter((log) => !shouldSuppressSessionLog(log, analyzerNoiseKeywords)),
+    [analyzerNoiseKeywords, sessionLogs]
+  );
+  const suppressedSessionLogCount = sessionLogs.length - filteredSessionLogs.length;
+  const firstAnomaly = useMemo(
+    () => inferFirstAnomaly(detailRun, filteredSessionLogs, analyzerNoiseKeywords),
+    [analyzerNoiseKeywords, detailRun, filteredSessionLogs]
+  );
+  const executionTimeline = useMemo(
+    () => buildExecutionTimeline(detailRun, filteredSessionLogs, analyzerNoiseKeywords),
+    [analyzerNoiseKeywords, detailRun, filteredSessionLogs]
+  );
   const effectiveErrorLogs = useMemo(
-    () => extractEffectiveErrorLogs(detailRun, sessionLogs, detailRun ? detailContextSnapshot : contextSnapshot),
-    [contextSnapshot, detailContextSnapshot, detailRun, sessionLogs]
+    () => extractEffectiveErrorLogs(
+      detailRun,
+      filteredSessionLogs,
+      detailRun ? detailContextSnapshot : contextSnapshot,
+      analyzerNoiseKeywords
+    ),
+    [analyzerNoiseKeywords, contextSnapshot, detailContextSnapshot, detailRun, filteredSessionLogs]
   );
   const baselineReferenceSummary = useMemo(
     () => buildBaselineReferenceSummary(historyRuns, detailRun),
@@ -3107,6 +3139,16 @@ const DiagnosticWorkbench: React.FC = () => {
           extra={
             <Space>
               <Tag color={selectedSessionId ? 'processing' : 'default'}>{selectedSessionId || '未选择会话'}</Tag>
+              {selectedSessionId && (
+                <>
+                  <Tag color={filteredSessionLogs.length > 0 ? 'blue' : 'default'}>
+                    展示 {filteredSessionLogs.length}
+                  </Tag>
+                  {suppressedSessionLogCount > 0 && (
+                    <Tag color="gold">忽略 {suppressedSessionLogCount}</Tag>
+                  )}
+                </>
+              )}
               <Button
                 icon={<ReloadOutlined />}
                 size="small"
@@ -3124,14 +3166,20 @@ const DiagnosticWorkbench: React.FC = () => {
             <div style={{ textAlign: 'center', padding: '20px 0' }}>
               <Spin />
             </div>
-          ) : sessionLogs.length === 0 ? (
-            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前会话暂无日志" />
+          ) : filteredSessionLogs.length === 0 ? (
+            <Empty
+              image={Empty.PRESENTED_IMAGE_SIMPLE}
+              description={sessionLogs.length > 0 ? '日志已被默认 INFO 降噪规则过滤' : '当前会话暂无日志'}
+            />
           ) : (
             <List
               size="small"
-              dataSource={[...sessionLogs].reverse()}
+              dataSource={[...filteredSessionLogs].reverse()}
               renderItem={(item) => {
-                const lookupText = buildLookupText([item.type, item.message, item.stdout, item.stderr]);
+                const filteredStdout = filterNoiseText(item.stdout || '', analyzerNoiseKeywords).text;
+                const filteredStderr = filterNoiseText(item.stderr || '', analyzerNoiseKeywords).text;
+                const filteredEvidence = buildSessionLogEvidence(item, analyzerNoiseKeywords);
+                const lookupText = buildLookupText([item.type, item.message, filteredStdout, filteredStderr]);
                 const canLocate = hasCLookupText(lookupText);
                 return (
                   <List.Item
@@ -3147,7 +3195,7 @@ const DiagnosticWorkbench: React.FC = () => {
                                 summary: item.message || `exit=${item.exitCode ?? '-'} / duration=${item.durationMs ?? '-'}ms`,
                                 sourceType: 'session_log',
                                 text: lookupText,
-                                parts: [item.type, item.message, item.stdout, item.stderr],
+                                parts: [item.type, item.message, filteredStdout, filteredStderr],
                                 command: item.cmd,
                               })}
                             >
@@ -3164,11 +3212,11 @@ const DiagnosticWorkbench: React.FC = () => {
                           sourceId: item.id,
                           title: `会话日志: ${item.type}`,
                           summary: item.message || `exit=${item.exitCode ?? '-'} / duration=${item.durationMs ?? '-'}ms`,
-                          content: buildSessionLogEvidence(item),
+                          content: filteredEvidence,
                           lookupText,
                           command: item.cmd,
                           sessionLabel: currentSession ? `${currentSession.username}@${currentSession.host}` : undefined,
-                          tags: collectEvidenceTags([item.message, item.stdout, item.stderr, item.cmd, item.type]),
+                          tags: collectEvidenceTags([item.message, filteredStdout, filteredStderr, item.cmd, item.type]),
                         })}
                       >
                         锁定
@@ -3190,11 +3238,11 @@ const DiagnosticWorkbench: React.FC = () => {
                         <Space direction="vertical" size={6} style={{ width: '100%' }}>
                         {item.cmd && <Text code>{item.cmd}</Text>}
                         {item.message && <Text>{item.message}</Text>}
-                        {item.stdout && (
+                        {filteredStdout && (
                           <div>
                             <Text strong>stdout</Text>
                             <ResizableOutput
-                              content={item.stdout}
+                              content={filteredStdout}
                               isDark={isDark}
                               minHeight={56}
                               maxHeight={180}
@@ -3208,11 +3256,11 @@ const DiagnosticWorkbench: React.FC = () => {
                             />
                           </div>
                         )}
-                        {item.stderr && (
+                        {filteredStderr && (
                           <div>
                             <Text strong>stderr</Text>
                             <ResizableOutput
-                              content={item.stderr}
+                              content={filteredStderr}
                               isDark={isDark}
                               minHeight={56}
                               maxHeight={180}

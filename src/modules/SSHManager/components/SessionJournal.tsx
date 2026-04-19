@@ -25,6 +25,7 @@ import {
     FileTextOutlined,
     InfoCircleOutlined,
     PlusOutlined,
+    ThunderboltOutlined,
     VideoCameraOutlined,
 } from '@ant-design/icons';
 import {
@@ -56,6 +57,7 @@ const { TextArea } = Input;
 const TYPE_CONFIG: Record<JournalEntryType, {
   color: string; label: string; dot: React.ReactNode;
 }> = {
+  prepare_step: { color: '#0ea5e9', label: '预处理', dot: <ThunderboltOutlined style={{ color: '#0ea5e9' }} /> },
   sop_step:    { color: '#3b82f6', label: 'SOP',    dot: <FileTextOutlined style={{ color: '#3b82f6' }} /> },
   quick_exec:  { color: '#22c55e', label: '快速执行', dot: <CodeOutlined style={{ color: '#22c55e' }} /> },
   manual_cmd:  { color: '#8b5cf6', label: '手动命令', dot: <CodeOutlined style={{ color: '#8b5cf6' }} /> },
@@ -160,9 +162,14 @@ const EntryCard: React.FC<{
           </Space>
 
           {/* 第二行：SOP 步骤名（仅 sop_step 类型显示） */}
-          {entry.sopStepName && (
+          {(entry.prepareStepName || entry.sopStepName) && (
             <Text type="secondary" style={{ fontSize: 11, paddingLeft: 2 }}>
-              └ {entry.sopStepName}
+              └ {entry.prepareStepName || entry.sopStepName}
+            </Text>
+          )}
+          {entry.prepareProfileName && (
+            <Text type="secondary" style={{ fontSize: 11, paddingLeft: 2 }}>
+              模板: {entry.prepareProfileName}
             </Text>
           )}
         </div>
@@ -304,9 +311,13 @@ const SessionJournal: React.FC<Props> = ({ sessionId, sessionName, onSnapshotReq
       const nodeInfo = e.nodeHost
         ? `${e.nodeUser ? e.nodeUser + '@' : ''}${e.nodeHost}:${e.nodePort ?? 22}`
         : e.sessionName;
-      lines.push(`## [${ts}] ${tc.label}${e.sopStepName ? ` · ${e.sopStepName}` : ''}`);
+      const titleSuffix = e.prepareStepName || e.sopStepName;
+      lines.push(`## [${ts}] ${tc.label}${titleSuffix ? ` · ${titleSuffix}` : ''}`);
       lines.push('');
       lines.push(`> **节点**: \`${nodeInfo}\``);
+      if (e.prepareProfileName) {
+        lines.push(`> **模板**: \`${e.prepareProfileName}\``);
+      }
       lines.push('');
 
       if (e.command) {
