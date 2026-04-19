@@ -24,22 +24,8 @@ const READY_SHELL_STEPS = [
 
 const FAST_CONTEXT_STEPS = [
   {
-    name: 'whoami',
-    cmd: 'whoami',
-    phase: 'context',
-    mode: 'exec',
-    parallelGroup: 'fast-context',
-  },
-  {
-    name: 'host',
-    cmd: 'hostname',
-    phase: 'context',
-    mode: 'exec',
-    parallelGroup: 'fast-context',
-  },
-  {
-    name: 'pwd',
-    cmd: 'pwd',
+    name: 'collect-fast-context',
+    cmd: 'printf "[context] user=%s\\n[context] host=%s\\n[context] pwd=%s\\nshell=%s\\n" "$(whoami)" "$(hostname)" "$(pwd)" "${SHELL:-unknown}"',
     phase: 'context',
     mode: 'exec',
     parallelGroup: 'fast-context',
@@ -104,7 +90,7 @@ const DEFAULT_PREPARE_PROFILES = [
     profileId: 'linux-problem-localization-fast-path',
     name: 'Linux Problem Localization Fast Path',
     description: 'Prioritize shell readiness first, then parallelize read-only probes so issue localization can start faster after login.',
-    builtinVersion: 1,
+    builtinVersion: 2,
     managedBy: 'system',
     version: DEFAULT_PREPARE_PROFILE_VERSION,
     steps: LOCALIZATION_FAST_PATH_STEPS,
@@ -115,7 +101,7 @@ const DEFAULT_PREPARE_PROFILES = [
     profileId: 'linux-problem-localization-boost',
     name: 'Linux Problem Localization Boost',
     description: 'Warm the shell profile, parallelize safe context probes, and collect a broader runtime snapshot for deeper follow-up localization.',
-    builtinVersion: 2,
+    builtinVersion: 3,
     managedBy: 'system',
     version: DEFAULT_PREPARE_PROFILE_VERSION,
     steps: LOCALIZATION_BOOST_STEPS,

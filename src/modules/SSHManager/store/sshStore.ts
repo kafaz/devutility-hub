@@ -69,6 +69,7 @@ export interface InitCommandTemplate {
   capturePattern?: string;
   timeout?: number;
   continueOnFailure?: boolean;
+  parallelGroup?: string;
 }
 
 export interface SessionGroup {
@@ -234,6 +235,7 @@ const DEFAULT_INIT_COMMANDS: InitCommandTemplate[] = [
     captureVar: 'node_hostname',
     timeout: 8000,
     continueOnFailure: true,
+    parallelGroup: 'bootstrap-default-context',
   },
   {
     id: 'default-user',
@@ -242,6 +244,7 @@ const DEFAULT_INIT_COMMANDS: InitCommandTemplate[] = [
     captureVar: 'node_user',
     timeout: 8000,
     continueOnFailure: true,
+    parallelGroup: 'bootstrap-default-context',
   },
   {
     id: 'default-pwd',
@@ -250,6 +253,7 @@ const DEFAULT_INIT_COMMANDS: InitCommandTemplate[] = [
     captureVar: 'node_pwd',
     timeout: 8000,
     continueOnFailure: true,
+    parallelGroup: 'bootstrap-default-context',
   },
   {
     id: 'default-shell',
@@ -258,6 +262,7 @@ const DEFAULT_INIT_COMMANDS: InitCommandTemplate[] = [
     captureVar: 'node_shell',
     timeout: 8000,
     continueOnFailure: true,
+    parallelGroup: 'bootstrap-default-context',
   },
 ];
 
@@ -586,7 +591,10 @@ function makeWSHandler(
 
           if (lines.length > 0) {
             const keywords = analyzerStore.keywords;
-            const noiseKeywords = analyzerStore.noiseKeywords;
+            const noiseOptions = {
+              builtinMode: analyzerStore.builtinNoiseMode,
+              customKeywords: analyzerStore.noiseKeywords,
+            };
             const sess = get().sessions.find(s => s.id === sessionId);
             const lineListeners = get().termLineListeners[sessionId] || [];
 
@@ -599,9 +607,9 @@ function makeWSHandler(
 
               if (!cleanLine) continue;
 
-              const noiseMatch = matchLogNoise(cleanLine, noiseKeywords);
+              const noiseMatch = matchLogNoise(cleanLine, noiseOptions);
               if (noiseMatch) {
-                analyzerStore.recordSuppressedLog();
+                analyzerStore.recordSuppressedLog(noiseMatch);
                 continue;
               }
 
@@ -1039,12 +1047,11 @@ export const useSSHStore = create<SSHStore>()(
         let blockingFailure = false;
         let lastError = '';
 
-        for (const command of mergedCommands) {
+        const executeBootstrapCommand = async (command: InitCommandTemplate) => {
           const activeContext = get().nodeContexts[sessionId];
           if (!activeContext || activeContext.connectionEpoch !== connectionEpoch) {
-            return;
+            return null;
           }
-
           const result = await get().captureContextCommand(sessionId, {
             source: 'init',
             name: command.name,
@@ -1054,15 +1061,69 @@ export const useSSHStore = create<SSHStore>()(
             timeout: command.timeout,
             continueOnFailure: command.continueOnFailure,
           });
+          return { command, result };
+        };
 
+        const applyBootstrapResult = (
+          command: InitCommandTemplate,
+          result: {
+            stdout: string;
+            stderr: string;
+            exitCode: number;
+            durationMs: number;
+            extractedVars: Record<string, string>;
+          }
+        ) => {
           if (result.exitCode !== 0) {
             failedCount += 1;
             lastError = result.stderr || result.stdout || `${command.name} 执行失败`;
             if (!command.continueOnFailure) {
               blockingFailure = true;
-              break;
             }
           }
+        };
+
+        for (let index = 0; index < mergedCommands.length; index += 1) {
+          const command = mergedCommands[index];
+          const activeContext = get().nodeContexts[sessionId];
+          if (!activeContext || activeContext.connectionEpoch !== connectionEpoch) {
+            return;
+          }
+
+          const groupId = String(command.parallelGroup || '');
+          if (groupId) {
+            const group: InitCommandTemplate[] = [command];
+            let cursor = index + 1;
+            while (cursor < mergedCommands.length) {
+              const candidate = mergedCommands[cursor];
+              if (String(candidate?.parallelGroup || '') !== groupId) break;
+              group.push(candidate);
+              cursor += 1;
+            }
+
+            // 默认上下文采集互不依赖，合并并发能明显缩短“登录后可定位”的等待时间。
+            const results = await Promise.all(group.map((item) => executeBootstrapCommand(item)));
+            index = cursor - 1;
+
+            for (const item of results) {
+              const latestContext = get().nodeContexts[sessionId];
+              if (!latestContext || latestContext.connectionEpoch !== connectionEpoch) {
+                return;
+              }
+              if (!item) continue;
+              applyBootstrapResult(item.command, item.result);
+              if (blockingFailure) break;
+            }
+            if (blockingFailure) {
+              break;
+            }
+            continue;
+          }
+
+          const executed = await executeBootstrapCommand(command);
+          if (!executed) return;
+          applyBootstrapResult(command, executed.result);
+          if (blockingFailure) break;
         }
 
         set((s) => {

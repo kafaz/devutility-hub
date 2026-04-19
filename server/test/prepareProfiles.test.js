@@ -19,11 +19,11 @@ test('problem localization boost splits fast readiness steps from background war
   );
   assert.deepEqual(
     selectPrepareProfileSteps(fastPath, 'background').map((step) => step.name),
-    ['whoami', 'host', 'pwd', 'warm-common-tools']
+    ['collect-fast-context', 'warm-common-tools']
   );
   assert.deepEqual(
     selectPrepareProfileSteps(boost, 'background').map((step) => step.name),
-    ['whoami', 'host', 'pwd', 'warm-common-tools', 'collect-runtime-window']
+    ['collect-fast-context', 'warm-common-tools', 'collect-runtime-window']
   );
 });
 
@@ -60,6 +60,6 @@ test('legacy builtin localization profile is upgraded to staged system defaults'
   assert.equal(upgraded.version, 2);
   assert.deepEqual(
     selectPrepareProfileSteps(upgraded, 'background').map((step) => step.name),
-    ['whoami', 'host', 'pwd', 'warm-common-tools', 'collect-runtime-window']
+    ['collect-fast-context', 'warm-common-tools', 'collect-runtime-window']
   );
 });

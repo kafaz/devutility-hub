@@ -42,7 +42,7 @@ import {
   type FunctionCandidateToken,
   type SourceLocationCandidate,
 } from '../../utils/sourceLookupHints';
-import { filterNoiseText, RISK_SIGNAL_RE, shouldSuppressSessionLog } from '../../utils/logNoise';
+import { filterNoiseText, RISK_SIGNAL_RE, shouldSuppressSessionLog, type LogNoiseOptions } from '../../utils/logNoise';
 import { highlightCLines } from '../CodeContextExplorer/cHighlight';
 import { generateId } from '../../utils';
 import {
@@ -538,18 +538,19 @@ function collectEvidenceTags(texts: Array<string | undefined>, seedTags: string[
   return Array.from(bucket);
 }
 
-function isSuspiciousSessionLog(log: AgentSessionLogItem, noiseKeywords: string[] = []) {
+function isSuspiciousSessionLog(log: AgentSessionLogItem, noiseOptions: LogNoiseOptions = {}) {
+  if (shouldSuppressSessionLog(log, noiseOptions)) return false;
   const rawText = [log.message, log.stdout, log.stderr, log.cmd].join('\n');
-  const filteredText = buildSessionLogEvidence(log, noiseKeywords) || rawText;
+  const filteredText = buildSessionLogEvidence(log, noiseOptions) || rawText;
   return log.level === 'error'
     || log.level === 'warning'
     || (typeof log.exitCode === 'number' && log.exitCode !== 0)
     || RISK_SIGNAL_RE.test(filteredText);
 }
 
-function buildSessionLogEvidence(log: AgentSessionLogItem, noiseKeywords: string[] = []) {
+function buildSessionLogEvidence(log: AgentSessionLogItem, noiseOptions: LogNoiseOptions = {}) {
   const combined = [log.message, log.stdout, log.stderr].filter(Boolean).join('\n').trim();
-  return filterNoiseText(combined, noiseKeywords).text;
+  return filterNoiseText(combined, noiseOptions).text;
 }
 
 function doesNoiseRuleMatchCluster(cluster: Pick<EffectiveErrorCluster, 'fingerprint' | 'representative' | 'tags'>, rule: NoiseSuppressionRule) {
@@ -874,7 +875,7 @@ function buildSourcePreviewDisplayRows(
 function inferFirstAnomaly(
   run: DiagnosticRunRecord | null,
   sessionLogs: AgentSessionLogItem[],
-  noiseKeywords: string[] = []
+  noiseOptions: LogNoiseOptions = {}
 ): DerivedAnomaly | null {
   const candidates: Array<{ order: number; anomaly: DerivedAnomaly }> = [];
 
@@ -950,8 +951,8 @@ function inferFirstAnomaly(
     .slice()
     .sort((left, right) => left.ts - right.ts)
     .forEach((log, index) => {
-      if (!isSuspiciousSessionLog(log, noiseKeywords)) return;
-      const content = buildSessionLogEvidence(log, noiseKeywords);
+      if (!isSuspiciousSessionLog(log, noiseOptions)) return;
+      const content = buildSessionLogEvidence(log, noiseOptions);
       candidates.push({
         order: 50 + index,
         anomaly: {
@@ -982,7 +983,7 @@ function inferFirstAnomaly(
 function buildExecutionTimeline(
   run: DiagnosticRunRecord | null,
   sessionLogs: AgentSessionLogItem[],
-  noiseKeywords: string[] = []
+  noiseOptions: LogNoiseOptions = {}
 ) {
   if (!run) return [] as TimelineEvent[];
 
@@ -1034,12 +1035,12 @@ function buildExecutionTimeline(
   const runEnd = run.finishedAt || Date.now();
   sessionLogs
     .filter((log) => log.ts >= run.startedAt - 60_000 && log.ts <= runEnd + 60_000)
-    .filter((log) => isSuspiciousSessionLog(log, noiseKeywords))
+    .filter((log) => isSuspiciousSessionLog(log, noiseOptions))
     .slice()
     .sort((left, right) => left.ts - right.ts)
     .slice(0, 20)
     .forEach((log) => {
-      const content = buildSessionLogEvidence(log, noiseKeywords);
+      const content = buildSessionLogEvidence(log, noiseOptions);
       events.push({
         id: `log-${log.id}`,
         ts: log.ts,
@@ -1070,7 +1071,7 @@ function extractEffectiveErrorLogs(
   run: DiagnosticRunRecord | null,
   sessionLogs: AgentSessionLogItem[],
   context: DiagnosticContextSnapshot,
-  noiseKeywords: string[] = []
+  noiseOptions: LogNoiseOptions = {}
 ) {
   if (!run) return [] as EffectiveErrorLog[];
 
@@ -1142,9 +1143,9 @@ function extractEffectiveErrorLogs(
   const runEnd = run.finishedAt || Date.now();
   sessionLogs
     .filter((log) => log.ts >= run.startedAt - 60_000 && log.ts <= runEnd + 60_000)
-    .filter((log) => isSuspiciousSessionLog(log, noiseKeywords))
+    .filter((log) => isSuspiciousSessionLog(log, noiseOptions))
     .forEach((log) => {
-      const content = buildSessionLogEvidence(log, noiseKeywords);
+      const content = buildSessionLogEvidence(log, noiseOptions);
       pushItem({
         id: `effective-log-${log.id}`,
         source: 'session_log',
@@ -1201,6 +1202,7 @@ const DiagnosticWorkbench: React.FC = () => {
   const { theme } = useGlobalStore();
   const isDark = theme === 'dark';
   const { playbooks, activePlaybookId, setActivePlaybook, addPlaybook, updatePlaybook, deletePlaybook } = useDiagnosticStore();
+  const analyzerBuiltinNoiseMode = useAnalyzerStore((state) => state.builtinNoiseMode);
   const analyzerNoiseKeywords = useAnalyzerStore((state) => state.noiseKeywords);
   const addTemplate = useCommandStore((state) => state.addTemplate);
   const { lockedEvidence, addEvidence, removeEvidence, clearEvidence } = useEvidenceStore();
@@ -1274,26 +1276,33 @@ const DiagnosticWorkbench: React.FC = () => {
     () => normalizeContextSnapshot(detailRun?.contextSnapshot),
     [detailRun?.contextSnapshot]
   );
+  const sessionNoiseOptions = useMemo<LogNoiseOptions>(
+    () => ({
+      builtinMode: analyzerBuiltinNoiseMode,
+      customKeywords: analyzerNoiseKeywords,
+    }),
+    [analyzerBuiltinNoiseMode, analyzerNoiseKeywords]
+  );
   const filteredSessionLogs = useMemo(
-    () => sessionLogs.filter((log) => !shouldSuppressSessionLog(log, analyzerNoiseKeywords)),
-    [analyzerNoiseKeywords, sessionLogs]
+    () => sessionLogs.filter((log) => !shouldSuppressSessionLog(log, sessionNoiseOptions)),
+    [sessionLogs, sessionNoiseOptions]
   );
   const firstAnomaly = useMemo(
-    () => inferFirstAnomaly(detailRun, filteredSessionLogs, analyzerNoiseKeywords),
-    [analyzerNoiseKeywords, detailRun, filteredSessionLogs]
+    () => inferFirstAnomaly(detailRun, filteredSessionLogs, sessionNoiseOptions),
+    [detailRun, filteredSessionLogs, sessionNoiseOptions]
   );
   const executionTimeline = useMemo(
-    () => buildExecutionTimeline(detailRun, filteredSessionLogs, analyzerNoiseKeywords),
-    [analyzerNoiseKeywords, detailRun, filteredSessionLogs]
+    () => buildExecutionTimeline(detailRun, filteredSessionLogs, sessionNoiseOptions),
+    [detailRun, filteredSessionLogs, sessionNoiseOptions]
   );
   const effectiveErrorLogs = useMemo(
     () => extractEffectiveErrorLogs(
       detailRun,
       filteredSessionLogs,
       detailRun ? detailContextSnapshot : contextSnapshot,
-      analyzerNoiseKeywords
+      sessionNoiseOptions
     ),
-    [analyzerNoiseKeywords, contextSnapshot, detailContextSnapshot, detailRun, filteredSessionLogs]
+    [contextSnapshot, detailContextSnapshot, detailRun, filteredSessionLogs, sessionNoiseOptions]
   );
   const baselineReferenceSummary = useMemo(
     () => buildBaselineReferenceSummary(historyRuns, detailRun),
@@ -2442,7 +2451,7 @@ const DiagnosticWorkbench: React.FC = () => {
                   sourceId: item.id,
                   title: `会话日志: ${item.type}`,
                   summary: item.message || `exit=${item.exitCode ?? '-'} / duration=${item.durationMs ?? '-'}ms`,
-                  content: buildSessionLogEvidence(item),
+                  content: buildSessionLogEvidence(item, sessionNoiseOptions),
                   lookupText,
                   command: item.cmd,
                   sessionLabel: currentSession ? `${currentSession.username}@${currentSession.host}` : undefined,

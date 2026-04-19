@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { filterNoiseText, shouldSuppressSessionLog } from './logNoise.ts';
+import { filterNoiseText, matchLogNoise, shouldSuppressSessionLog } from './logNoise.ts';
 
 test('shouldSuppressSessionLog suppresses session logs whose stdout is only info noise', () => {
   const suppressed = shouldSuppressSessionLog({
@@ -34,4 +34,39 @@ test('filterNoiseText removes info lines but preserves risky lines', () => {
 
   assert.equal(filtered.suppressedCount, 2);
   assert.equal(filtered.text, 'panic: disk detached');
+});
+
+test('focus mode suppresses debug lines and keeps nearby risk signals visible', () => {
+  assert.deepEqual(
+    matchLogNoise('DEBUG warmup started', { builtinMode: 'focus', customKeywords: [] }),
+    {
+      kind: 'builtin',
+      id: 'plain-debug-prefix',
+      label: 'DEBUG 前缀',
+    }
+  );
+
+  assert.equal(shouldSuppressSessionLog({
+    type: 'command_result',
+    level: 'info',
+    message: '命令执行完成，exit=0，duration=8ms',
+    stdout: 'DEBUG warmup started\nTRACE probe finished',
+    stderr: '',
+    exitCode: 0,
+  }, {
+    builtinMode: 'focus',
+    customKeywords: [],
+  }), true);
+
+  assert.equal(shouldSuppressSessionLog({
+    type: 'command_result',
+    level: 'info',
+    message: '命令执行完成，exit=0，duration=8ms',
+    stdout: 'DEBUG warmup started\nERROR dependency refused connection',
+    stderr: '',
+    exitCode: 0,
+  }, {
+    builtinMode: 'focus',
+    customKeywords: [],
+  }), false);
 });
