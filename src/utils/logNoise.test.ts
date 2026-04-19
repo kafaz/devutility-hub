@@ -59,6 +59,20 @@ test('filterNoiseText suppresses last login banners by default', () => {
   assert.equal(filtered.text, 'ERROR disk timeout on nvme0n1');
 });
 
+test('filterNoiseText suppresses common login MOTD chatter but keeps actionable notices', () => {
+  const filtered = filterNoiseText([
+    'Welcome to Ubuntu 24.04.2 LTS (GNU/Linux 6.8.0-31-generic x86_64)',
+    ' * Documentation:  https://help.ubuntu.com',
+    ' System information as of Mon Apr 20 10:00:00 CST 2026',
+    '  System load:  0.08',
+    '  Usage of /:   41.2% of 49.06GB',
+    'System restart required',
+  ].join('\n'));
+
+  assert.equal(filtered.suppressedCount, 5);
+  assert.equal(filtered.text, 'System restart required');
+});
+
 test('filterNoiseText folds structured prepare chatter in default info mode', () => {
   const filtered = filterNoiseText([
     '[2026-04-20 10:00:00] INFO bootstrap ready',
@@ -128,4 +142,19 @@ test('matchLogNoise recognizes level=info style emitters', () => {
       label: 'level=info',
     }
   );
+});
+
+test('shouldSuppressSessionLog suppresses MOTD-only command output', () => {
+  assert.equal(shouldSuppressSessionLog({
+    type: 'command_result',
+    level: 'info',
+    message: '命令执行完成，exit=0，duration=8ms',
+    stdout: [
+      'Welcome to Ubuntu 24.04.2 LTS (GNU/Linux 6.8.0-31-generic x86_64)',
+      ' * Documentation:  https://help.ubuntu.com',
+      ' System information as of Mon Apr 20 10:00:00 CST 2026',
+    ].join('\n'),
+    stderr: '',
+    exitCode: 0,
+  }), true);
 });

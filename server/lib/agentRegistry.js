@@ -7,8 +7,11 @@ const NODE_FILE = path.join(DATA_DIR, 'agent-nodes.json');
 const PREPARE_FILE = path.join(DATA_DIR, 'prepare-profiles.json');
 const DEFAULT_PREPARE_PROFILE_VERSION = 4;
 const READY_SHELL_PROFILE_CMD = [
-  '__codex_shell_name="$(ps -p $$ -o comm= 2>/dev/null | awk -F/ \'{print $NF}\' | tr -d \' \')"',
-  '[ -n "$__codex_shell_name" ] || __codex_shell_name="${SHELL##*/}"',
+  'if [ -n "${ZSH_VERSION:-}" ]; then __codex_shell_name="zsh";',
+  'elif [ -n "${BASH_VERSION:-}" ]; then __codex_shell_name="bash";',
+  'else __codex_shell_name="${SHELL##*/}"; fi',
+  '[ -n "$__codex_shell_name" ] || __codex_shell_name="${0##*/}"',
+  '__codex_shell_name="${__codex_shell_name#-}"',
   '[ -n "$__codex_shell_name" ] || __codex_shell_name="unknown"',
   '. /etc/profile >/dev/null 2>&1 || true',
   'case "$__codex_shell_name" in',
@@ -20,13 +23,19 @@ const READY_SHELL_PROFILE_CMD = [
 
 const READY_SHELL_BOOTSTRAP_CMD = [
   READY_SHELL_PROFILE_CMD,
+  '__codex_user="${USER:-}"',
+  '[ -n "$__codex_user" ] || __codex_user="$(id -un 2>/dev/null || whoami 2>/dev/null || printf unknown)"',
+  '__codex_host="${HOSTNAME:-${HOST:-}}"',
+  '[ -n "$__codex_host" ] || __codex_host="$(hostname 2>/dev/null || uname -n 2>/dev/null || printf unknown)"',
+  '__codex_pwd="${PWD:-}"',
+  '[ -n "$__codex_pwd" ] || __codex_pwd="$(pwd 2>/dev/null || printf .)"',
   'export LANG=C.UTF-8',
   'export LC_ALL=C.UTF-8',
   'export TERM=xterm-256color',
   'export LESS=-SR',
   'alias ll="ls -alF" >/dev/null 2>&1 || true',
-  'printf "READY user=%s host=%s pwd=%s\\n[context] user=%s\\n[context] host=%s\\n[context] pwd=%s\\n[context] shell=%s\\n" "$(whoami)" "$(hostname)" "$(pwd)" "$(whoami)" "$(hostname)" "$(pwd)" "$__codex_shell_name"',
-  'unset __codex_shell_name',
+  'printf "READY user=%s host=%s pwd=%s\\n[context] user=%s\\n[context] host=%s\\n[context] pwd=%s\\n[context] shell=%s\\n" "$__codex_user" "$__codex_host" "$__codex_pwd" "$__codex_user" "$__codex_host" "$__codex_pwd" "$__codex_shell_name"',
+  'unset __codex_user __codex_host __codex_pwd __codex_shell_name',
 ].join('; ');
 
 const READY_SHELL_STEPS = [
@@ -127,7 +136,7 @@ const DEFAULT_PREPARE_PROFILES = [
     profileId: 'linux-problem-localization-fast-path',
     name: 'Linux Problem Localization Fast Path',
     description: 'Prime the interactive shell, emit ready context immediately, then warm only reusable read-only probes so issue localization starts faster after login.',
-    builtinVersion: 6,
+    builtinVersion: 7,
     managedBy: 'system',
     version: DEFAULT_PREPARE_PROFILE_VERSION,
     steps: LOCALIZATION_FAST_PATH_STEPS,
@@ -138,7 +147,7 @@ const DEFAULT_PREPARE_PROFILES = [
     profileId: 'linux-problem-localization-boost',
     name: 'Linux Problem Localization Boost',
     description: 'Prime the shell, reuse the ready context directly, then warm reusable probes and collect a broader runtime snapshot for deeper follow-up localization.',
-    builtinVersion: 7,
+    builtinVersion: 8,
     managedBy: 'system',
     version: DEFAULT_PREPARE_PROFILE_VERSION,
     steps: LOCALIZATION_BOOST_STEPS,

@@ -14,7 +14,9 @@ test('problem localization boost splits fast readiness steps from background war
   assert.ok(boost, 'expected builtin boost localization profile');
   const readyShellStep = fastPath.steps.find((step) => step.name === 'ready-shell-bootstrap');
   assert.ok(readyShellStep, 'expected ready-shell-bootstrap step');
-  assert.match(readyShellStep.cmd, /ps -p \$\$ -o comm=/);
+  assert.doesNotMatch(readyShellStep.cmd, /ps -p \$\$ -o comm=/);
+  assert.match(readyShellStep.cmd, /__codex_user=/);
+  assert.match(readyShellStep.cmd, /__codex_host=/);
   assert.match(readyShellStep.cmd, /\[context\] shell=%s/);
   assert.match(readyShellStep.cmd, /\[context\] pwd=%s/);
   assert.equal(fastPath.steps.find((step) => step.name === 'warm-common-tools').cacheKey, 'warm-common-tools');

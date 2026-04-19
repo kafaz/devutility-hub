@@ -126,8 +126,8 @@ interface PrepareResultStep {
   cachedAt?: number;
   cacheAgeMs?: number;
   cacheTtlMs?: number;
+  cached?: boolean;
   finishedAt?: number;
-  fromCache?: boolean;
   mode?: 'exec' | 'pty';
   parallelGroup?: string;
   phase?: 'ready' | 'context';
@@ -149,6 +149,7 @@ interface PrepareRunResult {
   profile?: PrepareProfile | null;
   readyDurationMs?: number;
   readyStepCount?: number;
+  serialDurationMs?: number;
   status: 'done' | 'failed';
   stage?: PrepareStage;
   steps: PrepareResultStep[];
@@ -175,6 +176,7 @@ interface PrepareRunSummary {
   failedCount: number;
   finishedAt: number;
   lastStage: PrepareStage;
+  serialDurationMs: number;
   totalDurationMs: number;
   connectedAt?: number;
   trigger: 'auto' | 'manual';
@@ -213,6 +215,7 @@ function isPrepareReadyStatus(status?: PrepareSummaryStatus) {
 
 function formatPrepareInsightTooltip(summary: PrepareRunSummary, backgroundRunning: boolean) {
   const totalToolProbeCount = summary.insight.warmedToolCount + summary.insight.missingTools.length;
+  const parallelSavedMs = Math.max(summary.serialDurationMs - summary.totalDurationMs, 0);
   const parts = [
     summary.profileName,
     summary.insight.readyLine,
@@ -221,6 +224,9 @@ function formatPrepareInsightTooltip(summary: PrepareRunSummary, backgroundRunni
     `总耗时 ${formatDurationLabel(summary.totalDurationMs)}`,
     `${summary.stepCount} 步`,
   ];
+  if (parallelSavedMs > 0) {
+    parts.push(`并行节省 ${formatDurationLabel(parallelSavedMs)}`);
+  }
 
   if (summary.insight.slowestStepDurationMs > 0 && summary.insight.slowestStepName !== 'n/a') {
     parts.push(`最慢 ${summary.insight.slowestStepName} ${formatDurationLabel(summary.insight.slowestStepDurationMs)}`);
@@ -1539,7 +1545,7 @@ const SSHManager: React.FC = () => {
       steps.forEach((step, index) => {
         const stepTimestamp = startedAt + index;
         const stepStatusReason = [
-          step.fromCache && !String(step.statusReason || '').includes('命中缓存') ? '命中缓存' : '',
+          step.cached && !String(step.statusReason || '').includes('命中缓存') ? '命中缓存' : '',
           step.statusReason || '',
         ].filter(Boolean).join(' · ');
         addEntry({
@@ -1552,7 +1558,7 @@ const SSHManager: React.FC = () => {
           exitCode: step.exitCode,
           durationMs: step.durationMs,
           statusReason: stepStatusReason || undefined,
-          stepStatus: step.fromCache ? 'cached' : step.status,
+          stepStatus: step.cached ? 'cached' : step.status,
           stepPhase: step.phase,
           cacheAgeMs: step.cacheAgeMs ?? (step.cachedAt ? Math.max(0, stepTimestamp - step.cachedAt) : undefined),
           prepareProfileName: profileName,
@@ -1581,6 +1587,7 @@ const SSHManager: React.FC = () => {
               insight: prepareInsight,
               readyDurationMs: result.readyDurationMs || 0,
               readyStepCount: profileStepCounts.readyStepCount || result.readyStepCount || 0,
+              serialDurationMs: result.serialDurationMs || 0,
               status: failedCount > 0 ? 'failed' : (hasBackgroundSteps ? 'ready' : 'done'),
               stepCount: profileStepCounts.stepCount,
               failedCount,
@@ -1596,6 +1603,7 @@ const SSHManager: React.FC = () => {
         if (resultStage === 'background') {
           const previousReadyDurationMs = previousForConnection?.readyDurationMs || result.readyDurationMs || 0;
           const previousCachedStepCount = previousForConnection?.cachedStepCount || 0;
+          const previousSerialDurationMs = previousForConnection?.serialDurationMs || 0;
           const previousTotalDurationMs = previousForConnection?.totalDurationMs || 0;
           const previousFailedCount = previousForConnection?.failedCount || 0;
           const preservedReadyStatus = previousForConnection && isPrepareReadyStatus(previousForConnection.status);
@@ -1611,6 +1619,7 @@ const SSHManager: React.FC = () => {
               insight: mergePrepareInsightSummaries(previousForConnection?.insight, prepareInsight),
               readyDurationMs: previousReadyDurationMs,
               readyStepCount: profileStepCounts.readyStepCount || result.readyStepCount || 0,
+              serialDurationMs: previousSerialDurationMs + (result.serialDurationMs || 0),
               status: failedCount > 0 ? (preservedReadyStatus ? 'ready' : 'failed') : 'done',
               stepCount: profileStepCounts.stepCount,
               failedCount: previousFailedCount + failedCount,
@@ -1634,6 +1643,7 @@ const SSHManager: React.FC = () => {
             insight: prepareInsight,
             readyDurationMs: result.readyDurationMs || 0,
             readyStepCount: profileStepCounts.readyStepCount || result.readyStepCount || 0,
+            serialDurationMs: result.serialDurationMs || 0,
             status: failedCount > 0 ? 'failed' : 'done',
             stepCount: profileStepCounts.stepCount,
             failedCount,
@@ -1693,6 +1703,7 @@ const SSHManager: React.FC = () => {
             insight: previousForConnection?.insight ?? summarizePrepareRun([]),
             readyDurationMs: previousForConnection?.readyDurationMs || 0,
             readyStepCount: fallbackCounts.readyStepCount,
+            serialDurationMs: previousForConnection?.serialDurationMs || 0,
             status: stage === 'background' && previousForConnection && isPrepareReadyStatus(previousForConnection.status)
               ? previousForConnection.status
               : 'failed',
@@ -2309,6 +2320,9 @@ const SSHManager: React.FC = () => {
                 const prepareRunning = prepareRunningIds.includes(sess.id);
                 const prepareBackgroundRunning = prepareBackgroundIds.includes(sess.id);
                 const prepareReady = prepareStatusMatchesCurrentConnection && isPrepareReadyStatus(prepareSummary?.status);
+                const parallelSavedMs = prepareSummary
+                  ? Math.max(prepareSummary.serialDurationMs - prepareSummary.totalDurationMs, 0)
+                  : 0;
                 const uptimeStr = uptimeMs > 0 ? (
                   uptimeMs > 3600000 ? `${Math.floor(uptimeMs / 3600000)}h${Math.floor((uptimeMs % 3600000) / 60000)}m`
                   : uptimeMs > 60000 ? `${Math.floor(uptimeMs / 60000)}m`
@@ -2382,6 +2396,11 @@ const SSHManager: React.FC = () => {
                               {prepareSummary.cachedStepCount > 0 && (
                                 <Tag color="default" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
                                   缓存 {prepareSummary.cachedStepCount}
+                                </Tag>
+                              )}
+                              {parallelSavedMs > 0 && (
+                                <Tag color="cyan" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
+                                  并行省 {formatDurationLabel(parallelSavedMs)}
                                 </Tag>
                               )}
                               {prepareSummary.backgroundStatus === 'failed' && !prepareBackgroundRunning && (

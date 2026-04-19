@@ -63,6 +63,8 @@ test('executeStructuredSteps parallelizes exec groups and reuses target-scoped c
   assert.equal(firstRun.readyStepCount, 1);
   assert.equal(firstRun.contextStepCount, 2);
   assert.equal(firstRun.cachedStepCount, 0);
+  assert.equal(firstRun.serialDurationMs, 45);
+  assert.equal(firstRun.totalDurationMs, 25);
   assert.equal(maxInFlight, 2);
   assert.deepEqual(calls.map((item) => item.mode), ['pty', 'exec', 'exec']);
 
@@ -78,6 +80,8 @@ test('executeStructuredSteps parallelizes exec groups and reuses target-scoped c
 
   assert.equal(secondRun.status, 'done');
   assert.equal(secondRun.cachedStepCount, 2);
+  assert.equal(secondRun.serialDurationMs, 5);
+  assert.equal(secondRun.totalDurationMs, 5);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].mode, 'pty');
   assert.equal(secondRun.steps.filter((item) => item.status === 'cached').length, 2);
@@ -127,6 +131,8 @@ test('target-scoped cache survives profile switches while profile-scoped cache s
   });
 
   assert.equal(firstRun.cachedStepCount, 0);
+  assert.equal(firstRun.serialDurationMs, 10);
+  assert.equal(firstRun.totalDurationMs, 10);
   assert.equal(calls.length, 2);
 
   calls.length = 0;
@@ -138,6 +144,8 @@ test('target-scoped cache survives profile switches while profile-scoped cache s
   });
 
   assert.equal(secondRun.cachedStepCount, 1);
+  assert.equal(secondRun.serialDurationMs, 5);
+  assert.equal(secondRun.totalDurationMs, 5);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].cmd, 'pwd');
   assert.equal(secondRun.steps[0].status, 'cached');

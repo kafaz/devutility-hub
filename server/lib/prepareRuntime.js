@@ -158,7 +158,7 @@ function buildPrepareRunMetrics(results = []) {
     contextStepCount: contextSteps.length,
     cachedStepCount: results.filter((item) => item.cached || item.status === 'cached').length,
     readyDurationMs: sumDuration(readySteps),
-    totalDurationMs: sumDuration(results),
+    serialDurationMs: sumDuration(results),
   };
 }
 
@@ -273,7 +273,6 @@ function canRunParallelExec(session, deps) {
 }
 
 async function executeStructuredSteps(session, steps, opts = {}, deps = {}) {
-  const startedAt = typeof deps.now === 'function' ? deps.now() : Date.now();
   const varContext = { ...(opts.variables || {}) };
   const results = [];
   const continueOnError = opts.continueOnError === true;
@@ -282,6 +281,7 @@ async function executeStructuredSteps(session, steps, opts = {}, deps = {}) {
     : () => null;
   const now = typeof deps.now === 'function' ? deps.now : () => Date.now();
   const executeCommand = getCommandRunner(deps);
+  let totalDurationMs = 0;
 
   let index = 0;
   while (index < (steps || []).length) {
@@ -325,6 +325,7 @@ async function executeStructuredSteps(session, steps, opts = {}, deps = {}) {
       const commandResult = await executeCommand(session, resolvedCmd, getStepTimeout(step), getStepMode(step));
       const finalResult = await processExecutedStep(step, resolvedCmd, commandResult, varContext, deps);
       results.push(finalResult);
+      totalDurationMs += Number(finalResult.durationMs || 0);
       if (
         cacheKey &&
         finalResult.status === 'done' &&
@@ -360,6 +361,7 @@ async function executeStructuredSteps(session, steps, opts = {}, deps = {}) {
     const pendingIndexMap = new Map();
     const groupResults = new Array(group.length);
     let blockedInGroup = false;
+    let groupDurationMs = 0;
 
     for (let groupIndex = 0; groupIndex < group.length; groupIndex += 1) {
       const currentStep = group[groupIndex];
@@ -403,6 +405,7 @@ async function executeStructuredSteps(session, steps, opts = {}, deps = {}) {
         deps
       );
       groupResults[meta.groupIndex] = finalResult;
+      groupDurationMs = Math.max(groupDurationMs, Number(finalResult.durationMs || 0));
       if (meta.cacheKey && finalResult.status === 'done' && finalResult.exitCode === 0) {
         writePrepareStepCache(
           meta.cacheKey,
@@ -413,6 +416,7 @@ async function executeStructuredSteps(session, steps, opts = {}, deps = {}) {
       }
     }
 
+    totalDurationMs += groupDurationMs;
     for (const item of groupResults) {
       if (!item) continue;
       results.push(item);
@@ -431,7 +435,7 @@ async function executeStructuredSteps(session, steps, opts = {}, deps = {}) {
     steps: results,
     finalVarContext: varContext,
     ...metrics,
-    totalDurationMs: Math.max(metrics.totalDurationMs, now() - startedAt),
+    totalDurationMs,
   };
 }
 

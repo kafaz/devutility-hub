@@ -71,6 +71,30 @@ const BUILTIN_LOG_NOISE_RULES = [
     pattern: /^\s*last login:\s.+$/i,
   },
   {
+    id: 'shell-welcome-banner',
+    label: 'Welcome 横幅',
+    level: 'info',
+    pattern: /^\s*welcome to .+$/i,
+  },
+  {
+    id: 'shell-motd-link',
+    label: 'MOTD 链接提示',
+    level: 'info',
+    pattern: /^\s*\*\s+(?:documentation|management|support|landscape|ubuntu pro|canonical livepatch|web console)\s*:/i,
+  },
+  {
+    id: 'shell-motd-system-info',
+    label: 'MOTD 系统信息',
+    level: 'info',
+    pattern: /^\s*(?:system information as of|system load:|usage of \S+:|memory usage:|swap usage:|processes:|users logged in:|ipv4 address(?:es)? for \S+:|ipv6 address(?:es)? for \S+:).*/i,
+  },
+  {
+    id: 'shell-motd-updates',
+    label: 'MOTD 更新提示',
+    level: 'info',
+    pattern: /^\s*\d+\s+updates can be applied immediately\.\s*$/i,
+  },
+  {
     id: 'prepare-ready-line',
     label: 'READY 上下文',
     level: 'info',

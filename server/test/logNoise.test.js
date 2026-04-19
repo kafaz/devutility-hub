@@ -29,6 +29,20 @@ test('log noise filter suppresses last login banners by default', () => {
   assert.equal(filtered.text, 'ERROR disk timeout on nvme0n1');
 });
 
+test('log noise filter suppresses common login MOTD chatter but keeps actionable notices', () => {
+  const filtered = filterNoiseText([
+    'Welcome to Ubuntu 24.04.2 LTS (GNU/Linux 6.8.0-31-generic x86_64)',
+    ' * Documentation:  https://help.ubuntu.com',
+    ' System information as of Mon Apr 20 10:00:00 CST 2026',
+    '  System load:  0.08',
+    '  Usage of /:   41.2% of 49.06GB',
+    'System restart required',
+  ].join('\n'));
+
+  assert.equal(filtered.suppressedCount, 5);
+  assert.equal(filtered.text, 'System restart required');
+});
+
 test('log noise filter folds structured prepare chatter and bracketed info lines by default', () => {
   const filtered = filterNoiseText([
     '[2026-04-20 10:00:00] INFO background probe',
@@ -129,6 +143,20 @@ test('matchLogNoise detects common structured info emitters', () => {
       label: 'level=info',
     }
   );
+});
+
+test('session log suppression drops MOTD-only command output', () => {
+  assert.equal(shouldSuppressSessionLog({
+    type: 'command_result',
+    level: 'info',
+    stdout: [
+      'Welcome to Ubuntu 24.04.2 LTS (GNU/Linux 6.8.0-31-generic x86_64)',
+      ' * Documentation:  https://help.ubuntu.com',
+      ' System information as of Mon Apr 20 10:00:00 CST 2026',
+    ].join('\n'),
+    stderr: '',
+    exitCode: 0,
+  }), true);
 });
 
 test('foldSessionLogs groups suppressed noise with samples and keeps risky records visible', () => {
