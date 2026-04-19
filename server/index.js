@@ -84,6 +84,11 @@ const {
   validateCommandPolicy,
 } = require('./commandPolicy');
 const {
+  foldSessionLogs,
+  normalizeBuiltinNoiseMode,
+  normalizeNoiseKeywords,
+} = require('./lib/logNoise');
+const {
   openCodeContext,
   renderLocation,
   renderSymbol,
@@ -115,6 +120,23 @@ function trimLogText(value, maxLen = 12000) {
   const text = String(value || '');
   if (text.length <= maxLen) return text;
   return `${text.slice(0, maxLen)}\n...[truncated ${text.length - maxLen} chars]`;
+}
+
+function parseBooleanFlag(value) {
+  if (typeof value === 'boolean') return value;
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+}
+
+function parseNoiseQueryOptions(query = {}) {
+  const rawKeywords = Array.isArray(query.customKeywords)
+    ? query.customKeywords.flatMap((item) => String(item || '').split(','))
+    : String(query.customKeywords || '').split(',');
+
+  return {
+    builtinMode: normalizeBuiltinNoiseMode(query.builtinMode),
+    customKeywords: normalizeNoiseKeywords(rawKeywords),
+  };
 }
 
 function appendSessionLog(sessionId, payload) {
@@ -1661,6 +1683,10 @@ app.get('/api/agent/sessions/:sessionId/logs', (req, res) => {
   const limit = Math.min(Math.max(Number(req.query.limit || 120), 1), AGENT_SESSION_LOG_LIMIT);
   const logs = global.agentSessionLogs.get(sessionId) || [];
   const session = global.activeSessions.get(sessionId);
+  const showSuppressed = parseBooleanFlag(req.query.showSuppressed);
+  const noiseOptions = parseNoiseQueryOptions(req.query);
+  const foldedLogs = foldSessionLogs(logs, noiseOptions);
+  const visibleLogs = showSuppressed ? logs : foldedLogs.logs;
 
   res.json({
     ok: true,
@@ -1668,7 +1694,11 @@ app.get('/api/agent/sessions/:sessionId/logs', (req, res) => {
       sessionId,
       session: describeSession(sessionId, session),
       total: logs.length,
-      logs: logs.slice(-limit),
+      visibleCount: foldedLogs.logs.length,
+      foldedNoiseCount: foldedLogs.foldedNoiseCount,
+      foldedNoiseStats: foldedLogs.foldedNoiseStats,
+      showSuppressed,
+      logs: visibleLogs.slice(-limit),
     },
   });
 });

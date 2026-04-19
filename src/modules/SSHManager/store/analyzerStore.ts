@@ -30,6 +30,15 @@ export interface SuppressedLogStat {
   kind: 'builtin' | 'custom';
   label: string;
   count: number;
+  sampleText?: string;
+  lastSeenAt?: number;
+}
+
+function clipSuppressedSampleText(value: string, maxLen = 120) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  if (text.length <= maxLen) return text;
+  return `${text.slice(0, Math.max(0, maxLen - 1))}…`;
 }
 
 interface AnalyzerStore {
@@ -45,7 +54,7 @@ interface AnalyzerStore {
   clearLogs: (sessionId?: string) => void;
   suppressedCount: number;
   suppressionStats: SuppressedLogStat[];
-  recordSuppressedLog: (match?: NoiseMatch | null) => void;
+  recordSuppressedLog: (match?: NoiseMatch | null, sampleText?: string) => void;
   clearSuppressedCount: () => void;
 
   // 终端动态高亮规则
@@ -105,7 +114,7 @@ export const useAnalyzerStore = create<AnalyzerStore>()(
       })),
       suppressedCount: 0,
       suppressionStats: [],
-      recordSuppressedLog: (match) => set((state) => {
+      recordSuppressedLog: (match, sampleText) => set((state) => {
         const statsMap = new Map(state.suppressionStats.map((item) => [item.id, item]));
         if (match) {
           const id = `${match.kind}:${match.id}`;
@@ -115,11 +124,16 @@ export const useAnalyzerStore = create<AnalyzerStore>()(
             kind: match.kind,
             label: match.label,
             count: (current?.count || 0) + 1,
+            sampleText: current?.sampleText || clipSuppressedSampleText(sampleText || ''),
+            lastSeenAt: Date.now(),
           });
         }
         return {
           suppressedCount: state.suppressedCount + 1,
-          suppressionStats: Array.from(statsMap.values()).sort((left, right) => right.count - left.count),
+          suppressionStats: Array.from(statsMap.values()).sort((left, right) => {
+            if (right.count !== left.count) return right.count - left.count;
+            return Number(right.lastSeenAt || 0) - Number(left.lastSeenAt || 0);
+          }),
         };
       }),
       clearSuppressedCount: () => set({ suppressedCount: 0, suppressionStats: [] }),

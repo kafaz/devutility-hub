@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 
 const {
   filterNoiseText,
+  foldSessionLogs,
   matchLogNoise,
   shouldSuppressSessionLog,
 } = require('../lib/logNoise');
@@ -97,4 +98,37 @@ test('matchLogNoise detects common structured info emitters', () => {
       label: 'level=info',
     }
   );
+});
+
+test('foldSessionLogs groups suppressed noise with samples and keeps risky records visible', () => {
+  const folded = foldSessionLogs([
+    {
+      id: 'noise-1',
+      type: 'command_started',
+      level: 'info',
+      message: '开始执行命令 (exec)',
+    },
+    {
+      id: 'noise-2',
+      type: 'command_result',
+      level: 'info',
+      stdout: '[INFO] background sync',
+      stderr: '',
+      exitCode: 0,
+    },
+    {
+      id: 'risk-1',
+      type: 'command_result',
+      level: 'warning',
+      stdout: '[INFO] background sync',
+      stderr: 'timeout while reading socket',
+      exitCode: 1,
+    },
+  ]);
+
+  assert.equal(folded.logs.length, 1);
+  assert.equal(folded.logs[0].id, 'risk-1');
+  assert.equal(folded.foldedNoiseCount, 2);
+  assert.equal(folded.foldedNoiseStats[0].count, 1);
+  assert.ok(folded.foldedNoiseStats.some((item) => item.sampleText.includes('background sync')));
 });

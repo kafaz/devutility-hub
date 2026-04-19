@@ -12,7 +12,9 @@ test('problem localization boost splits fast readiness steps from background war
   const boost = DEFAULT_PREPARE_PROFILES.find((item) => item.profileId === 'linux-problem-localization-boost');
   assert.ok(fastPath, 'expected builtin fast-path localization profile');
   assert.ok(boost, 'expected builtin boost localization profile');
-  assert.match(fastPath.steps.find((step) => step.name === 'collect-fast-context').cmd, /\[context\] shell=/);
+  assert.match(fastPath.steps.find((step) => step.name === 'load-shell-profile').cmd, /ps -p \$\$ -o comm=/);
+  assert.match(fastPath.steps.find((step) => step.name === 'collect-target-identity').cmd, /\[context\] shell=/);
+  assert.equal(fastPath.steps.find((step) => step.name === 'collect-target-identity').cacheKey, 'collect-target-identity');
   assert.equal(fastPath.steps.find((step) => step.name === 'warm-common-tools').cacheKey, 'warm-common-tools');
   assert.match(boost.steps.find((step) => step.name === 'collect-runtime-window').cmd, /WINDOW ts=/);
 
@@ -22,11 +24,11 @@ test('problem localization boost splits fast readiness steps from background war
   );
   assert.deepEqual(
     selectPrepareProfileSteps(fastPath, 'background').map((step) => step.name),
-    ['collect-fast-context', 'warm-common-tools']
+    ['collect-target-identity', 'collect-working-dir', 'warm-common-tools']
   );
   assert.deepEqual(
     selectPrepareProfileSteps(boost, 'background').map((step) => step.name),
-    ['collect-fast-context', 'warm-common-tools', 'collect-runtime-window']
+    ['collect-target-identity', 'collect-working-dir', 'warm-common-tools', 'collect-runtime-window']
   );
 });
 
@@ -63,6 +65,6 @@ test('legacy builtin localization profile is upgraded to staged system defaults'
   assert.equal(upgraded.version, 3);
   assert.deepEqual(
     selectPrepareProfileSteps(upgraded, 'background').map((step) => step.name),
-    ['collect-fast-context', 'warm-common-tools', 'collect-runtime-window']
+    ['collect-target-identity', 'collect-working-dir', 'warm-common-tools', 'collect-runtime-window']
   );
 });

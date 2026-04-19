@@ -287,12 +287,19 @@ const KeywordAnalyzer: React.FC = () => {
           dataSource={suppressionStats}
           renderItem={(item) => (
             <List.Item>
-              <Space>
-                <Tag color={item.kind === 'builtin' ? 'cyan' : 'default'}>
-                  {item.kind === 'builtin' ? '默认' : '自定义'}
-                </Tag>
-                <Text>{item.label}</Text>
-                <Tag color="gold">{item.count}</Tag>
+              <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                <Space>
+                  <Tag color={item.kind === 'builtin' ? 'cyan' : 'default'}>
+                    {item.kind === 'builtin' ? '默认' : '自定义'}
+                  </Tag>
+                  <Text>{item.label}</Text>
+                  <Tag color="gold">{item.count}</Tag>
+                </Space>
+                {item.sampleText && (
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    例如：{item.sampleText}
+                  </Text>
+                )}
               </Space>
             </List.Item>
           )}

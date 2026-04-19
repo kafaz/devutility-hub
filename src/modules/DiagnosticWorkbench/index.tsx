@@ -93,6 +93,21 @@ interface AgentSessionLogItem {
   stderr?: string;
 }
 
+interface SessionLogNoiseBucket {
+  id: string;
+  kind: 'builtin' | 'custom';
+  label: string;
+  count: number;
+  sampleText?: string;
+}
+
+interface SessionLogNoiseMeta {
+  total: number;
+  visibleCount: number;
+  foldedNoiseCount: number;
+  foldedNoiseStats: SessionLogNoiseBucket[];
+}
+
 interface SimilarCase {
   runId: string;
   title: string;
@@ -1236,6 +1251,12 @@ const DiagnosticWorkbench: React.FC = () => {
   const [newAllowedCommand, setNewAllowedCommand] = useState('');
   const [policyEditorValue, setPolicyEditorValue] = useState('');
   const [sessionLogs, setSessionLogs] = useState<AgentSessionLogItem[]>([]);
+  const [sessionLogNoiseMeta, setSessionLogNoiseMeta] = useState<SessionLogNoiseMeta>({
+    total: 0,
+    visibleCount: 0,
+    foldedNoiseCount: 0,
+    foldedNoiseStats: [],
+  });
   const [loadingSessionLogs, setLoadingSessionLogs] = useState(false);
   const [librarySearch, setLibrarySearch] = useState('');
   const [codeBinding, setCodeBinding] = useState<CodeContextBindingDraft>(savedCodeBinding);
@@ -1250,6 +1271,7 @@ const DiagnosticWorkbench: React.FC = () => {
   const [sourceDrawerOpen, setSourceDrawerOpen] = useState(false);
   const [logsDrawerOpen, setLogsDrawerOpen] = useState(false);
   const [evidenceDrawerOpen, setEvidenceDrawerOpen] = useState(false);
+  const [showNoiseLogs, setShowNoiseLogs] = useState(false);
 
   useEffect(() => {
     if (!activePlaybook) return;
@@ -1282,6 +1304,14 @@ const DiagnosticWorkbench: React.FC = () => {
       customKeywords: analyzerNoiseKeywords,
     }),
     [analyzerBuiltinNoiseMode, analyzerNoiseKeywords]
+  );
+  const sessionNoiseQueryKey = useMemo(
+    () => JSON.stringify({
+      builtinMode: sessionNoiseOptions.builtinMode,
+      customKeywords: sessionNoiseOptions.customKeywords || [],
+      showNoiseLogs,
+    }),
+    [sessionNoiseOptions, showNoiseLogs]
   );
   const filteredSessionLogs = useMemo(
     () => sessionLogs.filter((log) => !shouldSuppressSessionLog(log, sessionNoiseOptions)),
@@ -1390,6 +1420,12 @@ const DiagnosticWorkbench: React.FC = () => {
   useEffect(() => {
     if (!selectedSessionId) {
       setSessionLogs([]);
+      setSessionLogNoiseMeta({
+        total: 0,
+        visibleCount: 0,
+        foldedNoiseCount: 0,
+        foldedNoiseStats: [],
+      });
       return;
     }
     void fetchSessionLogs(selectedSessionId, false);
@@ -1397,7 +1433,7 @@ const DiagnosticWorkbench: React.FC = () => {
       void fetchSessionLogs(selectedSessionId, false);
     }, 2500);
     return () => window.clearInterval(timer);
-  }, [selectedSessionId]);
+  }, [selectedSessionId, sessionNoiseQueryKey]);
 
   async function fetchSessions() {
     setLoadingSessions(true);
@@ -1431,13 +1467,26 @@ const DiagnosticWorkbench: React.FC = () => {
   async function fetchSessionLogs(sessionId: string, withLoading = true) {
     if (withLoading) setLoadingSessionLogs(true);
     try {
-      const response = await fetch(`${PROXY_HTTP}/api/agent/sessions/${encodeURIComponent(sessionId)}/logs?limit=120`);
+      const params = new URLSearchParams();
+      params.set('limit', '120');
+      params.set('builtinMode', sessionNoiseOptions.builtinMode || 'info');
+      (sessionNoiseOptions.customKeywords || []).forEach((keyword) => params.append('customKeywords', keyword));
+      if (showNoiseLogs) {
+        params.set('showSuppressed', '1');
+      }
+      const response = await fetch(`${PROXY_HTTP}/api/agent/sessions/${encodeURIComponent(sessionId)}/logs?${params.toString()}`);
       const data = await response.json();
       if (!data.ok) {
         messageApi.warning(data.error || '会话日志拉取失败');
         return;
       }
       setSessionLogs(Array.isArray(data.data?.logs) ? data.data.logs : []);
+      setSessionLogNoiseMeta({
+        total: Number(data.data?.total || 0),
+        visibleCount: Number(data.data?.visibleCount || 0),
+        foldedNoiseCount: Number(data.data?.foldedNoiseCount || 0),
+        foldedNoiseStats: Array.isArray(data.data?.foldedNoiseStats) ? data.data.foldedNoiseStats : [],
+      });
     } catch {
       if (withLoading) {
         messageApi.warning('会话日志拉取失败');
@@ -2411,115 +2460,146 @@ const DiagnosticWorkbench: React.FC = () => {
     <div style={{ textAlign: 'center', padding: '20px 0' }}>
       <Spin />
     </div>
-  ) : sessionLogs.length === 0 ? (
+  ) : sessionLogs.length === 0 && sessionLogNoiseMeta.foldedNoiseCount === 0 ? (
     <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前会话暂无日志" />
   ) : (
-    <List
-      size="small"
-      dataSource={[...sessionLogs].reverse()}
-      renderItem={(item) => {
-        const lookupText = buildLookupText([item.type, item.message, item.stdout, item.stderr]);
-        const canLocate = hasCLookupText(lookupText);
-        return (
-          <List.Item
-            actions={[
-              ...(canLocate
-                ? [
-                    <Button
-                      key="source"
-                      type="link"
-                      icon={<CodeOutlined />}
-                      onClick={() => locateSourceFromParts({
-                        title: `会话日志: ${item.type}`,
-                        summary: item.message || `exit=${item.exitCode ?? '-'} / duration=${item.durationMs ?? '-'}ms`,
-                        sourceType: 'session_log',
-                        text: lookupText,
-                        parts: [item.type, item.message, item.stdout, item.stderr],
-                        command: item.cmd,
-                      })}
-                    >
-                      看源码
-                    </Button>,
-                  ]
-                : []),
-              <Button
-                key="lock"
-                type="link"
-                icon={<PushpinOutlined />}
-                onClick={() => lockEvidence({
-                  sourceType: 'session_log',
-                  sourceId: item.id,
-                  title: `会话日志: ${item.type}`,
-                  summary: item.message || `exit=${item.exitCode ?? '-'} / duration=${item.durationMs ?? '-'}ms`,
-                  content: buildSessionLogEvidence(item, sessionNoiseOptions),
-                  lookupText,
-                  command: item.cmd,
-                  sessionLabel: currentSession ? `${currentSession.username}@${currentSession.host}` : undefined,
-                  tags: collectEvidenceTags([item.message, item.stdout, item.stderr, item.cmd, item.type]),
-                })}
-              >
-                锁定
-              </Button>,
-            ]}
-          >
-            <List.Item.Meta
-              title={
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                  <Text strong>{item.type}</Text>
-                  <Tag color={item.level === 'error' ? 'red' : item.level === 'warning' ? 'orange' : 'blue'}>{item.level || 'info'}</Tag>
-                  <Text type="secondary">{formatTs(item.ts)}</Text>
-                  {typeof item.exitCode === 'number' && <Tag color={item.exitCode === 0 ? 'green' : 'red'}>exit {item.exitCode}</Tag>}
-                  {typeof item.durationMs === 'number' && <Tag>{item.durationMs}ms</Tag>}
-                  {item.mode && <Tag>{item.mode}</Tag>}
-                </div>
-              }
-              description={
-                <Space direction="vertical" size={6} style={{ width: '100%' }}>
-                  {item.cmd && <Text code>{item.cmd}</Text>}
-                  {item.message && <Text>{item.message}</Text>}
-                  {item.stdout && (
-                    <div>
-                      <Text strong>stdout</Text>
-                      <ResizableOutput
-                        content={item.stdout}
-                        isDark={isDark}
-                        minHeight={56}
-                        maxHeight={180}
-                        onTextSelect={(text) => locateSourceFromParts({
-                          title: `会话日志 stdout: ${item.type}`,
-                          summary: item.message || '手动选取 stdout 中的线索',
-                          sourceType: 'session_log_selection',
-                          text,
-                          command: item.cmd,
-                        })}
-                      />
-                    </div>
-                  )}
-                  {item.stderr && (
-                    <div>
-                      <Text strong>stderr</Text>
-                      <ResizableOutput
-                        content={item.stderr}
-                        isDark={isDark}
-                        minHeight={56}
-                        maxHeight={180}
-                        onTextSelect={(text) => locateSourceFromParts({
-                          title: `会话日志 stderr: ${item.type}`,
-                          summary: item.message || '手动选取 stderr 中的线索',
-                          sourceType: 'session_log_selection',
-                          text,
-                          command: item.cmd,
-                        })}
-                      />
-                    </div>
-                  )}
+    <Space direction="vertical" size={12} style={{ width: '100%' }}>
+      {sessionLogNoiseMeta.foldedNoiseCount > 0 && (
+        <Alert
+          type={showNoiseLogs ? 'warning' : 'info'}
+          showIcon
+          message={showNoiseLogs
+            ? `当前视图包含 ${sessionLogNoiseMeta.foldedNoiseCount} 条低价值噪音日志`
+            : `已默认折叠 ${sessionLogNoiseMeta.foldedNoiseCount} 条低价值噪音日志`}
+          description={
+            <Space direction="vertical" size={6} style={{ width: '100%' }}>
+              <Text type="secondary">
+                原始日志 {sessionLogNoiseMeta.total} 条，可定位日志 {sessionLogNoiseMeta.visibleCount} 条。
+              </Text>
+              {sessionLogNoiseMeta.foldedNoiseStats.length > 0 && (
+                <Space wrap size={[8, 8]}>
+                  {sessionLogNoiseMeta.foldedNoiseStats.slice(0, 3).map((item) => (
+                    <Tag key={item.id} color={item.kind === 'builtin' ? 'cyan' : 'default'}>
+                      {item.label} x {item.count}{item.sampleText ? ` · ${clipText(item.sampleText, 48)}` : ''}
+                    </Tag>
+                  ))}
                 </Space>
-              }
-            />
-          </List.Item>
-        );
-      }}
-    />
+              )}
+            </Space>
+          }
+        />
+      )}
+      {sessionLogs.length === 0 ? (
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前会话仅有噪音日志，默认已折叠" />
+      ) : (
+        <List
+          size="small"
+          dataSource={[...sessionLogs].reverse()}
+          renderItem={(item) => {
+            const lookupText = buildLookupText([item.type, item.message, item.stdout, item.stderr]);
+            const canLocate = hasCLookupText(lookupText);
+            return (
+              <List.Item
+                actions={[
+                  ...(canLocate
+                    ? [
+                        <Button
+                          key="source"
+                          type="link"
+                          icon={<CodeOutlined />}
+                          onClick={() => locateSourceFromParts({
+                            title: `会话日志: ${item.type}`,
+                            summary: item.message || `exit=${item.exitCode ?? '-'} / duration=${item.durationMs ?? '-'}ms`,
+                            sourceType: 'session_log',
+                            text: lookupText,
+                            parts: [item.type, item.message, item.stdout, item.stderr],
+                            command: item.cmd,
+                          })}
+                        >
+                          看源码
+                        </Button>,
+                      ]
+                    : []),
+                  <Button
+                    key="lock"
+                    type="link"
+                    icon={<PushpinOutlined />}
+                    onClick={() => lockEvidence({
+                      sourceType: 'session_log',
+                      sourceId: item.id,
+                      title: `会话日志: ${item.type}`,
+                      summary: item.message || `exit=${item.exitCode ?? '-'} / duration=${item.durationMs ?? '-'}ms`,
+                      content: buildSessionLogEvidence(item, sessionNoiseOptions),
+                      lookupText,
+                      command: item.cmd,
+                      sessionLabel: currentSession ? `${currentSession.username}@${currentSession.host}` : undefined,
+                      tags: collectEvidenceTags([item.message, item.stdout, item.stderr, item.cmd, item.type]),
+                    })}
+                  >
+                    锁定
+                  </Button>,
+                ]}
+              >
+                <List.Item.Meta
+                  title={
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                      <Text strong>{item.type}</Text>
+                      <Tag color={item.level === 'error' ? 'red' : item.level === 'warning' ? 'orange' : 'blue'}>{item.level || 'info'}</Tag>
+                      <Text type="secondary">{formatTs(item.ts)}</Text>
+                      {typeof item.exitCode === 'number' && <Tag color={item.exitCode === 0 ? 'green' : 'red'}>exit {item.exitCode}</Tag>}
+                      {typeof item.durationMs === 'number' && <Tag>{item.durationMs}ms</Tag>}
+                      {item.mode && <Tag>{item.mode}</Tag>}
+                    </div>
+                  }
+                  description={
+                    <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                      {item.cmd && <Text code>{item.cmd}</Text>}
+                      {item.message && <Text>{item.message}</Text>}
+                      {item.stdout && (
+                        <div>
+                          <Text strong>stdout</Text>
+                          <ResizableOutput
+                            content={item.stdout}
+                            isDark={isDark}
+                            minHeight={56}
+                            maxHeight={180}
+                            onTextSelect={(text) => locateSourceFromParts({
+                              title: `会话日志 stdout: ${item.type}`,
+                              summary: item.message || '手动选取 stdout 中的线索',
+                              sourceType: 'session_log_selection',
+                              text,
+                              command: item.cmd,
+                            })}
+                          />
+                        </div>
+                      )}
+                      {item.stderr && (
+                        <div>
+                          <Text strong>stderr</Text>
+                          <ResizableOutput
+                            content={item.stderr}
+                            isDark={isDark}
+                            minHeight={56}
+                            maxHeight={180}
+                            onTextSelect={(text) => locateSourceFromParts({
+                              title: `会话日志 stderr: ${item.type}`,
+                              summary: item.message || '手动选取 stderr 中的线索',
+                              sourceType: 'session_log_selection',
+                              text,
+                              command: item.cmd,
+                            })}
+                          />
+                        </div>
+                      )}
+                    </Space>
+                  }
+                />
+              </List.Item>
+            );
+          }}
+        />
+      )}
+    </Space>
   );
 
   const historyDetailContent = !detailRun ? (
@@ -3999,6 +4079,16 @@ const DiagnosticWorkbench: React.FC = () => {
         extra={
           <Space>
             <Tag color={selectedSessionId ? 'processing' : 'default'}>{selectedSessionId || '未选择会话'}</Tag>
+            {sessionLogNoiseMeta.foldedNoiseCount > 0 && !showNoiseLogs && (
+              <Tag color="cyan">已折叠 {sessionLogNoiseMeta.foldedNoiseCount}</Tag>
+            )}
+            <Button
+              size="small"
+              disabled={!selectedSessionId}
+              onClick={() => setShowNoiseLogs((value) => !value)}
+            >
+              {showNoiseLogs ? '隐藏噪音' : '显示噪音'}
+            </Button>
             <Button
               icon={<ReloadOutlined />}
               size="small"

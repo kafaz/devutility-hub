@@ -6,11 +6,22 @@ const DATA_DIR = getServerDataDir();
 const NODE_FILE = path.join(DATA_DIR, 'agent-nodes.json');
 const PREPARE_FILE = path.join(DATA_DIR, 'prepare-profiles.json');
 const DEFAULT_PREPARE_PROFILE_VERSION = 3;
+const READY_SHELL_PROFILE_CMD = [
+  '__codex_shell_name="$(ps -p $$ -o comm= 2>/dev/null | awk -F/ \'{print $NF}\' | tr -d \' \')"',
+  '[ -n "$__codex_shell_name" ] || __codex_shell_name="${SHELL##*/}"',
+  '. /etc/profile >/dev/null 2>&1 || true',
+  'case "$__codex_shell_name" in',
+  '  zsh) [ -f ~/.zshrc ] && . ~/.zshrc >/dev/null 2>&1 || true ;;',
+  '  bash) [ -f ~/.bashrc ] && . ~/.bashrc >/dev/null 2>&1 || true ;;',
+  '  *) [ -f ~/.profile ] && . ~/.profile >/dev/null 2>&1 || true ;;',
+  'esac',
+  'unset __codex_shell_name',
+].join('; ');
 
 const READY_SHELL_STEPS = [
   {
     name: 'load-shell-profile',
-    cmd: 'source /etc/profile >/dev/null 2>&1 || true; [ -f ~/.bashrc ] && source ~/.bashrc >/dev/null 2>&1 || true; [ -f ~/.zshrc ] && source ~/.zshrc >/dev/null 2>&1 || true',
+    cmd: READY_SHELL_PROFILE_CMD,
     phase: 'ready',
     mode: 'pty',
   },
@@ -24,8 +35,17 @@ const READY_SHELL_STEPS = [
 
 const FAST_CONTEXT_STEPS = [
   {
-    name: 'collect-fast-context',
-    cmd: 'printf "[context] user=%s\\n[context] host=%s\\n[context] pwd=%s\\n[context] shell=%s\\n" "$(whoami)" "$(hostname)" "$(pwd)" "${SHELL:-unknown}"',
+    name: 'collect-target-identity',
+    cmd: 'printf "[context] user=%s\\n[context] host=%s\\n[context] shell=%s\\n" "$(whoami)" "$(hostname)" "${SHELL:-unknown}"',
+    phase: 'context',
+    mode: 'exec',
+    parallelGroup: 'fast-context',
+    cacheKey: 'collect-target-identity',
+    cacheTtlMs: 600000,
+  },
+  {
+    name: 'collect-working-dir',
+    cmd: 'printf "[context] pwd=%s\\n" "$(pwd)"',
     phase: 'context',
     mode: 'exec',
     parallelGroup: 'fast-context',
@@ -91,7 +111,7 @@ const DEFAULT_PREPARE_PROFILES = [
     profileId: 'linux-problem-localization-fast-path',
     name: 'Linux Problem Localization Fast Path',
     description: 'Prioritize shell readiness first, then parallelize read-only probes so issue localization can start faster after login.',
-    builtinVersion: 3,
+    builtinVersion: 4,
     managedBy: 'system',
     version: DEFAULT_PREPARE_PROFILE_VERSION,
     steps: LOCALIZATION_FAST_PATH_STEPS,
@@ -102,7 +122,7 @@ const DEFAULT_PREPARE_PROFILES = [
     profileId: 'linux-problem-localization-boost',
     name: 'Linux Problem Localization Boost',
     description: 'Warm the shell profile, parallelize safe context probes, and collect a broader runtime snapshot for deeper follow-up localization.',
-    builtinVersion: 4,
+    builtinVersion: 5,
     managedBy: 'system',
     version: DEFAULT_PREPARE_PROFILE_VERSION,
     steps: LOCALIZATION_BOOST_STEPS,

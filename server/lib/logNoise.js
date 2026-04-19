@@ -271,6 +271,13 @@ function buildSessionLogCombinedText(log) {
     .trim();
 }
 
+function clipNoiseSampleText(text, maxLen = 160) {
+  const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) return '';
+  if (normalized.length <= maxLen) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxLen - 1))}…`;
+}
+
 function getSessionLogSuppressionInfo(log, options = []) {
   if (typeof (log && log.exitCode) === 'number' && log.exitCode !== 0) return null;
   if (log && (log.level === 'warning' || log.level === 'error')) return null;
@@ -317,12 +324,47 @@ function shouldSuppressSessionLog(log, options = []) {
   return Boolean(getSessionLogSuppressionInfo(log, options));
 }
 
+function foldSessionLogs(logs = [], options = []) {
+  const visibleLogs = [];
+  const foldedNoiseStats = new Map();
+  let foldedNoiseCount = 0;
+
+  for (const log of Array.isArray(logs) ? logs : []) {
+    const suppressionInfo = getSessionLogSuppressionInfo(log, options);
+    if (!suppressionInfo) {
+      visibleLogs.push(log);
+      continue;
+    }
+
+    foldedNoiseCount += 1;
+    const statsId = `${suppressionInfo.kind}:${suppressionInfo.id}`;
+    const current = foldedNoiseStats.get(statsId);
+    foldedNoiseStats.set(statsId, {
+      id: statsId,
+      kind: suppressionInfo.kind,
+      label: suppressionInfo.label,
+      count: (current && current.count ? current.count : 0) + 1,
+      sampleText: (current && current.sampleText) || clipNoiseSampleText(buildSessionLogCombinedText(log)),
+    });
+  }
+
+  return {
+    logs: visibleLogs,
+    foldedNoiseCount,
+    foldedNoiseStats: Array.from(foldedNoiseStats.values()).sort((left, right) => {
+      if (right.count !== left.count) return right.count - left.count;
+      return String(left.label || '').localeCompare(String(right.label || ''));
+    }),
+  };
+}
+
 module.exports = {
   BUILTIN_LOG_NOISE_RULES,
   BUILTIN_NOISE_MODE_META,
   LOW_SIGNAL_SESSION_LOG_TYPES,
   RISK_SIGNAL_RE,
   filterNoiseText,
+  foldSessionLogs,
   getBuiltinNoiseRules,
   getSessionLogSuppressionInfo,
   inspectNoiseText,

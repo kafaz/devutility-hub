@@ -609,7 +609,7 @@ function makeWSHandler(
 
               const noiseMatch = matchLogNoise(cleanLine, noiseOptions);
               if (noiseMatch) {
-                analyzerStore.recordSuppressedLog(noiseMatch);
+                analyzerStore.recordSuppressedLog(noiseMatch, cleanLine);
                 continue;
               }
 
