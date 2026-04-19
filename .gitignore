@@ -3,6 +3,7 @@ node_modules/
 dist/
 dist-ssr/
 .vite/
+release/
 
 # ── 日志 ──────────────────────────────────────────────────
 logs/

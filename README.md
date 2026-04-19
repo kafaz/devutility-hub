@@ -33,6 +33,16 @@ node index.js
 # 代理运行在 http://127.0.0.1:3001
 ```
 
+### 一体化本地验证
+
+```bash
+npm install
+npm install --prefix server
+npm run ci:verify
+```
+
+`ci:verify` 会执行前端编译、前后端 Node 测试，以及服务层集成验证，和 GitHub CI 保持一致。
+
 ## 认证方式
 
 SSH Manager 支持三种认证方式（等同 Python paramiko）：
@@ -83,3 +93,32 @@ SSH Manager 支持三种认证方式（等同 Python paramiko）：
 所有用户数据（解析规则、命令模板、SOP 模板）通过 Zustand `persist` 中间件存储于浏览器 `localStorage`，无需后端服务。
 
 诊断工作台的历史运行记录会额外持久化到 `server/data/diagnostic-kb.json`，用于相似故障召回。
+
+## GitHub CI 与 Windows 便携包
+
+仓库现在包含 [`.github/workflows/ci.yml`](/Users/kafaz/dev/dev_utils/devutility-hub/.github/workflows/ci.yml)：
+
+- `push` / `pull_request` / `workflow_dispatch` 会自动执行统一验证。
+- Linux job 运行 `npm run ci:verify`，覆盖编译构建和现有 Node 测试。
+- Windows job 会重新构建前端，并产出一个可直接解压运行的便携包 zip artifact。
+
+便携包结构：
+
+- `app/`：Vite 构建后的前端静态资源
+- `server/`：SSH 代理服务源码与运行时依赖
+- `runtime/`：CI 自动下载并打包进去的官方 Node.js Windows 运行时
+- `data/`：运行期数据目录
+- `Start DevUtility Hub.bat`：双击即可启动
+
+如果要在本地手工组装 Windows 便携包，可以先准备一个已经解压的官方 Node.js Windows zip，再执行：
+
+```bash
+npm install
+npm install --prefix server
+npm run build
+node scripts/build-windows-portable.mjs \
+  --node-runtime-dir /path/to/node-vXX-win-x64 \
+  --output-dir release/devutility-hub-windows-portable
+```
+
+生成目录中的 `Start DevUtility Hub.bat` 会启动本地代理，并通过 `server/index.js` 的 `STATIC_DIR` 模式直接托管已构建的前端资源，因此目标机器不需要额外安装 Node.js。

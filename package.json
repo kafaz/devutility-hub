@@ -4,10 +4,15 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "ci:verify": "npm run build && npm run test:web && npm run test:server && npm run test:server:integration",
     "dev": "concurrently -k \"vite\" \"node server/index.js\"",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "package:windows-portable": "node scripts/build-windows-portable.mjs",
+    "preview": "vite preview",
+    "test:server": "node --test server/runtimeHelpers.test.cjs server/proxyServer.test.cjs server/test/logNoise.test.js server/test/prepareRuntime.test.js server/test/prepareProfiles.test.js",
+    "test:server:integration": "node --test server/test/commandPolicyRoutes.test.js",
+    "test:web": "node --test src/utils/logNoise.test.ts src/modules/SSHManager/prepareInsights.test.ts src/modules/DiagnosticWorkbench/viewModel.test.ts"
   },
   "dependencies": {
     "@ant-design/icons": "^6.1.0",
