@@ -49,6 +49,16 @@ test('filterNoiseText removes info lines but preserves risky lines', () => {
   assert.equal(filtered.text, 'panic: disk detached');
 });
 
+test('filterNoiseText suppresses last login banners by default', () => {
+  const filtered = filterNoiseText([
+    'Last login: Mon Apr 20 09:31:00 2026 from 10.0.0.8',
+    'ERROR disk timeout on nvme0n1',
+  ].join('\n'));
+
+  assert.equal(filtered.suppressedCount, 1);
+  assert.equal(filtered.text, 'ERROR disk timeout on nvme0n1');
+});
+
 test('filterNoiseText folds structured prepare chatter in default info mode', () => {
   const filtered = filterNoiseText([
     '[2026-04-20 10:00:00] INFO bootstrap ready',

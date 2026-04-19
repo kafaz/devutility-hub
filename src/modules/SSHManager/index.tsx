@@ -66,6 +66,11 @@ import BatchLoginModal from './components/BatchLoginModal';
 import CredentialManager from './components/CredentialManager';
 import KeywordAnalyzer from './components/KeywordAnalyzer';
 import NodeContextPanel from './components/NodeContextPanel';
+import {
+  mergePrepareInsightSummaries,
+  summarizePrepareRun,
+  type PrepareInsightSummary,
+} from './prepareInsights';
 import SessionJournal from './components/SessionJournal';
 import SessionGroupModal from './components/SessionGroupModal';
 import { useAnalyzerStore, type HighlightRule } from './store/analyzerStore';
@@ -162,6 +167,7 @@ interface PrepareRunSummary {
   contextStepCount: number;
   profileId: string;
   profileName: string;
+  insight: PrepareInsightSummary;
   readyDurationMs: number;
   readyStepCount: number;
   status: PrepareSummaryStatus;
@@ -203,6 +209,40 @@ function canSplitAutoPrepare(profile: PrepareProfile | null) {
 
 function isPrepareReadyStatus(status?: PrepareSummaryStatus) {
   return status === 'ready' || status === 'done';
+}
+
+function formatPrepareInsightTooltip(summary: PrepareRunSummary, backgroundRunning: boolean) {
+  const totalToolProbeCount = summary.insight.warmedToolCount + summary.insight.missingTools.length;
+  const parts = [
+    summary.profileName,
+    summary.insight.readyLine,
+    `shell ${summary.insight.shell}`,
+    `ready ${formatDurationLabel(summary.readyDurationMs)}`,
+    `总耗时 ${formatDurationLabel(summary.totalDurationMs)}`,
+    `${summary.stepCount} 步`,
+  ];
+
+  if (summary.insight.slowestStepDurationMs > 0 && summary.insight.slowestStepName !== 'n/a') {
+    parts.push(`最慢 ${summary.insight.slowestStepName} ${formatDurationLabel(summary.insight.slowestStepDurationMs)}`);
+  }
+  if (summary.insight.warmedToolCount > 0) {
+    parts.push(`已热身工具 ${summary.insight.warmedToolCount}`);
+  }
+  if (summary.lastStage !== 'essential' && totalToolProbeCount > 0 && summary.insight.missingTools.length > 0) {
+    const preview = summary.insight.missingTools.slice(0, 3).join(', ');
+    const suffix = summary.insight.missingTools.length > 3 ? '…' : '';
+    parts.push(`缺少 ${preview}${suffix}`);
+  }
+  if (backgroundRunning) {
+    parts.push('后台补全中');
+  } else if (summary.backgroundStatus === 'failed') {
+    parts.push('后台补全未完成');
+  }
+  if (summary.failedCount > 0) {
+    parts.push(`${summary.failedCount} 步需要关注`);
+  }
+
+  return parts.join(' · ');
 }
 
 interface TerminalScreenMatch {
@@ -1490,6 +1530,7 @@ const SSHManager: React.FC = () => {
       const resolvedProfile = result.profile || requestedProfile;
       const profileName = resolvedProfile?.name || profileId;
       const steps = Array.isArray(result.steps) ? result.steps : [];
+      const prepareInsight = summarizePrepareRun(steps);
       const resultStage = result.stage || stage;
       const profileStepCounts = countPrepareSteps(resolvedProfile, steps);
       const hasBackgroundSteps = profileStepCounts.contextStepCount > 0;
@@ -1537,6 +1578,7 @@ const SSHManager: React.FC = () => {
               contextStepCount: profileStepCounts.contextStepCount,
               profileId,
               profileName,
+              insight: prepareInsight,
               readyDurationMs: result.readyDurationMs || 0,
               readyStepCount: profileStepCounts.readyStepCount || result.readyStepCount || 0,
               status: failedCount > 0 ? 'failed' : (hasBackgroundSteps ? 'ready' : 'done'),
@@ -1566,6 +1608,7 @@ const SSHManager: React.FC = () => {
               contextStepCount: profileStepCounts.contextStepCount,
               profileId,
               profileName,
+              insight: mergePrepareInsightSummaries(previousForConnection?.insight, prepareInsight),
               readyDurationMs: previousReadyDurationMs,
               readyStepCount: profileStepCounts.readyStepCount || result.readyStepCount || 0,
               status: failedCount > 0 ? (preservedReadyStatus ? 'ready' : 'failed') : 'done',
@@ -1588,6 +1631,7 @@ const SSHManager: React.FC = () => {
             contextStepCount: profileStepCounts.contextStepCount,
             profileId,
             profileName,
+            insight: prepareInsight,
             readyDurationMs: result.readyDurationMs || 0,
             readyStepCount: profileStepCounts.readyStepCount || result.readyStepCount || 0,
             status: failedCount > 0 ? 'failed' : 'done',
@@ -1646,6 +1690,7 @@ const SSHManager: React.FC = () => {
             contextStepCount: fallbackCounts.contextStepCount,
             profileId,
             profileName: requestedProfile?.name || profileId,
+            insight: previousForConnection?.insight ?? summarizePrepareRun([]),
             readyDurationMs: previousForConnection?.readyDurationMs || 0,
             readyStepCount: fallbackCounts.readyStepCount,
             status: stage === 'background' && previousForConnection && isPrepareReadyStatus(previousForConnection.status)
@@ -2318,7 +2363,7 @@ const SSHManager: React.FC = () => {
                           {!prepareRunning && prepareReady && prepareSummary && (
                             <>
                               <Tooltip
-                                title={`${prepareSummary.profileName} · ready ${formatDurationLabel(prepareSummary.readyDurationMs)} · 总耗时 ${formatDurationLabel(prepareSummary.totalDurationMs)} · ${prepareSummary.stepCount} 步${prepareBackgroundRunning ? ' · 后台补全中' : prepareSummary.backgroundStatus === 'failed' ? ' · 后台补全未完成' : ''}`}
+                                title={formatPrepareInsightTooltip(prepareSummary, prepareBackgroundRunning)}
                               >
                                 <Tag color={prepareBackgroundRunning ? 'processing' : 'success'} style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
                                   {prepareSummary.status === 'done' && !prepareBackgroundRunning ? '已预热' : '已就绪'}
@@ -2944,7 +2989,7 @@ const SSHManager: React.FC = () => {
                     message={
                       <div>
                         <Text strong style={{ fontSize: 12 }}>自动预处理负责：</Text>
-                        {['先执行 essential ready 步骤，尽快进入可定位状态', '再在后台补齐只读上下文探测，减少首屏等待', '缓存稳定的工具探测结果，重复登录直接复用', '把预热噪声与真正排查信号分开，默认少看低价值 INFO'].map((text, index) => (
+                        {['先执行 essential ready 步骤，尽快进入可定位状态', '把登录 shell 的用户/目录/shell 上下文直接并入 READY，避免重复身份探测', '只在后台补齐可复用的只读探测，重复登录优先命中缓存', '把预热噪声与真正排查信号分开，默认少看低价值 INFO'].map((text, index) => (
                           <Text key={text} type="secondary" style={{ fontSize: 11, display: 'block' }}>{index + 1}. {text}</Text>
                         ))}
                         <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>

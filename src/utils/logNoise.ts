@@ -94,6 +94,12 @@ export const BUILTIN_LOG_NOISE_RULES: BuiltinLogNoiseRule[] = [
     pattern: /^\s*i\d{4}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?\b/i,
   },
   {
+    id: 'last-login-banner',
+    label: 'Last login 提示',
+    level: 'info',
+    pattern: /^\s*last login:\s.+$/i,
+  },
+  {
     id: 'prepare-ready-line',
     label: 'READY 上下文',
     level: 'info',

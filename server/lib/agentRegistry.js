@@ -5,17 +5,17 @@ const { getServerDataDir } = require('../storePaths');
 const DATA_DIR = getServerDataDir();
 const NODE_FILE = path.join(DATA_DIR, 'agent-nodes.json');
 const PREPARE_FILE = path.join(DATA_DIR, 'prepare-profiles.json');
-const DEFAULT_PREPARE_PROFILE_VERSION = 3;
+const DEFAULT_PREPARE_PROFILE_VERSION = 4;
 const READY_SHELL_PROFILE_CMD = [
   '__codex_shell_name="$(ps -p $$ -o comm= 2>/dev/null | awk -F/ \'{print $NF}\' | tr -d \' \')"',
   '[ -n "$__codex_shell_name" ] || __codex_shell_name="${SHELL##*/}"',
+  '[ -n "$__codex_shell_name" ] || __codex_shell_name="unknown"',
   '. /etc/profile >/dev/null 2>&1 || true',
   'case "$__codex_shell_name" in',
   '  zsh) [ -f ~/.zshrc ] && . ~/.zshrc >/dev/null 2>&1 || true ;;',
   '  bash) [ -f ~/.bashrc ] && . ~/.bashrc >/dev/null 2>&1 || true ;;',
   '  *) [ -f ~/.profile ] && . ~/.profile >/dev/null 2>&1 || true ;;',
   'esac',
-  'unset __codex_shell_name',
 ].join('; ');
 
 const READY_SHELL_BOOTSTRAP_CMD = [
@@ -25,7 +25,8 @@ const READY_SHELL_BOOTSTRAP_CMD = [
   'export TERM=xterm-256color',
   'export LESS=-SR',
   'alias ll="ls -alF" >/dev/null 2>&1 || true',
-  'printf "READY user=%s host=%s pwd=%s\\n" "$(whoami)" "$(hostname)" "$(pwd)"',
+  'printf "READY user=%s host=%s pwd=%s\\n[context] user=%s\\n[context] host=%s\\n[context] pwd=%s\\n[context] shell=%s\\n" "$(whoami)" "$(hostname)" "$(pwd)" "$(whoami)" "$(hostname)" "$(pwd)" "$__codex_shell_name"',
+  'unset __codex_shell_name',
 ].join('; ');
 
 const READY_SHELL_STEPS = [
@@ -37,7 +38,18 @@ const READY_SHELL_STEPS = [
   },
 ];
 
-const FAST_CONTEXT_STEPS = [
+const WARM_COMMON_TOOLS_STEP = {
+  name: 'warm-common-tools',
+  cmd: 'for cmd in journalctl dmesg ss ps top iostat vmstat tail grep awk sed; do if command -v \"$cmd\" >/dev/null 2>&1; then printf \"[tool] %s=%s\\n\" \"$cmd\" \"$(command -v \"$cmd\")\"; fi; done',
+  phase: 'context',
+  mode: 'exec',
+  parallelGroup: 'fast-context',
+  cacheKey: 'warm-common-tools',
+  cacheScope: 'target',
+  cacheTtlMs: 600000,
+};
+
+const READONLY_CONTEXT_STEPS = [
   {
     name: 'collect-target-identity',
     cmd: 'printf "[context] user=%s\\n[context] host=%s\\n[context] shell=%s\\n" "$(whoami)" "$(hostname)" "${SHELL:-unknown}"',
@@ -56,19 +68,18 @@ const FAST_CONTEXT_STEPS = [
     parallelGroup: 'fast-context',
   },
   {
-    name: 'warm-common-tools',
-    cmd: 'for cmd in journalctl dmesg ss ps top iostat vmstat tail grep awk sed; do if command -v \"$cmd\" >/dev/null 2>&1; then printf \"[tool] %s=%s\\n\" \"$cmd\" \"$(command -v \"$cmd\")\"; fi; done',
-    phase: 'context',
-    mode: 'exec',
-    parallelGroup: 'fast-context',
-    cacheKey: 'warm-common-tools',
-    cacheScope: 'target',
-    cacheTtlMs: 600000,
+    ...WARM_COMMON_TOOLS_STEP,
+  },
+];
+
+const FAST_CONTEXT_STEPS = [
+  {
+    ...WARM_COMMON_TOOLS_STEP,
   },
 ];
 
 const SAFE_CONTEXT_STEPS = [
-  ...FAST_CONTEXT_STEPS,
+  ...READONLY_CONTEXT_STEPS,
   {
     name: 'uptime',
     cmd: 'uptime',
@@ -115,8 +126,8 @@ const DEFAULT_PREPARE_PROFILES = [
   {
     profileId: 'linux-problem-localization-fast-path',
     name: 'Linux Problem Localization Fast Path',
-    description: 'Prioritize shell readiness first, then parallelize read-only probes so issue localization can start faster after login.',
-    builtinVersion: 5,
+    description: 'Prime the interactive shell, emit ready context immediately, then warm only reusable read-only probes so issue localization starts faster after login.',
+    builtinVersion: 6,
     managedBy: 'system',
     version: DEFAULT_PREPARE_PROFILE_VERSION,
     steps: LOCALIZATION_FAST_PATH_STEPS,
@@ -126,8 +137,8 @@ const DEFAULT_PREPARE_PROFILES = [
   {
     profileId: 'linux-problem-localization-boost',
     name: 'Linux Problem Localization Boost',
-    description: 'Warm the shell profile, parallelize safe context probes, and collect a broader runtime snapshot for deeper follow-up localization.',
-    builtinVersion: 6,
+    description: 'Prime the shell, reuse the ready context directly, then warm reusable probes and collect a broader runtime snapshot for deeper follow-up localization.',
+    builtinVersion: 7,
     managedBy: 'system',
     version: DEFAULT_PREPARE_PROFILE_VERSION,
     steps: LOCALIZATION_BOOST_STEPS,

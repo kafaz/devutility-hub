@@ -18,7 +18,7 @@ export interface PrepareInsightStep {
   stderr: string;
   durationMs: number;
   exitCode: number;
-  status: 'done' | 'failed';
+  status: 'done' | 'failed' | 'cached';
   statusReason?: string;
 }
 
@@ -37,7 +37,24 @@ function unique(values: string[]) {
   return Array.from(new Set(values.filter(Boolean)));
 }
 
+export function createEmptyPrepareInsightSummary(): PrepareInsightSummary {
+  return {
+    durationMs: 0,
+    readyLine: '等待 READY 上下文',
+    shell: 'unknown',
+    slowestStepName: 'n/a',
+    slowestStepDurationMs: 0,
+    warmedToolCount: 0,
+    missingTools: [...EXPECTED_DIAGNOSTIC_TOOLS],
+    failureReasons: [],
+  };
+}
+
 export function summarizePrepareRun(steps: PrepareInsightStep[]): PrepareInsightSummary {
+  if (!steps.length) {
+    return createEmptyPrepareInsightSummary();
+  }
+
   const combinedOutput = steps
     .flatMap((step) => [step.stdout, step.stderr])
     .filter(Boolean)
@@ -77,5 +94,26 @@ export function summarizePrepareRun(steps: PrepareInsightStep[]): PrepareInsight
     warmedToolCount: warmedTools.length,
     missingTools,
     failureReasons,
+  };
+}
+
+export function mergePrepareInsightSummaries(
+  base?: PrepareInsightSummary | null,
+  next?: PrepareInsightSummary | null
+): PrepareInsightSummary {
+  const left = base ?? createEmptyPrepareInsightSummary();
+  const right = next ?? createEmptyPrepareInsightSummary();
+  const useRightTools = right.warmedToolCount > 0 || right.missingTools.length < EXPECTED_DIAGNOSTIC_TOOLS.length;
+  const slowestFromRight = right.slowestStepDurationMs >= left.slowestStepDurationMs;
+
+  return {
+    durationMs: left.durationMs + right.durationMs,
+    readyLine: right.readyLine !== '等待 READY 上下文' ? right.readyLine : left.readyLine,
+    shell: right.shell !== 'unknown' ? right.shell : left.shell,
+    slowestStepName: slowestFromRight ? right.slowestStepName : left.slowestStepName,
+    slowestStepDurationMs: slowestFromRight ? right.slowestStepDurationMs : left.slowestStepDurationMs,
+    warmedToolCount: useRightTools ? right.warmedToolCount : left.warmedToolCount,
+    missingTools: useRightTools ? [...right.missingTools] : [...left.missingTools],
+    failureReasons: unique([...left.failureReasons, ...right.failureReasons]),
   };
 }

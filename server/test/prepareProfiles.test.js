@@ -12,23 +12,25 @@ test('problem localization boost splits fast readiness steps from background war
   const boost = DEFAULT_PREPARE_PROFILES.find((item) => item.profileId === 'linux-problem-localization-boost');
   assert.ok(fastPath, 'expected builtin fast-path localization profile');
   assert.ok(boost, 'expected builtin boost localization profile');
-  assert.match(fastPath.steps.find((step) => step.name === 'load-shell-profile').cmd, /ps -p \$\$ -o comm=/);
-  assert.match(fastPath.steps.find((step) => step.name === 'collect-target-identity').cmd, /\[context\] shell=/);
-  assert.equal(fastPath.steps.find((step) => step.name === 'collect-target-identity').cacheKey, 'collect-target-identity');
+  const readyShellStep = fastPath.steps.find((step) => step.name === 'ready-shell-bootstrap');
+  assert.ok(readyShellStep, 'expected ready-shell-bootstrap step');
+  assert.match(readyShellStep.cmd, /ps -p \$\$ -o comm=/);
+  assert.match(readyShellStep.cmd, /\[context\] shell=%s/);
+  assert.match(readyShellStep.cmd, /\[context\] pwd=%s/);
   assert.equal(fastPath.steps.find((step) => step.name === 'warm-common-tools').cacheKey, 'warm-common-tools');
   assert.match(boost.steps.find((step) => step.name === 'collect-runtime-window').cmd, /WINDOW ts=/);
 
   assert.deepEqual(
     selectPrepareProfileSteps(fastPath, 'essential').map((step) => step.name),
-    ['load-shell-profile', 'set-diagnostic-env']
+    ['ready-shell-bootstrap']
   );
   assert.deepEqual(
     selectPrepareProfileSteps(fastPath, 'background').map((step) => step.name),
-    ['collect-target-identity', 'collect-working-dir', 'warm-common-tools']
+    ['warm-common-tools']
   );
   assert.deepEqual(
     selectPrepareProfileSteps(boost, 'background').map((step) => step.name),
-    ['collect-target-identity', 'collect-working-dir', 'warm-common-tools', 'collect-runtime-window']
+    ['warm-common-tools', 'collect-runtime-window']
   );
 });
 
@@ -62,9 +64,9 @@ test('legacy builtin localization profile is upgraded to staged system defaults'
   assert.ok(upgraded, 'expected upgraded localization profile');
   assert.equal(upgraded.createdAt, 123);
   assert.equal(upgraded.managedBy, 'system');
-  assert.equal(upgraded.version, 3);
+  assert.equal(upgraded.version, 4);
   assert.deepEqual(
     selectPrepareProfileSteps(upgraded, 'background').map((step) => step.name),
-    ['collect-target-identity', 'collect-working-dir', 'warm-common-tools', 'collect-runtime-window']
+    ['warm-common-tools', 'collect-runtime-window']
   );
 });

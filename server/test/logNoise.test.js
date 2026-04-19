@@ -19,6 +19,16 @@ test('log noise filter removes info-prefixed lines but keeps risk signals', () =
   assert.equal(filtered.text, 'ERROR disk timeout on nvme0n1');
 });
 
+test('log noise filter suppresses last login banners by default', () => {
+  const filtered = filterNoiseText([
+    'Last login: Mon Apr 20 09:31:00 2026 from 10.0.0.8',
+    'ERROR disk timeout on nvme0n1',
+  ].join('\n'));
+
+  assert.equal(filtered.suppressedCount, 1);
+  assert.equal(filtered.text, 'ERROR disk timeout on nvme0n1');
+});
+
 test('log noise filter folds structured prepare chatter and bracketed info lines by default', () => {
   const filtered = filterNoiseText([
     '[2026-04-20 10:00:00] INFO background probe',
