@@ -96,7 +96,7 @@ SSH Manager 支持三种认证方式（等同 Python paramiko）：
 
 ## GitHub CI 与 Windows 便携包
 
-仓库现在包含 [`.github/workflows/ci.yml`](/Users/kafaz/dev/dev_utils/devutility-hub/.github/workflows/ci.yml)：
+仓库现在包含 [`.github/workflows/devutility-hub-ci.yml`](/Users/kafaz/dev/dev_utils/.github/workflows/devutility-hub-ci.yml)：
 
 - `push` / `pull_request` / `workflow_dispatch` 会自动执行统一验证。
 - Linux job 运行 `npm run ci:verify`，覆盖编译构建和现有 Node 测试。
