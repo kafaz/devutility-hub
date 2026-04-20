@@ -193,12 +193,6 @@ const EditableTabName: React.FC<{
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState(name);
 
-  useEffect(() => {
-    if (editing) {
-      setVal(name);
-    }
-  }, [editing, name]);
-
   if (editing) {
     return (
       <Input
@@ -215,11 +209,21 @@ const EditableTabName: React.FC<{
     );
   }
   return (
-    <Space size={4}>
+    <Space
+      size={4}
+      onDoubleClick={() => {
+        setVal(name);
+        setEditing(true);
+      }}
+    >
       <Text style={{ fontSize: 13 }}>{name}</Text>
       <EditOutlined
         style={{ fontSize: 12, color: '#6b7280', cursor: 'pointer' }}
-        onClick={(e) => { e.stopPropagation(); setEditing(true); }}
+        onClick={(e) => {
+          e.stopPropagation();
+          setVal(name);
+          setEditing(true);
+        }}
       />
     </Space>
   );
@@ -446,7 +450,7 @@ const CFunctionAnalyzer: React.FC = () => {
       {/* ① 分页选项卡与 C 函数调用 */}
       <Card
         size="small"
-        style={{ background: cardBg, border: `1px solid \${borderColor}` }}
+        style={{ background: cardBg, border: `1px solid ${borderColor}` }}
         bodyStyle={{ paddingTop: 0 }}
       >
         <Tabs
@@ -455,7 +459,7 @@ const CFunctionAnalyzer: React.FC = () => {
           activeKey={activeTab.id}
           onEdit={(targetKey, action) => {
             if (action === 'add') {
-              addCMacroTab(`新函数\${cMacroTabs.length + 1}`, '');
+              addCMacroTab(`新函数${cMacroTabs.length + 1}`, '');
             } else if (action === 'remove' && typeof targetKey === 'string') {
               deleteCMacroTab(targetKey);
             }
@@ -618,7 +622,7 @@ const CFunctionAnalyzer: React.FC = () => {
             </Tooltip>
           </Space>
         }
-        style={{ background: cardBg, border: `1px solid \${borderColor}` }}
+        style={{ background: cardBg, border: `1px solid ${borderColor}` }}
       >
         <ResizableOutput
           content={cfuncLogInput}
@@ -644,7 +648,7 @@ const CFunctionAnalyzer: React.FC = () => {
                 count={matchCount}
                 color="#22c55e"
                 overflowCount={9999}
-                title={`\${matchCount} 行匹配`}
+                title={`${matchCount} 行匹配`}
               >
                 <Tag color="success">✅ 匹配</Tag>
               </Badge>
@@ -681,7 +685,7 @@ const CFunctionAnalyzer: React.FC = () => {
               </Text>
             </Space>
           }
-          style={{ background: cardBg, border: `1px solid \${borderColor}` }}
+          style={{ background: cardBg, border: `1px solid ${borderColor}` }}
         >
           {useCardView ? (
             /* 少量行：卡片式展示，字段名对齐 */

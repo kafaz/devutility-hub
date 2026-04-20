@@ -46,6 +46,7 @@ export interface SSHProfile {
   // Legacy fields below (can be overwritten or ignored if credentialId is set)
   username?: string;
   authType?: AuthType;
+  password?: string;
   keyFilePath?: string;
   jumpHostProfileId?: string; // Phase 12: Bastion/Jump Host
   createdAt: number;
@@ -1202,7 +1203,7 @@ export const useSSHStore = create<SSHStore>()(
         let targetUser = profile.username ?? '';
         let targetAuth = profile.authType ?? 'password';
         let targetKey  = profile.keyFilePath;
-        let targetPass = password;
+        let targetPass = password || profile.password;
 
         const effectiveCredId = credentialId || profile.credentialId;
         if (effectiveCredId) {
@@ -1211,7 +1212,7 @@ export const useSSHStore = create<SSHStore>()(
             targetUser = cred.username;
             targetAuth = cred.authType;
             targetKey = cred.keyFilePath;
-            targetPass = cred.password || password;
+            targetPass = cred.password || profile.password || password;
           } else {
             failConnection('绑定的登录凭证已不存在，请重新绑定凭证后再连接');
             return;
@@ -1229,12 +1230,12 @@ export const useSSHStore = create<SSHStore>()(
             let jpUser = jp.username ?? '';
             let jpAuth = jp.authType ?? 'password';
             let jpKey = jp.keyFilePath;
-            let jpPass = jumpPassword;
+            let jpPass = jumpPassword || jp.password;
 
             if (jp.credentialId) {
                const jc = get().credentials.find(c => c.id === jp.credentialId);
                if (jc) {
-                 jpUser = jc.username; jpAuth = jc.authType; jpKey = jc.keyFilePath; jpPass = jc.password || jumpPassword;
+                 jpUser = jc.username; jpAuth = jc.authType; jpKey = jc.keyFilePath; jpPass = jc.password || jp.password || jumpPassword;
                } else {
                  failConnection(`跳板机档案「${jp.name}」绑定的凭证已不存在，请重新绑定后再连接`);
                  return;

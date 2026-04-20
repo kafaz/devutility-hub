@@ -39,6 +39,7 @@ const AnalysisReportPanel: React.FC<Props> = ({ check }) => {
       title: '类型',
       dataIndex: 'type',
       key: 'type',
+      width: 120,
       render: (type: InconsistencyItem['type']) => {
         const labels: Record<string, string> = {
           crc_mismatch: 'CRC 不一致',
@@ -53,33 +54,52 @@ const AnalysisReportPanel: React.FC<Props> = ({ check }) => {
       title: '描述',
       dataIndex: 'description',
       key: 'description',
+      width: 240,
+      render: (description: string) => (
+        <div style={{ whiteSpace: 'normal', wordBreak: 'break-word' }}>
+          {description}
+        </div>
+      ),
     },
     {
       title: '位置',
       dataIndex: 'location',
       key: 'location',
+      width: 140,
       render: (location?: string) => location ?? '-',
     },
     {
       title: '预期值',
       dataIndex: 'expected',
       key: 'expected',
+      width: 160,
       render: (expected?: string) => expected ?? '-',
     },
     {
       title: '实际值',
       dataIndex: 'actual',
       key: 'actual',
+      width: 280,
       render: (actual?: Record<string, string>) => {
         if (!actual) return '-';
         return (
-          <Space direction="vertical" size="small">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 220 }}>
             {Object.entries(actual).map(([nodeId, value]) => (
-              <Text key={nodeId} code>
+              <Text
+                key={nodeId}
+                code
+                style={{
+                  display: 'block',
+                  whiteSpace: 'normal',
+                  wordBreak: 'break-word',
+                  overflowWrap: 'anywhere',
+                  lineHeight: 1.5,
+                }}
+              >
                 {nodeId}: {value}
               </Text>
             ))}
-          </Space>
+          </div>
         );
       },
     },
@@ -87,7 +107,19 @@ const AnalysisReportPanel: React.FC<Props> = ({ check }) => {
       title: '涉及节点',
       dataIndex: 'nodeIds',
       key: 'nodeIds',
-      render: (nodeIds: string[]) => nodeIds.join(', '),
+      width: 180,
+      render: (nodeIds: string[]) => (
+        <Text
+          style={{
+            display: 'block',
+            whiteSpace: 'normal',
+            wordBreak: 'break-word',
+            overflowWrap: 'anywhere',
+          }}
+        >
+          {nodeIds.join(', ')}
+        </Text>
+      ),
     },
   ];
 
@@ -119,6 +151,7 @@ const AnalysisReportPanel: React.FC<Props> = ({ check }) => {
               rowKey={(record, index) => `${record.type}-${index}`}
               pagination={false}
               size="small"
+              scroll={{ x: 1100 }}
             />
           </Card>
         )}
@@ -132,7 +165,16 @@ const AnalysisReportPanel: React.FC<Props> = ({ check }) => {
                   size="small"
                   title={
                     <Space>
-                      <Text strong>{nodeId}</Text>
+                      <Text
+                        strong
+                        style={{
+                          display: 'block',
+                          fontFamily: 'JetBrains Mono, Consolas, monospace',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {nodeId}
+                      </Text>
                       <Tag color={output.exitCode === 0 ? 'success' : 'error'}>
                         exit: {output.exitCode}
                       </Tag>
@@ -143,7 +185,7 @@ const AnalysisReportPanel: React.FC<Props> = ({ check }) => {
                   {output.stdout && (
                     <div style={{ marginBottom: 8 }}>
                       <Text type="secondary" style={{ fontSize: 12 }}>stdout</Text>
-                      <pre style={{ background: '#f6f8fa', padding: 8, borderRadius: 4, overflow: 'auto', fontSize: 12, margin: 0 }}>
+                      <pre style={{ background: '#f6f8fa', padding: 8, borderRadius: 4, overflow: 'auto', fontSize: 12, margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
                         {output.stdout}
                       </pre>
                     </div>
@@ -151,7 +193,7 @@ const AnalysisReportPanel: React.FC<Props> = ({ check }) => {
                   {output.stderr && (
                     <div>
                       <Text type="secondary" style={{ fontSize: 12 }}>stderr</Text>
-                      <pre style={{ background: '#fff2f0', padding: 8, borderRadius: 4, overflow: 'auto', fontSize: 12, margin: 0 }}>
+                      <pre style={{ background: '#fff2f0', padding: 8, borderRadius: 4, overflow: 'auto', fontSize: 12, margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
                         {output.stderr}
                       </pre>
                     </div>

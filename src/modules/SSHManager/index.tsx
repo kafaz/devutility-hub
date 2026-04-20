@@ -283,6 +283,10 @@ interface TerminalScreenSnapshot {
 
 const TERMINAL_HIGHLIGHT_DECORATION_LIMIT = 200;
 
+function getResolvedProfilePassword(profile?: SSHProfile | null, credentialPassword?: string) {
+  return credentialPassword || profile?.password;
+}
+
 function buildHighlightRegex(keyword: string): RegExp | null {
   if (!keyword.trim()) return null;
   try {
@@ -655,7 +659,7 @@ const TerminalInstance: React.FC<{
   }, [visible, onResize, scheduleScreenHighlightRefresh]);
 
   return (
-    <div style={{ position: 'relative', width: '100%', height: '100%', display: visible ? 'flex' : 'none', flexDirection: 'column' }}>
+    <div style={{ position: 'relative', width: '100%', height: '100%', display: visible ? 'flex' : 'none', flexDirection: 'column', gap: 8 }}>
       {/* Toolbar */}
       <div style={{ position: 'absolute', top: 4, right: 12, zIndex: 101, display: 'flex', gap: 4 }}>
         <Tooltip title="搜索 (Ctrl+F)">
@@ -757,28 +761,33 @@ const TerminalInstance: React.FC<{
         </div>
       )}
 
+      <div
+        ref={ref}
+        style={{
+          width: '100%', flex: 1,
+          background: isDark ? '#1e1e1e' : '#fafafa',
+          padding: 4,
+          minHeight: 0,
+        }}
+      />
+
       {highlightRules.length > 0 && (
         <div style={{
-          position: 'absolute',
-          top: 36,
-          left: 12,
-          zIndex: 100,
-          width: 340,
+          width: '100%',
           maxHeight: 220,
           overflow: 'hidden',
           display: 'flex',
           flexDirection: 'column',
           gap: 6,
-          background: isDark ? 'rgba(37, 37, 38, 0.94)' : 'rgba(255, 255, 255, 0.95)',
+          background: isDark ? '#252526' : '#ffffff',
           border: `1px solid ${screenSnapshot.bufferType === 'alternate' ? '#f59e0b' : '#3b82f6'}`,
           borderRadius: 6,
           padding: '8px 10px',
-          boxShadow: '0 2px 10px rgba(0,0,0,.28)',
-          backdropFilter: 'blur(4px)',
+          boxShadow: '0 2px 8px rgba(0,0,0,.12)',
         }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
             <Space size={6} wrap>
-              <Text strong style={{ fontSize: 12 }}>屏幕命中</Text>
+              <Text strong style={{ fontSize: 12 }}>高亮命中</Text>
               <Tag color={screenSnapshot.bufferType === 'alternate' ? 'gold' : 'blue'} style={{ margin: 0, fontSize: 10 }}>
                 {screenSnapshot.bufferType === 'alternate' ? 'Vim/全屏缓冲区' : '当前屏幕'}
               </Tag>
@@ -848,14 +857,6 @@ const TerminalInstance: React.FC<{
         </div>
       )}
 
-      <div
-        ref={ref}
-        style={{
-          width: '100%', flex: 1,
-          background: isDark ? '#1e1e1e' : '#fafafa',
-          padding: 4,
-        }}
-      />
     </div>
   );
 };
@@ -1049,6 +1050,7 @@ const ProfileModal: React.FC<{
       form.setFieldValue('authType', cred.authType);
       setAuthType(cred.authType);
       if (cred.keyFilePath) form.setFieldValue('keyFilePath', cred.keyFilePath);
+      if (cred.authType === 'password' && cred.password) form.setFieldValue('password', cred.password);
     }
   };
 
@@ -1100,6 +1102,15 @@ const ProfileModal: React.FC<{
                 placeholder="~/.ssh/id_rsa" />
               <Button icon={<FolderOpenOutlined />} onClick={handleCheckKey}>验证</Button>
             </Space.Compact>
+          </Form.Item>
+        )}
+        {authType === 'password' && (
+          <Form.Item
+            name="password"
+            label="登录密码"
+            extra={<Text style={{ fontSize: 11 }}>默认保存在本地档案里，后续会话自动复用，不再重复询问</Text>}
+          >
+            <Password prefix={<LockOutlined />} placeholder="SSH 登录密码" autoComplete="off" />
           </Form.Item>
         )}
         <Form.Item name="jumpHostProfileId" label="跳板机 (可选)" extra={<Text style={{ fontSize: 11 }}>经由该跳板机连接目标机器</Text>}>
@@ -2050,10 +2061,12 @@ const SSHManager: React.FC = () => {
     const jumpAuth = jumpCred?.authType ?? jumpPrf?.authType;
 
     // 判断是否需要手动输入
-    const hostNeedInput = effectiveAuth === 'password' && !cred?.password;
+    const hostPassword = getResolvedProfilePassword(prf, cred?.password);
+    const jumpPassword = getResolvedProfilePassword(jumpPrf, jumpCred?.password);
+    const hostNeedInput = effectiveAuth === 'password' && !hostPassword;
     const hostNeedPassphrase = effectiveAuth === 'privateKey' && !cred; // 无凭证时可能需要 passphrase
     const jumpNeedInput = jumpPrf && (
-      (jumpAuth === 'password' && !jumpCred?.password) ||
+      (jumpAuth === 'password' && !jumpPassword) ||
       (jumpAuth === 'privateKey' && !jumpCred)
     );
 
@@ -2061,9 +2074,9 @@ const SSHManager: React.FC = () => {
     if (!hostNeedInput && !hostNeedPassphrase && !jumpNeedInput) {
       connectSession(sessionId, {
         credentialId: prf.credentialId || undefined,
-        password: cred?.password,
+        password: hostPassword,
         agent: effectiveAuth === 'agent' ? 'true' : undefined,
-        jumpPassword: jumpCred?.password,
+        jumpPassword,
         jumpAgent: jumpAuth === 'agent' ? 'true' : undefined,
       });
       return;
@@ -2073,8 +2086,8 @@ const SSHManager: React.FC = () => {
     setConnectingSessionId(sessionId);
     setConnectModal(true);
     connectForm.resetFields();
-    if (cred?.password) connectForm.setFieldValue('password', cred.password);
-    if (jumpCred?.password) connectForm.setFieldValue('jumpPassword', jumpCred.password);
+    if (hostPassword) connectForm.setFieldValue('password', hostPassword);
+    if (jumpPassword) connectForm.setFieldValue('jumpPassword', jumpPassword);
   };
 
   const handleConnect = async () => {
@@ -2084,7 +2097,14 @@ const SSHManager: React.FC = () => {
     const sess = sessions.find((s) => s.id === connectingSessionId);
     const prf = profiles.find((p) => p.id === sess?.profileId);
     const jumpPrf = prf?.jumpHostProfileId ? profiles.find((p) => p.id === prf.jumpHostProfileId) : null;
-    
+
+    if (prf && vals.password && (connectingEffectiveAuth === 'password')) {
+      updateProfile(prf.id, { password: vals.password });
+    }
+    if (jumpPrf && vals.jumpPassword && connectingJumpAuth === 'password') {
+      updateProfile(jumpPrf.id, { password: vals.jumpPassword });
+    }
+
     connectSession(connectingSessionId, { 
       passphrase: vals.passphrase, 
       password: vals.password,
@@ -2169,11 +2189,23 @@ const SSHManager: React.FC = () => {
                   display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                   padding: '4px 0', borderBottom: `1px solid ${borderColor}`,
                 }}>
-                  <div>
+                  <div style={{ minWidth: 0, flex: 1, paddingRight: 8 }}>
                     <Text style={{ fontSize: 12 }}>{p.name}</Text>
-                    <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
-                      {p.username}@{p.host}:{p.port}
-                    </Text>
+                    <Tooltip title={`${p.username}@${p.host}:${p.port}`}>
+                      <Text
+                        type="secondary"
+                        style={{
+                          fontSize: 11,
+                          display: 'block',
+                          fontFamily: 'JetBrains Mono, Consolas, monospace',
+                          whiteSpace: 'nowrap',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                        }}
+                      >
+                        {p.username}@{p.host}:{p.port}
+                      </Text>
+                    </Tooltip>
                   </div>
                   <Space size={4}>
                     <Tooltip title="⚡ 一键连接（创建会话+自动连接）">
@@ -2232,17 +2264,28 @@ const SSHManager: React.FC = () => {
             ) : sessionGroups.map((group) => {
               const groupSessions = sessions.filter((session) => group.sessionIds.includes(session.id));
               const connectedCount = groupSessions.filter((session) => session.status === 'connected').length;
-              const autoConnectable = groupSessions.filter((session) => {
-                const profile = profiles.find((item) => item.id === session.profileId);
-                const credential = profile?.credentialId ? credentials.find((item) => item.id === profile.credentialId) : null;
-                return Boolean(
-                  profile && (
-                    profile.credentialId ||
-                    credential?.password ||
-                    profile.authType === 'agent' ||
-                    (profile.authType === 'privateKey' && profile.keyFilePath)
-                  )
-                );
+                const autoConnectable = groupSessions.filter((session) => {
+                  const profile = profiles.find((item) => item.id === session.profileId);
+                  const credential = profile?.credentialId ? credentials.find((item) => item.id === profile.credentialId) : null;
+                  const jumpProfile = profile?.jumpHostProfileId ? profiles.find((item) => item.id === profile.jumpHostProfileId) : null;
+                  const jumpCredential = jumpProfile?.credentialId ? credentials.find((item) => item.id === jumpProfile.credentialId) : null;
+                  const hostReady = Boolean(
+                    profile && (
+                      profile.credentialId ||
+                      getResolvedProfilePassword(profile, credential?.password) ||
+                      profile.authType === 'agent' ||
+                      (profile.authType === 'privateKey' && profile.keyFilePath)
+                    )
+                  );
+                  const jumpReady = !jumpProfile || Boolean(
+                    jumpProfile.credentialId ||
+                    getResolvedProfilePassword(jumpProfile, jumpCredential?.password) ||
+                    jumpProfile.authType === 'agent' ||
+                    (jumpProfile.authType === 'privateKey' && jumpProfile.keyFilePath)
+                  );
+                  return Boolean(
+                    hostReady && jumpReady
+                  );
               }).length;
               return (
                 <div
@@ -2339,7 +2382,7 @@ const SSHManager: React.FC = () => {
                   }}
                   onClick={() => setActiveSession(sess.id)}
                   >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
                       {/* 会话名称（可内联编辑） */}
                       {renamingSessionId === sess.id ? (
                         <Input
@@ -2349,77 +2392,79 @@ const SSHManager: React.FC = () => {
                           onChange={(e) => setRenameValue(e.target.value)}
                           onBlur={() => { renameSession(sess.id, renameValue || sess.name); setRenamingSessionId(''); }}
                           onPressEnter={() => { renameSession(sess.id, renameValue || sess.name); setRenamingSessionId(''); }}
-                          style={{ width: 140 }}
+                          style={{ width: 180 }}
                           onClick={(e) => e.stopPropagation()}
                         />
                       ) : (
-                        <Space size={5}>
-                          <Tooltip title={sess.status === 'error' ? sess.statusMsg : sc.label}>
-                            <Badge status={sc.badge} />
-                          </Tooltip>
-                          <Text
-                            strong
-                            style={{ fontSize: 12, cursor: 'text', color: activeSessionId === sess.id ? '#3b82f6' : undefined }}
-                            onDoubleClick={(e) => {
-                              e.stopPropagation();
-                              setRenamingSessionId(sess.id);
-                              setRenameValue(sess.name);
-                            }}
-                          >
-                            {sess.name}
-                          </Text>
-                          {uptimeStr && <Tag color="processing" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>{uptimeStr}</Tag>}
-                          {prepareRunning && (
-                            <Tag color="gold" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
-                              预处理中
-                            </Tag>
-                          )}
-                          {!prepareRunning && prepareReady && prepareSummary && (
-                            <>
-                              <Tooltip
-                                title={formatPrepareInsightTooltip(prepareSummary, prepareBackgroundRunning)}
-                              >
-                                <Tag color={prepareBackgroundRunning ? 'processing' : 'success'} style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
-                                  {prepareSummary.status === 'done' && !prepareBackgroundRunning ? '已预热' : '已就绪'}
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <Space size={5} wrap style={{ width: '100%' }}>
+                            <Tooltip title={sess.status === 'error' ? sess.statusMsg : sc.label}>
+                              <Badge status={sc.badge} />
+                            </Tooltip>
+                            <Text
+                              strong
+                              style={{ fontSize: 12, cursor: 'text', color: activeSessionId === sess.id ? '#3b82f6' : undefined }}
+                              onDoubleClick={(e) => {
+                                e.stopPropagation();
+                                setRenamingSessionId(sess.id);
+                                setRenameValue(sess.name);
+                              }}
+                            >
+                              {sess.name}
+                            </Text>
+                            {uptimeStr && <Tag color="processing" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>{uptimeStr}</Tag>}
+                            {prepareRunning && (
+                              <Tag color="gold" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
+                                预处理中
+                              </Tag>
+                            )}
+                            {!prepareRunning && prepareReady && prepareSummary && (
+                              <>
+                                <Tooltip
+                                  title={formatPrepareInsightTooltip(prepareSummary, prepareBackgroundRunning)}
+                                >
+                                  <Tag color={prepareBackgroundRunning ? 'processing' : 'success'} style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
+                                    {prepareSummary.status === 'done' && !prepareBackgroundRunning ? '已预热' : '已就绪'}
+                                  </Tag>
+                                </Tooltip>
+                                {prepareBackgroundRunning && (
+                                  <Tag color="gold" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
+                                    补全中
+                                  </Tag>
+                                )}
+                                {prepareSummary.readyDurationMs > 0 && (
+                                  <Tag color="processing" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
+                                    ready {formatDurationLabel(prepareSummary.readyDurationMs)}
+                                  </Tag>
+                                )}
+                                {prepareSummary.cachedStepCount > 0 && (
+                                  <Tag color="default" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
+                                    缓存 {prepareSummary.cachedStepCount}
+                                  </Tag>
+                                )}
+                                {parallelSavedMs > 0 && (
+                                  <Tag color="cyan" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
+                                    并行省 {formatDurationLabel(parallelSavedMs)}
+                                  </Tag>
+                                )}
+                                {prepareSummary.backgroundStatus === 'failed' && !prepareBackgroundRunning && (
+                                  <Tag color="orange" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
+                                    补全未完成
+                                  </Tag>
+                                )}
+                              </>
+                            )}
+                            {!prepareRunning && prepareStatusMatchesCurrentConnection && prepareSummary?.status === 'failed' && (
+                              <Tooltip title={`${prepareSummary.profileName} 需要重新执行${prepareSummary.failedCount > 0 ? ` · ${prepareSummary.failedCount} 步失败` : ''}`}>
+                                <Tag color="error" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
+                                  预热失败
                                 </Tag>
                               </Tooltip>
-                              {prepareBackgroundRunning && (
-                                <Tag color="gold" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
-                                  补全中
-                                </Tag>
-                              )}
-                              {prepareSummary.readyDurationMs > 0 && (
-                                <Tag color="processing" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
-                                  ready {formatDurationLabel(prepareSummary.readyDurationMs)}
-                                </Tag>
-                              )}
-                              {prepareSummary.cachedStepCount > 0 && (
-                                <Tag color="default" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
-                                  缓存 {prepareSummary.cachedStepCount}
-                                </Tag>
-                              )}
-                              {parallelSavedMs > 0 && (
-                                <Tag color="cyan" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
-                                  并行省 {formatDurationLabel(parallelSavedMs)}
-                                </Tag>
-                              )}
-                              {prepareSummary.backgroundStatus === 'failed' && !prepareBackgroundRunning && (
-                                <Tag color="orange" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
-                                  补全未完成
-                                </Tag>
-                              )}
-                            </>
-                          )}
-                          {!prepareRunning && prepareStatusMatchesCurrentConnection && prepareSummary?.status === 'failed' && (
-                            <Tooltip title={`${prepareSummary.profileName} 需要重新执行${prepareSummary.failedCount > 0 ? ` · ${prepareSummary.failedCount} 步失败` : ''}`}>
-                              <Tag color="error" style={{ fontSize: 10, lineHeight: '16px', padding: '0 4px', margin: 0 }}>
-                                预热失败
-                              </Tag>
-                            </Tooltip>
-                          )}
-                        </Space>
+                            )}
+                          </Space>
+                        </div>
                       )}
-                      <Space size={3} onClick={(e) => e.stopPropagation()}>
+                      <Space size={3} onClick={(e) => e.stopPropagation()} style={{ flexShrink: 0 }}>
                         {sess.status === 'connected' ? (
                           <Button size="small" danger
                             icon={<DisconnectOutlined />}
@@ -2449,10 +2494,24 @@ const SSHManager: React.FC = () => {
                       </Space>
                     </div>
                     {prf && (
-                      <Text type="secondary" style={{ fontSize: 10, display: 'block', marginTop: 1 }}>
-                        {prf.username}@{prf.host}:{prf.port}
-                        {sess.status === 'error' && sess.statusMsg ? ` · ⚠ ${sess.statusMsg}` : ''}
-                      </Text>
+                      <Tooltip title={`${prf.username}@${prf.host}:${prf.port}${sess.status === 'error' && sess.statusMsg ? ` · ⚠ ${sess.statusMsg}` : ''}`}>
+                        <Text
+                          type="secondary"
+                          style={{
+                            fontSize: 10,
+                            display: 'block',
+                            marginTop: 4,
+                            fontFamily: 'JetBrains Mono, Consolas, monospace',
+                            whiteSpace: 'nowrap',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            wordBreak: 'normal',
+                          }}
+                        >
+                          {prf.username}@{prf.host}:{prf.port}
+                          {sess.status === 'error' && sess.statusMsg ? ` · ⚠ ${sess.statusMsg}` : ''}
+                        </Text>
+                      </Tooltip>
                     )}
                     {ownerGroups.length > 0 && (
                       <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 4 }}>
@@ -3116,7 +3175,7 @@ const SSHManager: React.FC = () => {
           )}
 
           <Alert type="info" showIcon={false}
-            message={<Text style={{ fontSize: 12 }}>如已在凭证管理中保存密码，可自动连接无需重复输入</Text>} />
+            message={<Text style={{ fontSize: 12 }}>这次输入的密码会回写到连接档案，下次同档案会话默认自动复用</Text>} />
         </Form>
       </Modal>
 
