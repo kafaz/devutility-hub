@@ -29,6 +29,8 @@ Thumbs.db
 *.njsproj
 *.sln
 *.sw?
+.superpowers/
+.worktrees/
 
 # ── 本地测试脚本 ──────────────────────────────────────────
 *.local
