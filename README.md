@@ -24,6 +24,8 @@ npm run dev
 # 访问 http://localhost:5173
 ```
 
+`npm run dev` 现在会在启动前检查 `server/` 依赖；如果像 `express` 这类代理依赖缺失，会自动执行一次 `npm --prefix server ci` 再继续拉起本地开发环境。
+
 ### SSH 代理服务（SSH Manager 功能所需）
 
 ```bash

@@ -66,6 +66,7 @@ const {
   buildSignals,
   getRunById,
   listRuns,
+  patchRunWorkbench,
   recallSimilarRuns,
 } = require('./diagnosticKb');
 const {
@@ -1895,6 +1896,18 @@ app.get('/api/diagnostic/runs/:id', (req, res) => {
     return res.status(404).json({ ok: false, error: '诊断记录不存在' });
   }
   return res.json({ ok: true, run });
+});
+
+app.patch('/api/diagnostic/runs/:id/workbench', (req, res) => {
+  try {
+    const run = patchRunWorkbench(req.params.id, req.body || {});
+    if (!run) {
+      return res.status(404).json({ ok: false, error: '诊断记录不存在' });
+    }
+    return res.json({ ok: true, run });
+  } catch (error) {
+    return res.status(400).json({ ok: false, error: error.message });
+  }
 });
 
 app.post('/api/diagnostic/recall', (req, res) => {

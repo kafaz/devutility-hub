@@ -312,6 +312,112 @@ function appendRun(run) {
   return run;
 }
 
+function sanitizeManualCommandRuns(runs) {
+  if (runs === undefined) return undefined;
+  if (!Array.isArray(runs)) {
+    throw new Error('manualCommandRuns 必须是数组');
+  }
+  return runs.map((run) => ({
+    id: String(run?.id || ''),
+    sessionId: String(run?.sessionId || ''),
+    command: String(run?.command || ''),
+    stdout: String(run?.stdout || ''),
+    stderr: String(run?.stderr || ''),
+    exitCode: Number.isFinite(Number(run?.exitCode)) ? Number(run.exitCode) : null,
+    durationMs: Math.max(0, Number(run?.durationMs) || 0),
+    startedAt: Number.isFinite(Number(run?.startedAt)) ? Number(run.startedAt) : undefined,
+    finishedAt: Number.isFinite(Number(run?.finishedAt)) ? Number(run.finishedAt) : undefined,
+  }));
+}
+
+function sanitizeActiveCodeBinding(binding) {
+  if (binding === undefined) return undefined;
+  if (binding === null) return null;
+  if (!binding || typeof binding !== 'object' || Array.isArray(binding)) {
+    throw new Error('activeCodeBinding 必须是对象');
+  }
+  return {
+    repo: String(binding.repo || ''),
+    repoDisplayName: String(binding.repoDisplayName || ''),
+    branch: String(binding.branch || ''),
+    commit: String(binding.commit || ''),
+    worktreePath: String(binding.worktreePath || ''),
+  };
+}
+
+function sanitizeTimelineWhiteboard(items) {
+  if (items === undefined) return undefined;
+  if (!Array.isArray(items)) {
+    throw new Error('timelineWhiteboard 必须是数组');
+  }
+  return items.map((item) => ({
+    id: String(item?.id || ''),
+    kind: ['log', 'command', 'source', 'note'].includes(String(item?.kind || ''))
+      ? String(item.kind)
+      : String(item?.type || '') === 'command_result'
+        ? 'command'
+        : 'log',
+    title: String(item?.title || item?.message || item?.type || ''),
+    excerpt: String(
+      item?.excerpt
+        || [item?.cmd, item?.message, item?.stdout, item?.stderr].filter(Boolean).join('\n\n')
+        || ''
+    ),
+    timestamp: Number.isFinite(Number(item?.timestamp))
+      ? Number(item.timestamp)
+      : Number.isFinite(Number(item?.ts))
+        ? Number(item.ts)
+        : null,
+    sourceType: String(item?.sourceType || item?.type || 'manual'),
+    sourceId: String(item?.sourceId || item?.id || ''),
+    accent: ['warning', 'error'].includes(String(item?.accent || ''))
+      ? String(item.accent)
+      : String(item?.level || '') === 'error' || (Number.isFinite(Number(item?.exitCode)) && Number(item.exitCode) !== 0)
+        ? 'error'
+        : String(item?.level || '') === 'warning'
+          ? 'warning'
+          : 'default',
+  }));
+}
+
+function patchRunWorkbench(id, workbenchPatch = {}) {
+  const allowedFields = new Set(['manualCommandRuns', 'activeCodeBinding', 'timelineWhiteboard']);
+  const providedFields = Object.keys(workbenchPatch).filter((field) => workbenchPatch[field] !== undefined);
+
+  if (providedFields.length === 0) {
+    throw new Error('至少需要一个 workbench 字段');
+  }
+
+  const unsupportedFields = providedFields.filter((field) => !allowedFields.has(field));
+  if (unsupportedFields.length > 0) {
+    throw new Error(`只允许更新 workbench 字段: ${unsupportedFields.join(', ')}`);
+  }
+
+  const store = loadStore();
+  const runIndex = store.runs.findIndex((run) => run.id === id);
+  if (runIndex === -1) {
+    return null;
+  }
+
+  const currentRun = store.runs[runIndex];
+  const nextRun = {
+    ...currentRun,
+    ...(workbenchPatch.manualCommandRuns !== undefined
+      ? { manualCommandRuns: sanitizeManualCommandRuns(workbenchPatch.manualCommandRuns) }
+      : {}),
+    ...(workbenchPatch.activeCodeBinding !== undefined
+      ? { activeCodeBinding: sanitizeActiveCodeBinding(workbenchPatch.activeCodeBinding) }
+      : {}),
+    ...(workbenchPatch.timelineWhiteboard !== undefined
+      ? { timelineWhiteboard: sanitizeTimelineWhiteboard(workbenchPatch.timelineWhiteboard) }
+      : {}),
+  };
+
+  store.runs[runIndex] = nextRun;
+  saveStore(store);
+  return nextRun;
+}
+
 function listRuns() {
   return loadStore().runs;
 }
@@ -329,5 +435,6 @@ module.exports = {
   getRunById,
   listRuns,
   loadStore,
+  patchRunWorkbench,
   recallSimilarRuns,
 };
