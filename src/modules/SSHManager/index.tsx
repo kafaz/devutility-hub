@@ -63,6 +63,7 @@ import {
 import { useSOPStore } from '../SOPBuilder/store/sopStore';
 import BackgroundJobMonitor from './components/BackgroundJobMonitor';
 import BatchLoginModal from './components/BatchLoginModal';
+import CommandPresetGroupModal from './components/CommandPresetGroupModal';
 import CredentialManager from './components/CredentialManager';
 import KeywordAnalyzer from './components/KeywordAnalyzer';
 import NodeContextPanel from './components/NodeContextPanel';
@@ -76,7 +77,7 @@ import SessionGroupModal from './components/SessionGroupModal';
 import { useAnalyzerStore, type HighlightRule } from './store/analyzerStore';
 import { useCronStore } from './store/cronStore';
 import { useJournalStore } from './store/journalStore';
-import type { NodeExecution, PlanStepResult, SessionGroup, SSHProfile, SSHSession } from './store/sshStore';
+import type { CommandPresetGroup, NodeExecution, PlanStepResult, SessionGroup, SSHProfile, SSHSession } from './store/sshStore';
 import { getTerminalBuffer, recordManualCommandStart, useSSHStore } from './store/sshStore';
 
 const { Title, Text } = Typography;
@@ -1014,10 +1015,11 @@ const ProfileModal: React.FC<{
   open: boolean;
   initial?: SSHProfile | null;
   profiles: SSHProfile[];
+  commandPresetGroups: CommandPresetGroup[];
   onOk: (p: Omit<SSHProfile, 'id' | 'createdAt'>) => void;
   onCancel: () => void;
   checkKeyFile: (p: string) => Promise<{ ok: boolean; resolved?: string; msg?: string }>;
-}> = ({ open, initial, profiles, onOk, onCancel, checkKeyFile }) => {
+}> = ({ open, initial, profiles, commandPresetGroups, onOk, onCancel, checkKeyFile }) => {
   const [form] = Form.useForm();
   const [authType, setAuthType] = useState<'privateKey' | 'password' | 'agent'>('privateKey');
   const [keyMsg,   setKeyMsg]   = useState('');
@@ -1120,6 +1122,21 @@ const ProfileModal: React.FC<{
             ))}
           </Select>
         </Form.Item>
+        <Form.Item
+          name="bootstrapCommandGroupIds"
+          label="连接后预设命令组"
+          extra={<Text style={{ fontSize: 11 }}>连接建立后会自动执行这些命令组，并把提取到的变量同步到当前 shell</Text>}
+        >
+          <Select
+            mode="multiple"
+            allowClear
+            placeholder="选择连接档案要自动执行的命令组"
+            options={commandPresetGroups.map((group) => ({
+              label: `${group.name} · ${group.commands.length} 条命令`,
+              value: group.id,
+            }))}
+          />
+        </Form.Item>
       </Form>
     </Modal>
   );
@@ -1134,8 +1151,9 @@ const SSHManager: React.FC = () => {
   const analyzerLogCount = useAnalyzerStore(s => s.logs.length);
 
   const {
-    credentials, profiles, sessions, sessionGroups, activeSessionId, proxyOnline, multiNodeRun, nodeContexts,
+    credentials, profiles, commandPresetGroups, sessions, sessionGroups, activeSessionId, proxyOnline, multiNodeRun, nodeContexts,
     addProfile, updateProfile, deleteProfile,
+    createCommandPresetGroup, updateCommandPresetGroup, deleteCommandPresetGroup,
     addSession, removeSession, renameSession, setActiveSession,
     createSessionGroup, updateSessionGroup, deleteSessionGroup,
     connectGroup, reconnectGroup, disconnectGroup,
@@ -1154,6 +1172,7 @@ const SSHManager: React.FC = () => {
   const [credentialModal, setCredentialModal] = useState(false);
   const [batchLoginModal, setBatchLoginModal] = useState(false);
   const [groupModal, setGroupModal] = useState<SessionGroup | null | 'new'>(null);
+  const [commandPresetModal, setCommandPresetModal] = useState<CommandPresetGroup | null | 'new'>(null);
   const [connectingSessionId, setConnectingSessionId] = useState('');
   const [renamingSessionId, setRenamingSessionId]     = useState('');
   const [renameValue, setRenameValue] = useState('');
@@ -2184,7 +2203,11 @@ const SSHManager: React.FC = () => {
             }>
             {profiles.length === 0
               ? <Text type="secondary" style={{ fontSize: 12 }}>暂无档案</Text>
-              : profiles.map((p) => (
+              : profiles.map((p) => {
+                  const boundCommandGroups = (p.bootstrapCommandGroupIds ?? [])
+                    .map((groupId) => commandPresetGroups.find((group) => group.id === groupId))
+                    .filter(Boolean) as CommandPresetGroup[];
+                  return (
                 <div key={p.id} style={{
                   display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                   padding: '4px 0', borderBottom: `1px solid ${borderColor}`,
@@ -2206,6 +2229,20 @@ const SSHManager: React.FC = () => {
                         {p.username}@{p.host}:{p.port}
                       </Text>
                     </Tooltip>
+                    {boundCommandGroups.length > 0 && (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 4 }}>
+                        {boundCommandGroups.slice(0, 2).map((group) => (
+                          <Tag key={group.id} color="cyan" style={{ fontSize: 10, margin: 0 }}>
+                            {group.name}
+                          </Tag>
+                        ))}
+                        {boundCommandGroups.length > 2 && (
+                          <Tag color="default" style={{ fontSize: 10, margin: 0 }}>
+                            +{boundCommandGroups.length - 2}
+                          </Tag>
+                        )}
+                      </div>
+                    )}
                   </div>
                   <Space size={4}>
                     <Tooltip title="⚡ 一键连接（创建会话+自动连接）">
@@ -2246,7 +2283,75 @@ const SSHManager: React.FC = () => {
                     </Popconfirm>
                   </Space>
                 </div>
-              ))}
+                  );
+                })}
+          </Card>
+
+          <Card
+            size="small"
+            title="预设命令组"
+            style={{ background: cardBg, border: `1px solid ${borderColor}` }}
+            extra={
+              <Button size="small" icon={<PlusOutlined />} type="dashed" onClick={() => setCommandPresetModal('new')}>
+                新建
+              </Button>
+            }
+          >
+            {commandPresetGroups.length === 0 ? (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                先定义可复用命令组，再把它绑定到连接档案，连接后会自动执行并注入 shell 变量。
+              </Text>
+            ) : commandPresetGroups.map((group) => (
+              <div
+                key={group.id}
+                style={{
+                  padding: '8px 0',
+                  borderBottom: `1px solid ${borderColor}`,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 6,
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <Text strong style={{ fontSize: 12 }}>{group.name}</Text>
+                    <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
+                      {group.commands.length} 条命令 · 已绑定 {(profiles.filter((profile) => (profile.bootstrapCommandGroupIds ?? []).includes(group.id)).length)} 个档案
+                    </Text>
+                    {group.description && (
+                      <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 2 }}>
+                        {group.description}
+                      </Text>
+                    )}
+                  </div>
+                  <Space size={4}>
+                    <Button size="small" icon={<EditOutlined />} onClick={() => setCommandPresetModal(group)} />
+                    <Popconfirm
+                      title="删除此预设命令组？"
+                      onConfirm={() => deleteCommandPresetGroup(group.id)}
+                      okText="删除"
+                      cancelText="取消"
+                      okButtonProps={{ danger: true }}
+                    >
+                      <Button size="small" danger icon={<DeleteOutlined />} />
+                    </Popconfirm>
+                  </Space>
+                </div>
+                <Space wrap size={[4, 4]}>
+                  {group.tags.map((tag) => (
+                    <Tag key={tag} color="purple">{tag}</Tag>
+                  ))}
+                  {group.commands.slice(0, 2).map((command) => (
+                    <Tag key={command.id} color="blue">
+                      {command.captureVar ? `${command.name} -> $${command.captureVar}` : command.name}
+                    </Tag>
+                  ))}
+                  {group.commands.length > 2 && (
+                    <Tag color="default">+{group.commands.length - 2} 条命令</Tag>
+                  )}
+                </Space>
+              </div>
+            ))}
           </Card>
 
           <Card
@@ -3133,6 +3238,7 @@ const SSHManager: React.FC = () => {
         open={profileModal}
         initial={editingProfile}
         profiles={profiles}
+        commandPresetGroups={commandPresetGroups}
         onOk={(p) => {
           if (editingProfile && editingProfile.id) updateProfile(editingProfile.id, p);
           else addProfile(p);
@@ -3185,6 +3291,20 @@ const SSHManager: React.FC = () => {
         onCancel={() => setBatchLoginModal(false)}
         onSessionsPrepared={(sessionIds) => setSelectedNodes((current) => Array.from(new Set([...current, ...sessionIds])))}
         onSuccess={() => setBatchLoginModal(false)}
+      />
+
+      <CommandPresetGroupModal
+        open={!!commandPresetModal}
+        initialValue={commandPresetModal === 'new' ? null : commandPresetModal}
+        onCancel={() => setCommandPresetModal(null)}
+        onSave={(values) => {
+          if (commandPresetModal && commandPresetModal !== 'new') {
+            updateCommandPresetGroup(commandPresetModal.id, values);
+          } else {
+            createCommandPresetGroup(values);
+          }
+          setCommandPresetModal(null);
+        }}
       />
 
       <SessionGroupModal

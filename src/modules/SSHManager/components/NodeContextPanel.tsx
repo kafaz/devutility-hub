@@ -3,6 +3,7 @@ import { Alert, Button, Card, Form, Input, List, message, Popconfirm, Space, Tag
 import React from 'react';
 import type { NodeConnectionContext, SSHSession } from '../store/sshStore';
 import { useSSHStore } from '../store/sshStore';
+import { SHELL_VAR_NAME_PATTERN } from '../shellVars';
 
 const { Text } = Typography;
 
@@ -101,7 +102,7 @@ const NodeContextPanel: React.FC<Props> = ({ activeSession, context, isDark }) =
               <div>
                 <Text strong style={{ fontSize: 12 }}>手动采集到上下文</Text>
                 <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>
-                  可只保存输出，也可填写变量名 + 正则，把结果提取为当前连接可复用变量。
+                  可只保存输出，也可填写变量名 + 正则，把结果提取为当前连接可复用变量，并自动 export 到当前 SSH shell。
                 </Text>
               </div>
             }
@@ -115,7 +116,19 @@ const NodeContextPanel: React.FC<Props> = ({ activeSession, context, isDark }) =
               <Form.Item name="name" label="记录名称" style={{ marginBottom: 8 }}>
                 <Input placeholder="例如：读取 OS 版本" />
               </Form.Item>
-              <Form.Item name="captureVar" label="变量名" style={{ marginBottom: 8 }}>
+              <Form.Item
+                name="captureVar"
+                label="变量名 / Shell 变量"
+                rules={[{
+                  validator: (_: unknown, value?: string) => {
+                    if (!value || SHELL_VAR_NAME_PATTERN.test(value)) {
+                      return Promise.resolve();
+                    }
+                    return Promise.reject(new Error('变量名需符合 Shell 变量命名规范：字母或下划线开头，只能包含字母、数字、下划线'));
+                  },
+                }]}
+                style={{ marginBottom: 8 }}
+              >
                 <Input placeholder="例如：os_version" />
               </Form.Item>
             </div>
@@ -135,6 +148,9 @@ const NodeContextPanel: React.FC<Props> = ({ activeSession, context, isDark }) =
 
           <div>
             <Text strong style={{ fontSize: 12 }}>当前变量</Text>
+            <Text type="secondary" style={{ display: 'block', fontSize: 11, marginTop: 2 }}>
+              这些变量已经同步到当前 SSH 会话，可直接在终端中用 `$变量名` 继续排查。
+            </Text>
             <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
               {context && Object.keys(context.vars).length > 0 ? (
                 Object.entries(context.vars).map(([key, value]) => (

@@ -17,6 +17,7 @@ import { persist } from 'zustand/middleware';
 import { generateId, renderTemplate } from '../../../utils';
 import { matchLogNoise } from '../../../utils/logNoise';
 import { PROXY_HTTP_BASE, PROXY_WS_BASE } from '../../../config/runtime';
+import { buildShellVarsSyncScript } from '../shellVars';
 import { useAnalyzerStore } from './analyzerStore';
 import { useJournalStore } from './journalStore';
 
@@ -49,6 +50,7 @@ export interface SSHProfile {
   password?: string;
   keyFilePath?: string;
   jumpHostProfileId?: string; // Phase 12: Bastion/Jump Host
+  bootstrapCommandGroupIds?: string[];
   createdAt: number;
 }
 
@@ -79,6 +81,16 @@ export interface SessionGroup {
   tags: string[];
   sessionIds: string[];
   initCommands: InitCommandTemplate[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CommandPresetGroup {
+  id: string;
+  name: string;
+  description?: string;
+  tags: string[];
+  commands: InitCommandTemplate[];
   createdAt: number;
   updatedAt: number;
 }
@@ -318,6 +330,30 @@ function addSessionJournalEvent(sessionId: string, eventTitle: string, content: 
   });
 }
 
+function syncShellVarsForSession(
+  sessionId: string,
+  previousVars: Record<string, string>,
+  nextVars: Record<string, string>
+): void {
+  const { sessions, sendInputToSession } = useSSHStore.getState();
+  const session = sessions.find((item) => item.id === sessionId);
+  if (!session || session.status !== 'connected') return;
+  const script = buildShellVarsSyncScript(previousVars, nextVars);
+  if (!script) return;
+  sendInputToSession(sessionId, `${script}\n`);
+}
+
+function cloneScopedInitCommands(
+  commands: InitCommandTemplate[],
+  scope: { id: string; name: string; prefix?: string }
+): InitCommandTemplate[] {
+  return commands.map((command) => ({
+    ...command,
+    id: `${scope.id}::${command.id}`,
+    name: scope.prefix ? `${scope.prefix} · ${command.name}` : command.name,
+  }));
+}
+
 function addQuickExecJournalEntry(
   sessionId: string,
   cmd: string,
@@ -448,6 +484,10 @@ interface SSHStore {
   addProfile:     (p: Omit<SSHProfile, 'id' | 'createdAt'>) => string;
   updateProfile:  (id: string, p: Partial<SSHProfile>) => void;
   deleteProfile:  (id: string) => void;
+  commandPresetGroups: CommandPresetGroup[];
+  createCommandPresetGroup: (group: Omit<CommandPresetGroup, 'id' | 'createdAt' | 'updatedAt'>) => string;
+  updateCommandPresetGroup: (groupId: string, patch: Partial<Omit<CommandPresetGroup, 'id' | 'createdAt' | 'updatedAt'>>) => void;
+  deleteCommandPresetGroup: (groupId: string) => void;
 
   // 命名会话（持久化元数据）
   sessions:         SSHSession[];
@@ -776,6 +816,7 @@ export const useSSHStore = create<SSHStore>()(
     (set, get) => ({
       credentials:     [],
       profiles:        [],
+      commandPresetGroups: [],
       sessions:        [],
       sessionGroups:   [],
       activeSessionId: null,
@@ -814,6 +855,49 @@ export const useSSHStore = create<SSHStore>()(
         set((s) => ({ profiles: s.profiles.map((x) => x.id === id ? { ...x, ...p } : x) })),
       deleteProfile: (id) =>
         set((s) => ({ profiles: s.profiles.filter((x) => x.id !== id) })),
+
+      createCommandPresetGroup: (group) => {
+        const id = generateId();
+        const now = Date.now();
+        set((s) => ({
+          commandPresetGroups: [
+            ...s.commandPresetGroups,
+            {
+              ...group,
+              id,
+              tags: Array.from(new Set((group.tags ?? []).filter(Boolean))),
+              commands: group.commands ?? [],
+              createdAt: now,
+              updatedAt: now,
+            },
+          ],
+        }));
+        return id;
+      },
+
+      updateCommandPresetGroup: (groupId, patch) =>
+        set((s) => ({
+          commandPresetGroups: s.commandPresetGroups.map((group) =>
+            group.id !== groupId
+              ? group
+              : {
+                  ...group,
+                  ...patch,
+                  tags: patch.tags ? Array.from(new Set(patch.tags.filter(Boolean))) : group.tags,
+                  commands: patch.commands ?? group.commands,
+                  updatedAt: Date.now(),
+                }
+          ),
+        })),
+
+      deleteCommandPresetGroup: (groupId) =>
+        set((s) => ({
+          commandPresetGroups: s.commandPresetGroups.filter((group) => group.id !== groupId),
+          profiles: s.profiles.map((profile) => ({
+            ...profile,
+            bootstrapCommandGroupIds: (profile.bootstrapCommandGroupIds ?? []).filter((id) => id !== groupId),
+          })),
+        })),
 
       // ── 会话管理 ──────────────────────────────────────────────────────────
 
@@ -944,9 +1028,13 @@ export const useSSHStore = create<SSHStore>()(
       saveContextEntry: (sessionId, entry) => {
         const entryId = generateId();
         const nextEntry: NodeContextEntry = { ...entry, id: entryId };
+        let previousVars: Record<string, string> = {};
+        let nextVars: Record<string, string> = {};
         set((s) => {
           const current = s.nodeContexts[sessionId];
+          previousVars = current?.vars ?? {};
           const entries = [...(current?.entries ?? []), nextEntry];
+          nextVars = rebuildNodeContextVars(entries);
           return {
             nodeContexts: {
               ...s.nodeContexts,
@@ -954,7 +1042,7 @@ export const useSSHStore = create<SSHStore>()(
                 sessionId,
                 connectionEpoch: current?.connectionEpoch ?? Date.now(),
                 entries,
-                vars: rebuildNodeContextVars(entries),
+                vars: nextVars,
                 bootstrapStatus: current?.bootstrapStatus ?? 'idle',
                 bootstrapError: current?.bootstrapError,
                 updatedAt: Date.now(),
@@ -962,6 +1050,7 @@ export const useSSHStore = create<SSHStore>()(
             },
           };
         });
+        syncShellVarsForSession(sessionId, previousVars, nextVars);
         return entryId;
       },
 
@@ -970,13 +1059,15 @@ export const useSSHStore = create<SSHStore>()(
           const current = s.nodeContexts[sessionId];
           if (!current) return {};
           const entries = current.entries.filter((entry) => entry.id !== entryId);
+          const nextVars = rebuildNodeContextVars(entries);
+          queueMicrotask(() => syncShellVarsForSession(sessionId, current.vars, nextVars));
           return {
             nodeContexts: {
               ...s.nodeContexts,
               [sessionId]: {
                 ...current,
                 entries,
-                vars: rebuildNodeContextVars(entries),
+                vars: nextVars,
                 updatedAt: Date.now(),
               },
             },
@@ -984,7 +1075,11 @@ export const useSSHStore = create<SSHStore>()(
         }),
 
       clearNodeContext: (sessionId) =>
-        set((s) => ({ nodeContexts: omitKey(s.nodeContexts, sessionId) })),
+        set((s) => {
+          const previousVars = s.nodeContexts[sessionId]?.vars ?? {};
+          queueMicrotask(() => syncShellVarsForSession(sessionId, previousVars, {}));
+          return { nodeContexts: omitKey(s.nodeContexts, sessionId) };
+        }),
 
       captureContextCommand: async (sessionId, config) => {
         const renderedCommand = renderTemplate(
@@ -1020,6 +1115,7 @@ export const useSSHStore = create<SSHStore>()(
       runSessionBootstrap: async (sessionId) => {
         const session = get().sessions.find((item) => item.id === sessionId);
         if (!session || session.status !== 'connected') return;
+        const profile = get().profiles.find((item) => item.id === session.profileId);
 
         const connectionEpoch = Date.now();
         set((s) => ({
@@ -1039,10 +1135,24 @@ export const useSSHStore = create<SSHStore>()(
         get().sendInputToSession(sessionId, 'export TMOUT=0\n');
         addSessionJournalEvent(sessionId, 'Shell Bootstrap', '已发送 export TMOUT=0');
 
+        const profileCommandGroups = (profile?.bootstrapCommandGroupIds ?? [])
+          .map((groupId) => get().commandPresetGroups.find((group) => group.id === groupId))
+          .filter(Boolean) as CommandPresetGroup[];
+        const profileCommands = profileCommandGroups.flatMap((group) =>
+          cloneScopedInitCommands(group.commands ?? [], {
+            id: group.id,
+            name: group.name,
+            prefix: `档案命令组 ${group.name}`,
+          })
+        );
         const groupCommands = get().sessionGroups
           .filter((group) => group.sessionIds.includes(sessionId))
-          .flatMap((group) => group.initCommands ?? []);
-        const mergedCommands = [...DEFAULT_INIT_COMMANDS, ...groupCommands];
+          .flatMap((group) => cloneScopedInitCommands(group.initCommands ?? [], {
+            id: group.id,
+            name: group.name,
+            prefix: `会话组 ${group.name}`,
+          }));
+        const mergedCommands = [...DEFAULT_INIT_COMMANDS, ...profileCommands, ...groupCommands];
 
         let failedCount = 0;
         let blockingFailure = false;
@@ -1150,7 +1260,12 @@ export const useSSHStore = create<SSHStore>()(
         if (failedCount > 0) {
           addSessionJournalEvent(sessionId, '上下文初始化异常', lastError || `初始化采集失败 ${failedCount} 项`);
         } else {
-          addSessionJournalEvent(sessionId, '上下文初始化完成', `已完成 ${mergedCommands.length} 条初始化采集命令`);
+          const exportedVarCount = Object.keys(get().nodeContexts[sessionId]?.vars ?? {}).length;
+          addSessionJournalEvent(
+            sessionId,
+            '上下文初始化完成',
+            `已完成 ${mergedCommands.length} 条初始化采集命令${exportedVarCount > 0 ? ` · ${exportedVarCount} 个 shell 变量可直接复用` : ''}`
+          );
         }
       },
 
@@ -1512,6 +1627,7 @@ export const useSSHStore = create<SSHStore>()(
       partialize:  (s) => ({
         credentials:     s.credentials,
         profiles:        s.profiles,
+        commandPresetGroups: s.commandPresetGroups,
         sessions:        s.sessions,
         sessionGroups:   s.sessionGroups,
         activeSessionId: s.activeSessionId,
