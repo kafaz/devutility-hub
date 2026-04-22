@@ -51,46 +51,94 @@ const AnalysisCheckList: React.FC<Props> = ({ checks, selectedId, onSelect, onRu
             onClick={() => onSelect(check.id)}
             style={{
               cursor: 'pointer',
-              backgroundColor: isSelected ? '#f0f5ff' : undefined,
-              padding: '12px 16px',
-              borderBottom: '1px solid #f0f0f0',
+              padding: 0,
+              borderBottom: '1px solid rgba(148, 163, 184, 0.16)',
             }}
-            actions={[
-              <Button key="run" size="small" type="primary" onClick={(e) => { e.stopPropagation(); onRun(check); }}>
-                执行
-              </Button>,
-              <Button key="edit" size="small" onClick={(e) => { e.stopPropagation(); onEdit(check); }}>
-                编辑
-              </Button>,
-              isBuiltin ? null : (
-                <Popconfirm
-                  key="delete"
-                  title="确认删除？"
-                  onConfirm={(e) => { e?.stopPropagation(); onDelete(check.id); }}
-                  onCancel={(e) => e?.stopPropagation()}
-                >
-                  <Button key="delete" size="small" danger onClick={(e) => e.stopPropagation()}>
-                    删除
-                  </Button>
-                </Popconfirm>
-              ),
-            ].filter(Boolean)}
           >
-            <List.Item.Meta
-              title={
-                <Space>
-                  <Text strong>{check.name}</Text>
-                  <Tag color={STATUS_COLORS[check.status]}>{STATUS_LABELS[check.status]}</Tag>
-                  {isBuiltin && <Tag>内置</Tag>}
-                </Space>
-              }
-              description={
-                <Space size="middle">
-                  <Text type="secondary">类型: {TYPE_LABELS[check.checkType] ?? check.checkType}</Text>
-                  <Text type="secondary">节点: {check.nodeIds.length > 0 ? check.nodeIds.join(', ') : '未指定'}</Text>
-                </Space>
-              }
-            />
+            <div
+              style={{
+                width: '100%',
+                padding: '14px 16px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 12,
+                backgroundColor: isSelected ? 'rgba(59, 130, 246, 0.16)' : 'transparent',
+                borderLeft: isSelected ? '3px solid #3b82f6' : '3px solid transparent',
+                transition: 'background-color 120ms ease, border-color 120ms ease',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', minWidth: 0 }}>
+                <Text
+                  strong
+                  style={{
+                    fontSize: 14,
+                    lineHeight: 1.4,
+                    whiteSpace: 'normal',
+                    wordBreak: 'break-word',
+                  }}
+                >
+                  {check.name}
+                </Text>
+                <Tag color={STATUS_COLORS[check.status]}>{STATUS_LABELS[check.status]}</Tag>
+                {isBuiltin && <Tag>内置</Tag>}
+              </div>
+
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(132px, 1fr))',
+                  gap: 8,
+                }}
+              >
+                <div
+                  style={{
+                    padding: '8px 10px',
+                    borderRadius: 8,
+                    background: 'rgba(148, 163, 184, 0.08)',
+                  }}
+                >
+                  <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>
+                    类型
+                  </Text>
+                  <Text style={{ fontSize: 12 }}>{TYPE_LABELS[check.checkType] ?? check.checkType}</Text>
+                </div>
+                <div
+                  style={{
+                    padding: '8px 10px',
+                    borderRadius: 8,
+                    background: 'rgba(148, 163, 184, 0.08)',
+                  }}
+                >
+                  <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 4 }}>
+                    目标节点
+                  </Text>
+                  <Text style={{ fontSize: 12, whiteSpace: 'normal', wordBreak: 'break-word' }}>
+                    {check.nodeIds.length > 0 ? check.nodeIds.join(', ') : '未指定'}
+                  </Text>
+                </div>
+              </div>
+
+              <Space size={[8, 8]} wrap onClick={(event) => event.stopPropagation()}>
+                <Button key="run" size="small" type="primary" onClick={() => onRun(check)}>
+                  执行
+                </Button>
+                <Button key="edit" size="small" onClick={() => onEdit(check)}>
+                  编辑
+                </Button>
+                {isBuiltin ? null : (
+                  <Popconfirm
+                    key="delete"
+                    title="确认删除？"
+                    onConfirm={() => onDelete(check.id)}
+                    onCancel={(event) => event?.stopPropagation()}
+                  >
+                    <Button key="delete" size="small" danger onClick={(event) => event.stopPropagation()}>
+                      删除
+                    </Button>
+                  </Popconfirm>
+                )}
+              </Space>
+            </div>
           </List.Item>
         );
       }}

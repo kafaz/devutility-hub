@@ -34,6 +34,7 @@ import {
     Divider,
     Input,
     message,
+    Modal,
     Space,
     Switch,
     Table,
@@ -188,43 +189,42 @@ const FieldCard: React.FC<{
 // ─── 标签页名称编辑组件 ──────────────────────────────────────────────────────
 const EditableTabName: React.FC<{
   name: string;
-  onSave: (newName: string) => void;
-}> = ({ name, onSave }) => {
-  const [editing, setEditing] = useState(false);
-  const [val, setVal] = useState(name);
-
-  if (editing) {
-    return (
-      <Input
-        size="small"
-        value={val}
-        autoFocus
-        onChange={e => setVal(e.target.value)}
-        onBlur={() => { setEditing(false); if (val.trim() && val !== name) onSave(val.trim()); else setVal(name); }}
-        onPressEnter={() => { setEditing(false); if (val.trim() && val !== name) onSave(val.trim()); else setVal(name); }}
-        onKeyDown={(e) => e.stopPropagation()}
-        onClick={(e) => e.stopPropagation()}
-        style={{ width: 120, fontSize: 12 }}
-      />
-    );
-  }
+  onStartEdit: () => void;
+}> = ({ name, onStartEdit }) => {
   return (
     <Space
       size={4}
-      onDoubleClick={() => {
-        setVal(name);
-        setEditing(true);
+      style={{ maxWidth: 180 }}
+      onDoubleClick={(event) => {
+        event.stopPropagation();
+        onStartEdit();
       }}
     >
-      <Text style={{ fontSize: 13 }}>{name}</Text>
-      <EditOutlined
-        style={{ fontSize: 12, color: '#6b7280', cursor: 'pointer' }}
-        onClick={(e) => {
-          e.stopPropagation();
-          setVal(name);
-          setEditing(true);
+      <Text
+        style={{
+          fontSize: 13,
+          maxWidth: 132,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
         }}
-      />
+      >
+        {name}
+      </Text>
+      <Tooltip title="重命名标签页">
+        <EditOutlined
+          style={{ fontSize: 12, color: '#6b7280', cursor: 'pointer' }}
+          onMouseDown={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onStartEdit();
+          }}
+        />
+      </Tooltip>
     </Space>
   );
 };
@@ -243,6 +243,8 @@ const CFunctionAnalyzer: React.FC = () => {
   } = useLogStore();
 
   const [parseError, setParseError] = useState('');
+  const [renamingTabId, setRenamingTabId] = useState<string | null>(null);
+  const [renamingTabDraft, setRenamingTabDraft] = useState('');
 
   // 初始化默认 Tab
   useEffect(() => {
@@ -253,9 +255,42 @@ const CFunctionAnalyzer: React.FC = () => {
 
   const activeTab = cMacroTabs.find(t => t.id === activeCMacroTabId) ?? cMacroTabs[0];
   const macroInput = activeTab?.macroInput ?? '';
+  const renamingTab = cMacroTabs.find((tab) => tab.id === renamingTabId) ?? null;
 
   const cardBg     = isDark ? '#252526' : '#ffffff';
   const borderColor = isDark ? '#3e3e42' : '#e4e4e7';
+
+  useEffect(() => {
+    if (renamingTabId && !cMacroTabs.some((tab) => tab.id === renamingTabId)) {
+      setRenamingTabId(null);
+      setRenamingTabDraft('');
+    }
+  }, [cMacroTabs, renamingTabId]);
+
+  const beginRenameTab = useCallback((tabId: string, currentName: string) => {
+    setRenamingTabId(tabId);
+    setRenamingTabDraft(currentName);
+    if (activeCMacroTabId !== tabId) {
+      setActiveCMacroTab(tabId);
+    }
+  }, [activeCMacroTabId, setActiveCMacroTab]);
+
+  const cancelRenameTab = useCallback(() => {
+    setRenamingTabId(null);
+    setRenamingTabDraft('');
+  }, []);
+
+  const saveRenamedTab = useCallback(() => {
+    if (!renamingTab) {
+      cancelRenameTab();
+      return;
+    }
+    const nextName = renamingTabDraft.trim();
+    if (nextName && nextName !== renamingTab.name) {
+      updateCMacroTab(renamingTab.id, { name: nextName });
+    }
+    cancelRenameTab();
+  }, [cancelRenameTab, renamingTab, renamingTabDraft, updateCMacroTab]);
 
   // ── 解析 C 函数调用（已由下方 useEffect 自动触发，此处保留备用） ────────
   // const handleParse = useCallback((input: string) => {
@@ -466,11 +501,34 @@ const CFunctionAnalyzer: React.FC = () => {
           }}
           items={cMacroTabs.map((tab) => ({
             key: tab.id,
-            label: <EditableTabName name={tab.name} onSave={(v) => updateCMacroTab(tab.id, { name: v })} />,
+            label: (
+              <EditableTabName
+                name={tab.name}
+                onStartEdit={() => beginRenameTab(tab.id, tab.name)}
+              />
+            ),
             children: null,
           }))}
           style={{ marginBottom: 16 }}
         />
+
+        <Modal
+          open={Boolean(renamingTab)}
+          title="重命名函数标签页"
+          okText="保存"
+          cancelText="取消"
+          destroyOnClose
+          onCancel={cancelRenameTab}
+          onOk={saveRenamedTab}
+        >
+          <Input
+            autoFocus
+            value={renamingTabDraft}
+            placeholder="输入新的标签页名称"
+            onChange={(event) => setRenamingTabDraft(event.target.value)}
+            onPressEnter={saveRenamedTab}
+          />
+        </Modal>
 
         <div style={{ padding: '0 8px' }}>
           <Space style={{ marginBottom: 8 }}>

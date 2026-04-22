@@ -1,8 +1,9 @@
 import { PlusOutlined } from '@ant-design/icons';
-import { Button, Divider, Typography } from 'antd';
+import { Button, Typography } from 'antd';
 import React, { useState } from 'react';
 import { useBenchmarkStore } from '../store/benchmarkStore';
 import { useSSHStore } from '../../SSHManager/store/sshStore';
+import { useGlobalStore } from '../../../store/globalStore';
 import type { ConsistencyCheck, ConsistencyResult, InconsistencyItem } from '../types';
 import AnalysisCheckList from './AnalysisCheckList';
 import AnalysisReportPanel from './AnalysisReportPanel';
@@ -38,6 +39,7 @@ function deepEqual(a: unknown, b: unknown): boolean {
 }
 
 const MetricsDashboard: React.FC = () => {
+  const isDark = useGlobalStore((state) => state.theme === 'dark');
   const {
     consistencyChecks,
     addConsistencyCheck,
@@ -243,8 +245,25 @@ const MetricsDashboard: React.FC = () => {
         </Button>
       </div>
 
-      <div style={{ display: 'flex', flex: 1, overflow: 'hidden', border: '1px solid #f0f0f0', borderRadius: 8 }}>
-        <div style={{ width: 320, borderRight: '1px solid #f0f0f0', overflow: 'auto' }}>
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'minmax(320px, 420px) minmax(0, 1fr)',
+          flex: 1,
+          overflow: 'hidden',
+          border: `1px solid ${isDark ? 'rgba(148, 163, 184, 0.2)' : '#e5e7eb'}`,
+          borderRadius: 12,
+          background: isDark ? '#14171c' : '#ffffff',
+        }}
+      >
+        <div
+          style={{
+            minWidth: 0,
+            overflow: 'auto',
+            borderRight: `1px solid ${isDark ? 'rgba(148, 163, 184, 0.16)' : '#eef2f7'}`,
+            background: isDark ? '#171b22' : '#fafcff',
+          }}
+        >
           <AnalysisCheckList
             checks={consistencyChecks}
             selectedId={selectedId}
@@ -254,8 +273,7 @@ const MetricsDashboard: React.FC = () => {
             onEdit={handleEdit}
           />
         </div>
-        <Divider type="vertical" style={{ height: '100%', margin: 0 }} />
-        <div style={{ flex: 1, overflow: 'auto' }}>
+        <div style={{ minWidth: 0, overflow: 'auto' }}>
           <AnalysisReportPanel check={selectedCheck} />
         </div>
       </div>
