@@ -10,10 +10,17 @@ interface MatchResult {
   fields: Record<string, string>;
 }
 
+export interface FieldValueMapping {
+  value: string;  // 原始值，如 "0", "1", "0x2"
+  label: string;  // 友好名称，如 "STATUS_OK"
+}
+
 export interface CMacroTab {
   id: string;
   name: string;
   macroInput: string;
+  // key = 参数名 (paramName)，value = 映射列表
+  fieldValueMappings?: Record<string, FieldValueMapping[]>;
 }
 
 interface LogStore {
@@ -44,6 +51,7 @@ interface LogStore {
   updateCMacroTab: (id: string, data: Partial<CMacroTab>) => void;
   deleteCMacroTab: (id: string) => void;
   setActiveCMacroTab: (id: string | null) => void;
+  updateFieldValueMappings: (tabId: string, paramName: string, mappings: FieldValueMapping[]) => void;
   setCfuncLogInput: (text: string) => void;
   setCfuncAnchored: (anchored: boolean) => void;
   setCfuncParsed: (parsed: ParsedCLogCall | null) => void;
@@ -238,6 +246,13 @@ export const useLogStore = create<LogStore>()(
       },
       updateCMacroTab: (id, data) => set((s) => ({
         cMacroTabs: s.cMacroTabs.map(t => t.id === id ? { ...t, ...data } : t),
+      })),
+      updateFieldValueMappings: (tabId, paramName, mappings) => set((s) => ({
+        cMacroTabs: s.cMacroTabs.map(t =>
+          t.id === tabId
+            ? { ...t, fieldValueMappings: { ...(t.fieldValueMappings ?? {}), [paramName]: mappings } }
+            : t
+        ),
       })),
       deleteCMacroTab: (id) => set((s) => ({
         cMacroTabs: s.cMacroTabs.filter(t => t.id !== id),

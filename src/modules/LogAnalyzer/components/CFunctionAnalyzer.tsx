@@ -24,6 +24,7 @@ import {
     EditOutlined,
     InfoCircleOutlined,
     SearchOutlined,
+    SettingOutlined,
     ThunderboltOutlined
 } from '@ant-design/icons';
 import {
@@ -48,7 +49,9 @@ import ResizableOutput from '../../../components/shared/ResizableOutput';
 import { useClipboard } from '../../../hooks/useClipboard';
 import { useGlobalStore } from '../../../store/globalStore';
 import { applyCLogRule, cFormatToRegex, downloadJSON, parseCLogMacroCall } from '../../../utils';
+import type { FieldValueMapping } from '../store/logStore';
 import { useLogStore } from '../store/logStore';
+import FieldMappingModal from './FieldMappingModal';
 
 const { Text } = Typography;
 const { TextArea } = Input;
@@ -62,13 +65,46 @@ interface MatchResult {
   fields:    Record<string, string>;
 }
 
+// ─── 值映射工具函数 ────────────────────────────────────────────────────────
+
+/**
+ * 将日志原始值尝试映射为友好名称。
+ * 对比时先尝试精确匹配，再尝试忽略大小写、去除 0x 前缀后十进制对比。
+ * @returns [label, isTranslated]
+ */
+function applyValueMapping(
+  raw: string,
+  mappings: FieldValueMapping[] | undefined
+): [string, boolean] {
+  if (!mappings || mappings.length === 0) return [raw, false];
+  const rawTrimmed = raw.trim();
+  // 精确匹配
+  for (const m of mappings) {
+    if (m.value === rawTrimmed) return [m.label, true];
+  }
+  // 尝试数值等价比较（支持 0x 十六进制）
+  const rawNum = rawTrimmed.startsWith('0x') || rawTrimmed.startsWith('0X')
+    ? parseInt(rawTrimmed, 16)
+    : Number(rawTrimmed);
+  if (!isNaN(rawNum)) {
+    for (const m of mappings) {
+      const mNum = m.value.startsWith('0x') || m.value.startsWith('0X')
+        ? parseInt(m.value, 16)
+        : Number(m.value);
+      if (!isNaN(mNum) && mNum === rawNum) return [m.label, true];
+    }
+  }
+  return [raw, false];
+}
+
 // ─── 行结果卡片（<=3行时使用，更直观） ────────────────────────────────────
 
 const FieldCard: React.FC<{
-  result:     MatchResult;
-  paramNames: string[];  // 完整表达式，如 data->attr.key.value
-  isDark:     boolean;
-}> = ({ result, paramNames, isDark }) => {
+  result:       MatchResult;
+  paramNames:   string[];  // 完整表达式，如 data->attr.key.value
+  isDark:       boolean;
+  fieldMappings?: Record<string, FieldValueMapping[]>;
+}> = ({ result, paramNames, isDark, fieldMappings }) => {
   const { copy } = useClipboard();
 
   return (
@@ -154,17 +190,29 @@ const FieldCard: React.FC<{
                 </td>
                 {/* 分隔符列 */}
                 <td style={{ color: isDark ? '#6b7280' : '#9ca3af', paddingRight: 8, verticalAlign: 'top', paddingBottom: 4 }}>:</td>
-                {/* 值列：可换行 */}
+                {/* 值列：可换行，支持值映射翻译 */}
                 <td style={{ verticalAlign: 'top', paddingBottom: 4 }}>
-                  <span
-                    style={{
-                      color:      isDark ? '#fbbf24' : '#92400e',
-                      fontSize:    13,
-                      wordBreak:  'break-all',
-                    }}
-                  >
-                    {result.fields[name] !== undefined ? result.fields[name] : '—'}
-                  </span>
+                  {(() => {
+                    const raw = result.fields[name];
+                    if (raw === undefined) return <span style={{ color: isDark ? '#6b7280' : '#9ca3af', fontSize: 13 }}>—</span>;
+                    const [label, translated] = applyValueMapping(String(raw), fieldMappings?.[name]);
+                    return translated ? (
+                      <Tooltip title={`原始值: ${raw}`}>
+                        <span style={{ cursor: 'help' }}>
+                          <span style={{ color: isDark ? '#34d399' : '#059669', fontSize: 13, fontWeight: 600, wordBreak: 'break-all' }}>
+                            {label}
+                          </span>
+                          <span style={{ color: isDark ? '#6b7280' : '#9ca3af', fontSize: 11, marginLeft: 4 }}>
+                            ({raw})
+                          </span>
+                        </span>
+                      </Tooltip>
+                    ) : (
+                      <span style={{ color: isDark ? '#fbbf24' : '#92400e', fontSize: 13, wordBreak: 'break-all' }}>
+                        {raw}
+                      </span>
+                    );
+                  })()}
                 </td>
                 {/* 复制值 */}
                 <td style={{ verticalAlign: 'top', paddingBottom: 4, paddingLeft: 8 }}>
@@ -172,7 +220,7 @@ const FieldCard: React.FC<{
                     <Tooltip title="复制值">
                       <CopyOutlined
                         style={{ fontSize: 11, color: '#6b7280', cursor: 'pointer' }}
-                        onClick={() => copy(result.fields[name])}
+                        onClick={() => copy(String(result.fields[name]))}
                       />
                     </Tooltip>
                   )}
@@ -239,11 +287,13 @@ const CFunctionAnalyzer: React.FC = () => {
   const {
     cMacroTabs, activeCMacroTabId, cfuncLogInput, cfuncAnchored, cfuncParsed, cfuncResults,
     addCMacroTab, updateCMacroTab, deleteCMacroTab, setActiveCMacroTab,
-    setCfuncLogInput, setCfuncAnchored, setCfuncParsed, setCfuncResults
+    setCfuncLogInput, setCfuncAnchored, setCfuncParsed, setCfuncResults,
+    updateFieldValueMappings,
   } = useLogStore();
 
   const [parseError, setParseError] = useState('');
   const [renamingTabId, setRenamingTabId] = useState<string | null>(null);
+  const [mappingModalOpen, setMappingModalOpen] = useState(false);
   const [renamingTabDraft, setRenamingTabDraft] = useState('');
 
   // 初始化默认 Tab
@@ -418,49 +468,60 @@ const CFunctionAnalyzer: React.FC = () => {
             v ? <CheckCircleOutlined style={{ color: '#22c55e' }} />
               : <CloseCircleOutlined style={{ color: '#ef4444' }} />,
         },
-        ...cfuncParsed.paramNames.map((name) => ({
-          width:    Math.min(280, Math.max(120, name.length * 9 + 24)),
-          ellipsis: { showTitle: false },
-          title: (
-            <Tooltip title={name} placement="topLeft">
-              <span
-                style={{
-                  fontFamily:    'JetBrains Mono, Consolas, monospace',
-                  fontSize:       12,
-                  display:       'inline-block',
-                  maxWidth:       260,
-                  overflow:      'hidden',
-                  textOverflow:  'ellipsis',
-                  whiteSpace:    'nowrap',
-                  verticalAlign: 'bottom',
-                  color:          isDark ? '#93c5fd' : '#1d4ed8',
-                  fontWeight:     600,
-                }}
-              >
-                {name}
-              </span>
-            </Tooltip>
-          ),
-          key:      name,
-          render:   (_: unknown, rec: MatchResult) => {
-            const val = rec.matched ? (rec.fields[name] ?? '—') : '—';
-            return (
-              <Tooltip title={rec.matched && rec.fields[name] ? rec.fields[name] : undefined}>
-                <Text
+        ...cfuncParsed.paramNames.map((name) => {
+          const fieldMappings = activeTab?.fieldValueMappings;
+          return {
+            width:    Math.min(280, Math.max(120, name.length * 9 + 24)),
+            ellipsis: { showTitle: false },
+            title: (
+              <Tooltip title={name} placement="topLeft">
+                <span
                   style={{
-                    fontFamily: 'JetBrains Mono, Consolas, monospace',
-                    fontSize:    12,
-                    color:       rec.matched && rec.fields[name] !== undefined
-                      ? (isDark ? '#fbbf24' : '#92400e')
-                      : (isDark ? '#6b7280' : '#9ca3af'),
+                    fontFamily:    'JetBrains Mono, Consolas, monospace',
+                    fontSize:       12,
+                    display:       'inline-block',
+                    maxWidth:       260,
+                    overflow:      'hidden',
+                    textOverflow:  'ellipsis',
+                    whiteSpace:    'nowrap',
+                    verticalAlign: 'bottom',
+                    color:          isDark ? '#93c5fd' : '#1d4ed8',
+                    fontWeight:     600,
                   }}
                 >
-                  {val}
-                </Text>
+                  {name}
+                </span>
               </Tooltip>
-            );
-          },
-        })),
+            ),
+            key:      name,
+            render:   (_: unknown, rec: MatchResult) => {
+              if (!rec.matched || rec.fields[name] === undefined) {
+                return <Text style={{ fontSize: 12, color: isDark ? '#6b7280' : '#9ca3af' }}>—</Text>;
+              }
+              const raw = String(rec.fields[name]);
+              const [label, translated] = applyValueMapping(raw, fieldMappings?.[name]);
+              if (translated) {
+                return (
+                  <Tooltip title={`原始值: ${raw}`}>
+                    <span style={{ cursor: 'help' }}>
+                      <Text style={{ fontFamily: 'JetBrains Mono, Consolas, monospace', fontSize: 12, color: isDark ? '#34d399' : '#059669', fontWeight: 600 }}>
+                        {label}
+                      </Text>
+                      <Text type="secondary" style={{ fontSize: 10, marginLeft: 3 }}>({raw})</Text>
+                    </span>
+                  </Tooltip>
+                );
+              }
+              return (
+                <Tooltip title={raw}>
+                  <Text style={{ fontFamily: 'JetBrains Mono, Consolas, monospace', fontSize: 12, color: isDark ? '#fbbf24' : '#92400e' }}>
+                    {raw}
+                  </Text>
+                </Tooltip>
+              );
+            },
+          };
+        }),
         {
           title:      '原始行',
           dataIndex:  'rawLine',
@@ -567,11 +628,23 @@ const CFunctionAnalyzer: React.FC = () => {
           title={<Text strong>解析结果</Text>}
           style={{ background: cardBg, border: `1px solid #22c55e44` }}
           extra={
-            cfuncParsed.mismatch && (
-              <Tag color="warning">
-                ⚠️ 格式符 {cfuncParsed.specifierCount} 个 ≠ 参数 {cfuncParsed.paramNames.length} 个
-              </Tag>
-            )
+            <Space>
+              <Tooltip title="配置字段值映射（魔鬼数字 → 枚举名）">
+                <Button
+                  size="small"
+                  type="text"
+                  icon={<SettingOutlined />}
+                  onClick={() => setMappingModalOpen(true)}
+                >
+                  值映射
+                </Button>
+              </Tooltip>
+              {cfuncParsed.mismatch && (
+                <Tag color="warning">
+                  ⚠️ 格式符 {cfuncParsed.specifierCount} 个 ≠ 参数 {cfuncParsed.paramNames.length} 个
+                </Tag>
+              )}
+            </Space>
           }
         >
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
@@ -753,6 +826,7 @@ const CFunctionAnalyzer: React.FC = () => {
                 result={r}
                 paramNames={cfuncParsed.paramNames}
                 isDark={isDark}
+                fieldMappings={activeTab?.fieldValueMappings}
               />
             ))
           ) : (
@@ -774,6 +848,18 @@ const CFunctionAnalyzer: React.FC = () => {
             />
           )}
         </Card>
+      )}
+
+      {/* 字段值映射配置 Modal */}
+      {cfuncParsed && activeTab && (
+        <FieldMappingModal
+          open={mappingModalOpen}
+          tabName={activeTab.name}
+          paramNames={cfuncParsed.paramNames}
+          mappings={activeTab.fieldValueMappings ?? {}}
+          onSave={(paramName, mappings) => updateFieldValueMappings(activeTab.id, paramName, mappings)}
+          onCancel={() => setMappingModalOpen(false)}
+        />
       )}
     </div>
   );

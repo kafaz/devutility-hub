@@ -22,12 +22,12 @@ import {
     Typography,
     message,
 } from 'antd';
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ResizableOutput from '../../components/shared/ResizableOutput';
 import { useLocalStorage } from '../../hooks/useLocalStorage';
 import { useGlobalStore } from '../../store/globalStore';
 import { extractFunctionCandidates, type FunctionCandidateToken } from '../../utils/sourceLookupHints';
-import { highlightCLines } from './cHighlight';
+import { highlightCLine } from './cHighlight';
 
 const { Title, Text, Paragraph } = Typography;
 const { Panel } = Collapse;
@@ -154,6 +154,15 @@ interface CommandRunRecord {
   functionCandidates: FunctionCandidateToken[];
 }
 
+/** 高亮计算完成前的纯文本 fallback，仅做 HTML 转义 */
+function escapeHtmlPlain(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 function makeClientId(prefix = 'ctx') {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -174,6 +183,84 @@ function clampPaneRatio(rawRatio: number, containerWidth: number) {
   const safeRatio = Number.isFinite(rawRatio) ? rawRatio : DEFAULT_SPLIT_RATIO;
   return Math.min(maxRatio, Math.max(minRatio, safeRatio));
 }
+
+// 命令运行历史卡片 — React.memo 防止无关状态变化触发重渲染
+const CommandRunCard = React.memo(function CommandRunCard({
+  item,
+  isDark,
+  mutedBg,
+  borderColor,
+  activeFunctionToken,
+  onCandidateClick,
+  onTextSelect,
+}: {
+  item: CommandRunRecord;
+  isDark: boolean;
+  mutedBg: string;
+  borderColor: string;
+  activeFunctionToken: FunctionCandidateToken | null;
+  onCandidateClick: (c: FunctionCandidateToken) => void;
+  onTextSelect: (text: string) => void;
+}) {
+  return (
+    <Card
+      size="small"
+      style={{ background: mutedBg, border: `1px solid ${borderColor}` }}
+      title={
+        <Space wrap>
+          <Text strong>{item.sessionLabel}</Text>
+          <Tag>{item.mode}</Tag>
+          <Tag color={item.exitCode === 0 ? 'success' : 'error'}>exit {item.exitCode}</Tag>
+          <Tag>{item.durationMs}ms</Tag>
+        </Space>
+      }
+    >
+      <Space direction="vertical" size={10} style={{ width: '100%' }}>
+        <Text code>{item.command}</Text>
+        <div>
+          <Text type="secondary">C 函数候选</Text>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
+            {item.functionCandidates.length === 0 ? (
+              <Text type="secondary">未从本次输出里识别到明显 C 函数名</Text>
+            ) : (
+              item.functionCandidates.map((candidate) => (
+                <Tooltip key={`${item.id}-${candidate.token}`} title={candidate.sampleLine}>
+                  <Tag
+                    color={activeFunctionToken?.token === candidate.token ? 'magenta' : 'blue'}
+                    style={{ cursor: 'pointer', paddingInline: 10 }}
+                    onClick={() => onCandidateClick(candidate)}
+                  >
+                    {candidate.token} · {candidate.hits}
+                  </Tag>
+                </Tooltip>
+              ))
+            )}
+          </div>
+        </div>
+        {item.stdout && (
+          <div>
+            <Text strong>stdout</Text>
+            <ResizableOutput
+              content={item.stdout}
+              isDark={isDark} minHeight={56} maxHeight={220}
+              onTextSelect={onTextSelect}
+            />
+          </div>
+        )}
+        {item.stderr && (
+          <div>
+            <Text strong>stderr</Text>
+            <ResizableOutput
+              content={item.stderr}
+              isDark={isDark} minHeight={56} maxHeight={220}
+              onTextSelect={onTextSelect}
+            />
+          </div>
+        )}
+      </Space>
+    </Card>
+  );
+});
 
 const CodeContextExplorer: React.FC = () => {
   const isDark = useGlobalStore((state) => state.theme === 'dark');
@@ -232,6 +319,88 @@ const CodeContextExplorer: React.FC = () => {
   const renderKeyRef = useRef(0);
 
   const activeContext = activeContexts.find((c) => c.contextId === activeContextId) || null;
+  // stable ref so searchFunctions useCallback doesn't recreate on every render
+  const activeContextRef = useRef(activeContext);
+  useEffect(() => { activeContextRef.current = activeContext; }, [activeContext]);
+
+  // 异步语法高亮：分批次处理，利用 requestIdleCallback 不阶塞任意帧
+  const HIGHLIGHT_CHUNK = 60; // 每次空闲切片处理的行数
+  const [highlightedHtml, setHighlightedHtml] = useState<string[]>([]);
+  const highlightVersionRef = useRef(0);
+  // stable key：只有符号 id + 上下文行数变化时才重新高亮
+  const highlightKey = rendered ? `${rendered.symbol.id}:${rendered.lines.length}` : '';
+
+  useEffect(() => {
+    if (!rendered?.lines?.length) { setHighlightedHtml([]); return; }
+    const version = ++highlightVersionRef.current;
+    const lines = rendered.lines;
+    const dark = isDark;
+    const result: string[] = new Array(lines.length);
+    let offset = 0;
+    let inBlock = false;
+
+    const idleSupported = typeof requestIdleCallback !== 'undefined';
+    const handles: number[] = [];
+
+    function processChunk() {
+      const end = Math.min(offset + HIGHLIGHT_CHUNK, lines.length);
+      for (let i = offset; i < end; i++) {
+        const { html, endsInBlockComment } = highlightCLine(lines[i].text, inBlock, dark);
+        inBlock = endsInBlockComment;
+        result[i] = html;
+      }
+      offset = end;
+      if (offset < lines.length) {
+        if (version !== highlightVersionRef.current) return;
+        if (idleSupported) {
+          handles.push(requestIdleCallback(processChunk, { timeout: 120 }));
+        } else {
+          handles.push(setTimeout(processChunk, 0) as unknown as number);
+        }
+      } else {
+        if (version === highlightVersionRef.current) {
+          setHighlightedHtml(result);
+        }
+      }
+    }
+
+    // 开始处理第一批（延迟到下一帧后）
+    const startHandle = setTimeout(processChunk, 0);
+    return () => {
+      clearTimeout(startHandle);
+      handles.forEach((h) => {
+        if (idleSupported && typeof h === 'number') cancelIdleCallback(h);
+        else clearTimeout(h);
+      });
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [highlightKey, isDark]);
+
+  // 虚拟滚动：用 rAF ref 节流，避免每个 scroll 事件都触发 React re-render
+  const VIRTUAL_BUFFER = 40;
+  const [scrollTop, setScrollTop] = useState(0);
+  const scrollRafRef = useRef<number | null>(null);
+
+  const handlePanelScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    const top = (e.currentTarget as HTMLDivElement).scrollTop;
+    if (scrollRafRef.current !== null) return; // 当前帧已排队
+    scrollRafRef.current = requestAnimationFrame(() => {
+      setScrollTop(top);
+      scrollRafRef.current = null;
+    });
+  }, []);
+
+  const visibleRange = useMemo(() => {
+    if (!rendered?.lines || !rendered.lines.length) return { start: 0, end: 0 };
+    const panelHeight = 820;
+    const firstVisible = Math.max(0, Math.floor(scrollTop / APPROX_LINE_HEIGHT) - VIRTUAL_BUFFER);
+    const lastVisible = Math.min(
+      rendered.lines.length,
+      Math.ceil((scrollTop + panelHeight) / APPROX_LINE_HEIGHT) + VIRTUAL_BUFFER
+    );
+    return { start: firstVisible, end: lastVisible };
+  }, [scrollTop, rendered?.lines]);
+
 
   useEffect(() => {
     void fetchSessions();
@@ -413,9 +582,10 @@ const CodeContextExplorer: React.FC = () => {
     setActiveContexts(nextContexts);
   }
 
-  async function searchFunctions(nextQuery?: string) {
+  const searchFunctions = useCallback(async (nextQuery?: string) => {
     const effectiveQuery = String(nextQuery ?? query).trim();
-    if (!activeContext) {
+    const ctx = activeContextRef.current;
+    if (!ctx) {
       messageApi.warning('请先绑定 repo / branch / commit，对 C 代码建立上下文');
       return;
     }
@@ -432,7 +602,7 @@ const CodeContextExplorer: React.FC = () => {
     setSearching(true);
     try {
       const response = await fetch(
-        `${PROXY_HTTP}/api/code-context/${encodeURIComponent(activeContext.contextId)}/symbols?q=${encodeURIComponent(effectiveQuery)}&limit=80`
+        `${PROXY_HTTP}/api/code-context/${encodeURIComponent(ctx.contextId)}/symbols?q=${encodeURIComponent(effectiveQuery)}&limit=80`
       );
       const data = await response.json();
 
@@ -457,7 +627,9 @@ const CodeContextExplorer: React.FC = () => {
     } finally {
       setSearching(false);
     }
-  }
+  // query 允许在回调内直接传入，不必作为 dep
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function renderSelectedSymbol(contextId: string, symbolId: string) {
     renderKeyRef.current += 1;
@@ -584,7 +756,11 @@ const CodeContextExplorer: React.FC = () => {
       messageApi.success(`命令执行完成，exit=${runRecord.exitCode}`);
 
       if (activeContext && runRecord.functionCandidates.length > 0) {
-        void handleFunctionCandidateClick(runRecord.functionCandidates[0]);
+        // 用 setTimeout 将自动搜索消费延迟到下一个事件循环循环，
+        // 避免和 "setCommandRuns + success toast" 在同一批 React 更新中堆叠导致卡顿
+        setTimeout(() => {
+          void handleFunctionCandidateClick(runRecord.functionCandidates[0]);
+        }, 0);
       }
     } catch {
       messageApi.error('节点命令执行失败');
@@ -593,18 +769,18 @@ const CodeContextExplorer: React.FC = () => {
     }
   }
 
-  async function handleFunctionCandidateClick(candidate: FunctionCandidateToken) {
+  const handleFunctionCandidateClick = useCallback(async (candidate: FunctionCandidateToken) => {
     setActiveFunctionToken(candidate);
     setQuery(candidate.query);
     await searchFunctions(candidate.query);
-  }
+  }, [searchFunctions]);
 
-  async function handleTextSelect(text: string) {
+  const handleTextSelect = useCallback(async (text: string) => {
     if (!text || text.length < 2) return;
     setQuery(text);
     setActiveFunctionToken({ token: text, query: text, hits: 1, sampleLine: `手动选取: ${text}` });
     await searchFunctions(text);
-  }
+  }, [searchFunctions]);
 
   function handleSelectSymbol(item: SymbolCandidate) {
     setSelectedSymbol(item);
@@ -728,7 +904,6 @@ const CodeContextExplorer: React.FC = () => {
   const borderColor = isDark ? '#3e3e42' : '#e4e4e7';
   const mutedBg = isDark ? '#1f1f1f' : '#fafafa';
   const codeBg = isDark ? '#111827' : '#f8fafc';
-  const currentSession = sessions.find((item) => item.sessionId === selectedSessionId);
   const isStackedLayout = contentWidth > 0 && contentWidth < STACK_LAYOUT_BREAKPOINT;
   const effectiveSplitRatio = clampPaneRatio(splitRatio, contentWidth || (MIN_LEFT_PANEL_WIDTH + MIN_RIGHT_PANEL_WIDTH + SPLIT_HANDLE_WIDTH));
   const leftPaneWidth = !contentWidth || isStackedLayout
@@ -741,10 +916,7 @@ const CodeContextExplorer: React.FC = () => {
   const isStackedCommandLayout = leftPaneContentWidth > 0 && leftPaneContentWidth < 560;
   const compactSearchButton = leftPaneContentWidth > 0 && leftPaneContentWidth < 620;
 
-  const highlightedHtml = useMemo(() => {
-    if (!rendered?.lines) return [];
-    return highlightCLines(rendered.lines, isDark);
-  }, [rendered?.lines, isDark]);
+  const currentSession = sessions.find((item) => item.sessionId === selectedSessionId);
 
   return (
     <div style={{ padding: 24 }}>
@@ -943,65 +1115,15 @@ const CodeContextExplorer: React.FC = () => {
                   dataSource={commandRuns}
                   renderItem={(item) => (
                     <List.Item style={{ display: 'block', paddingInline: 0 }}>
-                      <Card
-                        size="small"
-                        style={{ background: mutedBg, border: `1px solid ${borderColor}` }}
-                        title={
-                          <Space wrap>
-                            <Text strong>{item.sessionLabel}</Text>
-                            <Tag>{item.mode}</Tag>
-                            <Tag color={item.exitCode === 0 ? 'success' : 'error'}>exit {item.exitCode}</Tag>
-                            <Tag>{item.durationMs}ms</Tag>
-                          </Space>
-                        }
-                      >
-                        <Space direction="vertical" size={10} style={{ width: '100%' }}>
-                          <Text code>{item.command}</Text>
-
-                          <div>
-                            <Text type="secondary">C 函数候选</Text>
-                            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
-                              {item.functionCandidates.length === 0 ? (
-                                <Text type="secondary">未从本次输出里识别到明显 C 函数名</Text>
-                              ) : (
-                                item.functionCandidates.map((candidate) => (
-                                  <Tooltip key={`${item.id}-${candidate.token}`} title={candidate.sampleLine}>
-                                    <Tag
-                                      color={activeFunctionToken?.token === candidate.token ? 'magenta' : 'blue'}
-                                      style={{ cursor: 'pointer', paddingInline: 10 }}
-                                      onClick={() => void handleFunctionCandidateClick(candidate)}
-                                    >
-                                      {candidate.token} · {candidate.hits}
-                                    </Tag>
-                                  </Tooltip>
-                                ))
-                              )}
-                            </div>
-                          </div>
-
-                          {item.stdout && (
-                            <div>
-                              <Text strong>stdout</Text>
-                              <ResizableOutput
-                                content={item.stdout}
-                                isDark={isDark} minHeight={56} maxHeight={220}
-                                onTextSelect={(text) => void handleTextSelect(text)}
-                              />
-                            </div>
-                          )}
-
-                          {item.stderr && (
-                            <div>
-                              <Text strong>stderr</Text>
-                              <ResizableOutput
-                                content={item.stderr}
-                                isDark={isDark} minHeight={56} maxHeight={220}
-                                onTextSelect={(text) => void handleTextSelect(text)}
-                              />
-                            </div>
-                          )}
-                        </Space>
-                      </Card>
+                      <CommandRunCard
+                        item={item}
+                        isDark={isDark}
+                        mutedBg={mutedBg}
+                        borderColor={borderColor}
+                        activeFunctionToken={activeFunctionToken}
+                        onCandidateClick={(c) => void handleFunctionCandidateClick(c)}
+                        onTextSelect={(text) => void handleTextSelect(text)}
+                      />
                     </List.Item>
                   )}
                 />
@@ -1311,6 +1433,7 @@ const CodeContextExplorer: React.FC = () => {
                   ref={codePanelRef}
                   onWheel={handleCodeWheel}
                   onClick={handleCodeClick}
+                  onScroll={handlePanelScroll}
                   style={{
                     height: 820,
                     overflow: 'auto',
@@ -1326,9 +1449,16 @@ const CodeContextExplorer: React.FC = () => {
                     </div>
                   )}
 
-                  {rendered.lines.map((line, idx) => (
+                  {/* 虚拟化：顶部占位空白 */}
+                  {visibleRange.start > 0 && (
+                    <div style={{ height: visibleRange.start * APPROX_LINE_HEIGHT }} />
+                  )}
+
+                  {rendered.lines.slice(visibleRange.start, visibleRange.end).map((line, relIdx) => {
+                    const idx = visibleRange.start + relIdx;
+                    return (
                     <div
-                      key={`${line.lineNumber}-${line.text}`}
+                      key={line.lineNumber}
                       style={{
                         display: 'grid',
                         gridTemplateColumns: '72px 1fr',
@@ -1363,10 +1493,16 @@ const CodeContextExplorer: React.FC = () => {
                           fontSize: 12,
                           color: isDark ? '#e5e7eb' : '#111827',
                         }}
-                        dangerouslySetInnerHTML={{ __html: highlightedHtml[idx] || ' ' }}
+                        dangerouslySetInnerHTML={{ __html: highlightedHtml[idx] || escapeHtmlPlain(line.text) }}
                       />
                     </div>
-                  ))}
+                    );
+                  })}
+
+                  {/* 虚拟化：底部占位空白 */}
+                  {rendered.lines.length > visibleRange.end && (
+                    <div style={{ height: (rendered.lines.length - visibleRange.end) * APPROX_LINE_HEIGHT }} />
+                  )}
                 </div>
               </Space>
             )}
