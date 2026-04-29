@@ -13,7 +13,7 @@
     "preview": "vite preview",
     "test:server": "node --test scripts/ensure-server-deps.test.mjs server/runtimeHelpers.test.cjs server/proxyServer.test.cjs server/test/logNoise.test.js server/test/prepareRuntime.test.js server/test/prepareProfiles.test.js",
     "test:server:integration": "node --test server/test/commandPolicyRoutes.test.js server/test/diagnosticWorkbenchRoutes.test.js",
-    "test:web": "node --test src/utils/logNoise.test.ts src/modules/SSHManager/prepareInsights.test.ts src/modules/SSHManager/shellVars.test.ts src/modules/DiagnosticWorkbench/viewModel.test.ts src/modules/DiagnosticWorkbench/LocalizationDesk/workbenchPersistence.test.ts src/modules/DiagnosticWorkbench/LocalizationDesk/manualCommandRuns.test.ts src/modules/DiagnosticWorkbench/LocalizationDesk/localizationDeskState.test.ts src/modules/DiagnosticWorkbench/LocalizationDesk/timelineWhiteboard.test.ts src/modules/DiagnosticWorkbench/LocalizationDesk/codeProvenanceLane.test.ts"
+    "test:web": "node --test src/utils/logNoise.test.ts src/modules/SSHManager/prepareInsights.test.ts src/modules/SSHManager/shellVars.test.ts src/modules/SSHManager/terminalResize.test.ts src/modules/DiagnosticWorkbench/viewModel.test.ts src/modules/DiagnosticWorkbench/LocalizationDesk/workbenchPersistence.test.ts src/modules/DiagnosticWorkbench/LocalizationDesk/manualCommandRuns.test.ts src/modules/DiagnosticWorkbench/LocalizationDesk/localizationDeskState.test.ts src/modules/DiagnosticWorkbench/LocalizationDesk/timelineWhiteboard.test.ts src/modules/DiagnosticWorkbench/LocalizationDesk/codeProvenanceLane.test.ts"
   },
   "dependencies": {
     "@ant-design/icons": "^6.1.0",

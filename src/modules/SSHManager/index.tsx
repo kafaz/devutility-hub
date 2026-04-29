@@ -79,6 +79,10 @@ import { useCronStore } from './store/cronStore';
 import { useJournalStore } from './store/journalStore';
 import type { CommandPresetGroup, NodeExecution, PlanStepResult, SessionGroup, SSHProfile, SSHSession } from './store/sshStore';
 import { getTerminalBuffer, recordManualCommandStart, useSSHStore } from './store/sshStore';
+import {
+  shouldPublishTerminalResize,
+  type TerminalResizeDimensions,
+} from './terminalResize';
 
 const { Title, Text } = Typography;
 const { Password } = Input;
@@ -447,6 +451,10 @@ const TerminalInstance: React.FC<{
   const fitAddonRef = useRef<FitAddon | null>(null);
   const decorationDisposablesRef = useRef<Array<{ dispose: () => void }>>([]);
   const refreshFrameRef = useRef<number | null>(null);
+  const resizeFrameRef = useRef<number | null>(null);
+  const lastResizeDimsRef = useRef<TerminalResizeDimensions | null>(null);
+  const visibleRef = useRef(visible);
+  const onResizeRef = useRef(onResize);
   const [searchOpen, setSearchOpen]   = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [highlightOpen, setHighlightOpen] = useState(false);
@@ -459,6 +467,8 @@ const TerminalInstance: React.FC<{
   const highlightRulesRef = useRef(highlightRules);
   highlightRulesRef.current = highlightRules;
   const activeHighlightRule = highlightRules.find((rule) => rule.id === activeHighlightRuleId) || highlightRules[0] || null;
+  visibleRef.current = visible;
+  onResizeRef.current = onResize;
 
   const clearScreenDecorations = React.useCallback(() => {
     decorationDisposablesRef.current.forEach((disposable) => disposable.dispose());
@@ -520,6 +530,48 @@ const TerminalInstance: React.FC<{
     });
   }, [refreshScreenHighlights]);
 
+  const fitAndPublishResize = React.useCallback(() => {
+    const term = termRef.current;
+    const fit = fitAddonRef.current;
+    if (!term || !fit || !visibleRef.current) return;
+
+    const proposedDimensions = fit.proposeDimensions();
+    if (!proposedDimensions) return;
+
+    const nextDimensions = {
+      cols: proposedDimensions.cols,
+      rows: proposedDimensions.rows,
+    };
+    if (!shouldPublishTerminalResize({
+      visible: visibleRef.current,
+      next: nextDimensions,
+      last: lastResizeDimsRef.current,
+    })) {
+      return;
+    }
+
+    fit.fit();
+    const actualDimensions = { cols: term.cols, rows: term.rows };
+    if (!shouldPublishTerminalResize({
+      visible: visibleRef.current,
+      next: actualDimensions,
+      last: lastResizeDimsRef.current,
+    })) {
+      return;
+    }
+
+    lastResizeDimsRef.current = actualDimensions;
+    onResizeRef.current(actualDimensions.cols, actualDimensions.rows);
+  }, []);
+
+  const scheduleFitAndPublishResize = React.useCallback(() => {
+    if (resizeFrameRef.current != null) return;
+    resizeFrameRef.current = requestAnimationFrame(() => {
+      resizeFrameRef.current = null;
+      fitAndPublishResize();
+    });
+  }, [fitAndPublishResize]);
+
   const navigateHighlightRule = (direction: 'next' | 'prev') => {
     if (!activeHighlightRule) return;
     const searchOptions = {
@@ -559,6 +611,7 @@ const TerminalInstance: React.FC<{
 
   useEffect(() => {
     if (!ref.current) return;
+    lastResizeDimsRef.current = null;
     const term = new Terminal({
       theme: isDark
         ? { background: '#1e1e1e', foreground: '#d4d4d8', cursor: '#3b82f6' }
@@ -584,17 +637,14 @@ const TerminalInstance: React.FC<{
       term.write(buf);
     }
 
-    requestAnimationFrame(() => {
-      fit.fit();
-      onResize(term.cols, term.rows);
-      scheduleScreenHighlightRefresh();
-    });
+    scheduleFitAndPublishResize();
+    scheduleScreenHighlightRefresh();
 
     const d1 = term.onData(onInput);
     const d2 = term.onRender(() => scheduleScreenHighlightRefresh());
     const d3 = term.onScroll(() => scheduleScreenHighlightRefresh());
     const d4 = term.onResize(() => scheduleScreenHighlightRefresh());
-    const ro = new ResizeObserver(() => { if (visible) { fit.fit(); onResize(term.cols, term.rows); } });
+    const ro = new ResizeObserver(() => scheduleFitAndPublishResize());
     ro.observe(ref.current);
 
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -641,23 +691,23 @@ const TerminalInstance: React.FC<{
       if (refreshFrameRef.current != null) {
         cancelAnimationFrame(refreshFrameRef.current);
       }
+      if (resizeFrameRef.current != null) {
+        cancelAnimationFrame(resizeFrameRef.current);
+      }
       term.dispose();
       termRef.current = null;
       fitAddonRef.current = null;
+      lastResizeDimsRef.current = null;
       document.removeEventListener('keydown', handleKeyDown);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, isDark]);
+  }, [sessionId, isDark, scheduleFitAndPublishResize, scheduleScreenHighlightRefresh]);
 
   useEffect(() => {
-    if (!visible || !termRef.current || !fitAddonRef.current) return;
-    requestAnimationFrame(() => {
-      fitAddonRef.current?.fit();
-      if (!termRef.current) return;
-      onResize(termRef.current.cols, termRef.current.rows);
-      scheduleScreenHighlightRefresh();
-    });
-  }, [visible, onResize, scheduleScreenHighlightRefresh]);
+    if (!visible) return;
+    scheduleFitAndPublishResize();
+    scheduleScreenHighlightRefresh();
+  }, [visible, scheduleFitAndPublishResize, scheduleScreenHighlightRefresh]);
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%', display: visible ? 'flex' : 'none', flexDirection: 'column', gap: 8 }}>
