@@ -17,9 +17,14 @@ import {
 } from 'antd';
 
 import ResizableOutput from '../../../components/shared/ResizableOutput';
+import {
+  extractCLookupHints,
+  type FunctionCandidateToken,
+} from '../../../utils/sourceLookupHints';
 
 import type {
   LocalizationDeskSessionLogItem,
+  LocalizationDeskSourceLocatePreferred,
   LocalizationDeskSourceLocateRequest,
   LogContextWindow,
 } from './types.ts';
@@ -60,12 +65,29 @@ export interface SessionLogLaneProps {
   onOpenEvidenceBasket(): void;
   onLockEvidence?(log: LocalizationDeskSessionLogItem): void;
   onSendToWhiteboard?(log: LocalizationDeskSessionLogItem): void;
-  onLocateSource(request: LocalizationDeskSourceLocateRequest): void;
+  onLocateSource(
+    request: LocalizationDeskSourceLocateRequest,
+    preferred?: LocalizationDeskSourceLocatePreferred
+  ): void;
   canLocateSource?(lookupText: string): boolean;
 }
 
 function renderNavigatorSummary(log: LocalizationDeskSessionLogItem) {
   return clipText(log.message || log.cmd || log.stderr || log.stdout, 88) || '当前日志没有可预览的文本字段';
+}
+
+function buildSessionLogSourceRequest(
+  item: LocalizationDeskSessionLogItem,
+  lookupText: string
+): LocalizationDeskSourceLocateRequest {
+  return {
+    title: `会话日志: ${item.type}`,
+    summary: item.message || `exit=${item.exitCode ?? '-'} / duration=${item.durationMs ?? '-'}ms`,
+    sourceType: 'session_log',
+    text: lookupText,
+    parts: [item.type, item.message, item.stdout, item.stderr],
+    command: item.cmd,
+  };
 }
 
 export default function SessionLogLane(props: SessionLogLaneProps) {
@@ -154,7 +176,27 @@ export default function SessionLogLane(props: SessionLogLaneProps) {
                 renderItem={(item) => {
                   const lookupText = buildLookupText([item.type, item.message, item.stdout, item.stderr]);
                   const canLocate = props.canLocateSource?.(lookupText) ?? false;
+                  const functionCandidates = extractCLookupHints(lookupText).functions.slice(0, 6);
                   const isAnchor = item.id === anchorLog?.id;
+                  const locateFunction = (candidate: FunctionCandidateToken) => {
+                    const request = buildSessionLogSourceRequest(item, lookupText);
+                    props.onLocateSource(request, { functionCandidate: candidate });
+                  };
+                  const locateSelectedText = (text: string, streamName: 'stdout' | 'stderr') => {
+                    const selectedFunctions = extractCLookupHints(text).functions;
+                    props.onLocateSource(
+                      {
+                        title: `会话日志 ${streamName}: ${item.type}`,
+                        summary: item.message || `手动选取 ${streamName} 中的线索`,
+                        sourceType: 'session_log_selection',
+                        text,
+                        command: item.cmd,
+                      },
+                      selectedFunctions.length === 1
+                        ? { functionCandidate: selectedFunctions[0] }
+                        : undefined
+                    );
+                  };
                   return (
                     <List.Item
                       actions={[
@@ -171,14 +213,7 @@ export default function SessionLogLane(props: SessionLogLaneProps) {
                                 key="source"
                                 type="link"
                                 icon={<CodeOutlined />}
-                                onClick={() => props.onLocateSource({
-                                  title: `会话日志: ${item.type}`,
-                                  summary: item.message || `exit=${item.exitCode ?? '-'} / duration=${item.durationMs ?? '-'}ms`,
-                                  sourceType: 'session_log',
-                                  text: lookupText,
-                                  parts: [item.type, item.message, item.stdout, item.stderr],
-                                  command: item.cmd,
-                                })}
+                                onClick={() => props.onLocateSource(buildSessionLogSourceRequest(item, lookupText))}
                               >
                                 看源码
                               </Button>,
@@ -220,6 +255,21 @@ export default function SessionLogLane(props: SessionLogLaneProps) {
                           <Space direction="vertical" size={6} style={{ width: '100%' }}>
                             {item.cmd && <Text code>{item.cmd}</Text>}
                             {item.message && <Text>{item.message}</Text>}
+                            {functionCandidates.length > 0 && (
+                              <Space wrap size={[6, 6]}>
+                                <Text type="secondary">函数线索</Text>
+                                {functionCandidates.map((candidate) => (
+                                  <Tag
+                                    key={`${candidate.query}-${candidate.hits}`}
+                                    color="geekblue"
+                                    onClick={() => locateFunction(candidate)}
+                                    style={{ cursor: 'pointer' }}
+                                  >
+                                    {candidate.query}
+                                  </Tag>
+                                ))}
+                              </Space>
+                            )}
                             {item.stdout && (
                               <div>
                                 <Text strong>stdout</Text>
@@ -228,13 +278,7 @@ export default function SessionLogLane(props: SessionLogLaneProps) {
                                   isDark={props.isDark}
                                   minHeight={56}
                                   maxHeight={180}
-                                  onTextSelect={(text) => props.onLocateSource({
-                                    title: `会话日志 stdout: ${item.type}`,
-                                    summary: item.message || '手动选取 stdout 中的线索',
-                                    sourceType: 'session_log_selection',
-                                    text,
-                                    command: item.cmd,
-                                  })}
+                                  onTextSelect={(text) => locateSelectedText(text, 'stdout')}
                                 />
                               </div>
                             )}
@@ -246,13 +290,7 @@ export default function SessionLogLane(props: SessionLogLaneProps) {
                                   isDark={props.isDark}
                                   minHeight={56}
                                   maxHeight={180}
-                                  onTextSelect={(text) => props.onLocateSource({
-                                    title: `会话日志 stderr: ${item.type}`,
-                                    summary: item.message || '手动选取 stderr 中的线索',
-                                    sourceType: 'session_log_selection',
-                                    text,
-                                    command: item.cmd,
-                                  })}
+                                  onTextSelect={(text) => locateSelectedText(text, 'stderr')}
                                 />
                               </div>
                             )}

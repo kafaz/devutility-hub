@@ -87,36 +87,6 @@ function renderFrameLabel(frame: CodeProvenanceNavigationEntry | CodeProvenanceF
   return frame.filePath ? `${frame.symbolName} · ${lineLabel}` : frame.symbolName;
 }
 
-function renderPreview(preview: string | undefined, isDark: boolean | undefined) {
-  const value = String(preview || '').trim();
-  if (!value) {
-    return (
-      <Paragraph type="secondary" style={{ marginBottom: 0 }}>
-        等待主线程接入函数正文预览。这里会承接手动展开后的代码上下文。
-      </Paragraph>
-    );
-  }
-
-  return (
-    <pre
-      style={{
-        margin: 0,
-        padding: 12,
-        borderRadius: 10,
-        border: `1px solid ${isDark ? 'rgba(71, 85, 105, 0.7)' : 'rgba(148, 163, 184, 0.28)'}`,
-        background: isDark ? '#0f172a' : '#0b12201a',
-        color: isDark ? '#e2e8f0' : '#0f172a',
-        whiteSpace: 'pre-wrap',
-        wordBreak: 'break-word',
-        maxHeight: 280,
-        overflow: 'auto',
-      }}
-    >
-      {value}
-    </pre>
-  );
-}
-
 export default function CodeProvenanceLane(props: CodeProvenanceLaneProps) {
   const hasBinding = Boolean(props.binding);
   const navigationStack = props.navigationStack || [];
@@ -223,7 +193,6 @@ export default function CodeProvenanceLane(props: CodeProvenanceLaneProps) {
                     {currentFrame.summary}
                   </Paragraph>
                 ) : null}
-                {renderPreview(currentFrame.preview, props.isDark)}
               </Space>
             )}
           </Card>

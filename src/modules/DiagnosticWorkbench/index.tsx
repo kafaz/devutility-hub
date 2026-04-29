@@ -80,6 +80,7 @@ import {
   type DiagnosticScenarioType,
   useDiagnosticStore,
 } from './store/diagnosticStore';
+import FloatingSourceWindow from './FloatingSourceWindow';
 
 const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -707,7 +708,7 @@ const DiagnosticWorkbench: React.FC = () => {
   const [codePreviewHistory, setCodePreviewHistory] = useState<SourcePreviewState[]>([]);
   const [compactSourcePreview, setCompactSourcePreview] = useState(true);
   const [activeWorkbenchView, setActiveWorkbenchView] = useState<DiagnosticWorkbenchView>('flow');
-  const [sourceDrawerOpen, setSourceDrawerOpen] = useState(false);
+  const [sourceWindowOpen, setSourceWindowOpen] = useState(false);
   const [logsDrawerOpen, setLogsDrawerOpen] = useState(false);
   const [evidenceDrawerOpen, setEvidenceDrawerOpen] = useState(false);
   const [showNoiseLogs, setShowNoiseLogs] = useState(false);
@@ -1116,7 +1117,7 @@ const DiagnosticWorkbench: React.FC = () => {
 
   function replaceCurrentSourcePreview(nextPreview: SourcePreviewState) {
     setSourcePreview(nextPreview);
-    setSourceDrawerOpen(true);
+    setSourceWindowOpen(nextPreview.lookupMode === 'function');
     setCodePreviewHistory((current) =>
       current.length === 0 ? [nextPreview] : [...current.slice(0, -1), nextPreview]
     );
@@ -1124,7 +1125,7 @@ const DiagnosticWorkbench: React.FC = () => {
 
   function activateSourcePreview(nextPreview: SourcePreviewState, navigationMode: 'replace' | 'append' = 'replace') {
     setSourcePreview(nextPreview);
-    setSourceDrawerOpen(true);
+    setSourceWindowOpen(nextPreview.lookupMode === 'function');
     setCodePreviewHistory((current) => {
       if (navigationMode === 'replace') {
         return [nextPreview];
@@ -1157,10 +1158,15 @@ const DiagnosticWorkbench: React.FC = () => {
     const orderedFunctions = preferred?.functionCandidate
       ? [preferred.functionCandidate, ...functions.filter((item) => item.query !== preferred.functionCandidate?.query)]
       : functions;
+    const canRenderFunction = Boolean(preferred?.functionCandidate);
     const tryFunctionsFirst = Boolean(preferred?.functionCandidate && !preferred?.location);
 
     if (!hasHints || (orderedLocations.length === 0 && orderedFunctions.length === 0)) {
       messageApi.warning('当前异常片段里没有提取到 C 源码路径或 C 函数名');
+      return;
+    }
+    if (!canRenderFunction && orderedLocations.length === 0 && orderedFunctions.length > 0) {
+      messageApi.warning('请选择具体函数线索后再打开源码浮窗');
       return;
     }
 
@@ -1224,7 +1230,7 @@ const DiagnosticWorkbench: React.FC = () => {
         if (await tryOrderedLocationCandidates()) return;
       } else {
         if (await tryOrderedLocationCandidates()) return;
-        if (await tryOrderedFunctionCandidates()) return;
+        if (canRenderFunction && await tryOrderedFunctionCandidates()) return;
       }
 
       messageApi.warning(lastError || '未能从当前证据里定位到 C 源码上下文');
@@ -1330,7 +1336,7 @@ const DiagnosticWorkbench: React.FC = () => {
       const nextHistory = current.slice(0, index + 1);
       const nextPreview = nextHistory[nextHistory.length - 1] || null;
       setSourcePreview(nextPreview);
-      setSourceDrawerOpen(Boolean(nextPreview));
+      setSourceWindowOpen(Boolean(nextPreview && nextPreview.lookupMode === 'function'));
       return nextHistory;
     });
   }
@@ -1802,8 +1808,8 @@ const DiagnosticWorkbench: React.FC = () => {
       <div
         onClick={handleSourcePreviewCodeClick}
         style={{
-          maxHeight: 520,
-          overflow: 'auto',
+          maxHeight: 'none',
+          overflow: 'visible',
           borderRadius: 8,
           border: `1px solid ${isDark ? '#334155' : '#dbe2ea'}`,
           background: isDark ? '#0f172a' : '#f8fafc',
@@ -2928,12 +2934,12 @@ const DiagnosticWorkbench: React.FC = () => {
         />
       </Space>
 
-      <Drawer
+      <FloatingSourceWindow
         title="C 源码上下文"
-        placement="right"
-        width={900}
-        open={sourceDrawerOpen}
-        onClose={() => setSourceDrawerOpen(false)}
+        subtitle={sourcePreview ? `${sourcePreview.payload.path}:${sourcePreview.payload.line}` : undefined}
+        open={sourceWindowOpen && sourcePreview?.lookupMode === 'function'}
+        onClose={() => setSourceWindowOpen(false)}
+        isDark={isDark}
         extra={
           <Space size={8} wrap>
             {sourcePreview && (
@@ -2953,7 +2959,7 @@ const DiagnosticWorkbench: React.FC = () => {
         }
       >
         {sourcePreviewContent}
-      </Drawer>
+      </FloatingSourceWindow>
 
       <Drawer
         title="原始会话日志"
