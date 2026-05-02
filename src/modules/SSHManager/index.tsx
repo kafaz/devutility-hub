@@ -2381,7 +2381,7 @@ const SSHManager: React.FC = () => {
       {/* 代理未启动提示 */}
       {!proxyOnline && (
         <Alert type="warning" showIcon
-          message="SSH Proxy 代理服务未运行"
+          title="SSH Proxy 代理服务未运行"
           description={
             <pre style={{ margin: '6px 0 0', fontSize: 11, fontFamily: 'JetBrains Mono, Consolas, monospace' }}>
               cd devutility-hub/server{'\n'}node index.js
@@ -3095,7 +3095,7 @@ const SSHManager: React.FC = () => {
                     type="info"
                     showIcon={false}
                     style={{ padding: '8px 10px' }}
-                    message={
+                    title={
                       <div>
                         <Text strong style={{ fontSize: 12 }}>当前能力</Text>
                         <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>
@@ -3152,7 +3152,7 @@ const SSHManager: React.FC = () => {
               <div>
                 <Text style={{ fontSize: 12, display: 'block', marginBottom: 6 }}>选择执行节点</Text>
                 {sessions.length === 0 ? (
-                  <Alert type="info" showIcon={false} message={<Text type="secondary" style={{ fontSize: 11 }}>暂无会话，请先创建并连接</Text>} />
+                  <Alert type="info" showIcon={false} title={<Text type="secondary" style={{ fontSize: 11 }}>暂无会话，请先创建并连接</Text>} />
                 ) : (
                   sessions.map((sess) => {
                     const sc       = STATUS[sess.status];
@@ -3274,7 +3274,7 @@ const SSHManager: React.FC = () => {
                       type="warning"
                       showIcon={false}
                       style={{ marginTop: 8, padding: '6px 10px' }}
-                      message={
+                      title={
                         <div>
                           <Text strong style={{ fontSize: 12 }}>变量缺失检查</Text>
                           {nodeVariableDiagnostics
@@ -3373,7 +3373,7 @@ const SSHManager: React.FC = () => {
                     type="info"
                     showIcon={false}
                     style={{ fontSize: 11, padding: '6px 10px' }}
-                    message={
+                    title={
                       <div>
                         <Text strong style={{ fontSize: 12 }}>自动预处理负责：</Text>
                         {['先执行 essential ready 步骤，尽快进入可定位状态', '把登录 shell 的用户/目录/shell 上下文直接并入 READY，避免重复身份探测', '只在后台补齐可复用的只读探测，重复登录优先命中缓存', '把预热噪声与真正排查信号分开，默认少看低价值 INFO'].map((text, index) => (
@@ -3420,7 +3420,7 @@ const SSHManager: React.FC = () => {
               <Alert
                 type="info"
                 showIcon={false}
-                message={
+                title={
                   <div>
                     <Text strong style={{ fontSize: 12 }}>真实会话组已接入 Cron</Text>
                     <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>
@@ -3485,7 +3485,7 @@ const SSHManager: React.FC = () => {
           )}
 
           <Alert type="info" showIcon={false}
-            message={<Text style={{ fontSize: 12 }}>这次输入的密码会回写到连接档案，下次同档案会话默认自动复用</Text>} />
+            title={<Text style={{ fontSize: 12 }}>这次输入的密码会回写到连接档案，下次同档案会话默认自动复用</Text>} />
         </Form>
       </Modal>
 

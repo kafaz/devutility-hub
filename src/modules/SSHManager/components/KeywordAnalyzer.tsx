@@ -355,9 +355,9 @@ const KeywordAnalyzer: React.FC = () => {
             </List.Item>
           )}
         />
-        
+
         <Alert
-          message="基于实时输出流的正则/子串匹配"
+          title="基于实时输出流的正则/子串匹配"
           description="系统会先按当前内建模式与自定义折叠词过滤低价值噪声，再把命中关键字的日志抽取到监控面板里。原始数据仍保留在对应会话输出中。"
           type="info"
           showIcon

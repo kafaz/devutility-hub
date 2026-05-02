@@ -98,7 +98,7 @@ const NodeContextPanel: React.FC<Props> = ({ activeSession, context, isDark }) =
             type="info"
             showIcon={false}
             style={{ padding: '8px 10px' }}
-            message={
+            title={
               <div>
                 <Text strong style={{ fontSize: 12 }}>手动采集到上下文</Text>
                 <Text type="secondary" style={{ display: 'block', fontSize: 11 }}>
