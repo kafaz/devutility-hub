@@ -263,7 +263,7 @@ const EntryCard: React.FC<{
       )}
       {!hasOutput && rawOutputText && suppressedCount > 0 && (
         <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 6 }}>
-          这条输出已被聚焦视图折叠；切到“显示原始记录”可查看完整内容。
+          这条输出已被聚焦视图折叠；打开“原始记录”可查看完整内容。
         </Text>
       )}
     </div>
@@ -506,7 +506,7 @@ const SessionJournal: React.FC<Props> = ({ sessionId, sessionName, onSnapshotReq
         <Space size={4}>
           <Tooltip title={showSuppressedEntries ? '切回聚焦视图，只看高价值记录' : '显示被聚焦视图折叠的低价值记录'}>
             <Space size={4} style={{ marginRight: 4 }}>
-              <Text type="secondary" style={{ fontSize: 11 }}>显示原始记录</Text>
+              <Text type="secondary" style={{ fontSize: 11 }}>原始记录</Text>
               <Switch size="small" checked={showSuppressedEntries} onChange={setShowSuppressedEntries} />
             </Space>
           </Tooltip>
@@ -571,7 +571,7 @@ const SessionJournal: React.FC<Props> = ({ sessionId, sessionName, onSnapshotReq
               entries.length === 0
                 ? '暂无记录\n执行 SOP 或在终端输入命令后自动记录'
                 : suppressedEntries.length > 0 && !showSuppressedEntries
-                  ? '当前记录已被聚焦视图折叠，可打开“显示原始记录”查看'
+                  ? '当前记录已被聚焦视图折叠，可打开“原始记录”查看'
                   : '当前筛选条件无结果'
             }
             image={Empty.PRESENTED_IMAGE_SIMPLE}

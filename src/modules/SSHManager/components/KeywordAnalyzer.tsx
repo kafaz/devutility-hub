@@ -106,7 +106,7 @@ const KeywordAnalyzer: React.FC = () => {
         <Space>
           <Text strong style={{ fontSize: 13 }}>智能监控面板</Text>
           <Tag color="blue">{logs.length} 条记录</Tag>
-          <Tag color="gold">{suppressedCount} 条已忽略</Tag>
+          <Tag color="gold">{suppressedCount} 条聚焦折叠</Tag>
           <Tag color={builtinNoiseMode === 'off' ? 'default' : 'cyan'}>
             {BUILTIN_NOISE_MODE_META[builtinNoiseMode].label}
           </Tag>
@@ -138,7 +138,7 @@ const KeywordAnalyzer: React.FC = () => {
 
         <Space>
           <Button size="small" icon={<SettingOutlined />} onClick={() => setSettingsOpen(true)}>
-            关键词与降噪
+            关键词与聚焦
           </Button>
           <Popconfirm title="确定清空所有抓取的日志吗？" onConfirm={() => { clearLogs(); clearSuppressedCount(); }}>
             <Button size="small" danger icon={<DeleteOutlined />}>清空记录</Button>
@@ -231,10 +231,10 @@ const KeywordAnalyzer: React.FC = () => {
 
         <Divider style={{ margin: '16px 0' }} />
 
-        <Text strong style={{ display: 'block', marginBottom: 8 }}>日志降噪规则</Text>
+        <Text strong style={{ display: 'block', marginBottom: 8 }}>聚焦折叠规则</Text>
         <Space.Compact style={{ width: '100%', marginBottom: 16 }}>
           <Input
-            placeholder="自定义忽略词，例如 heartbeat"
+            placeholder="自定义折叠词，例如 heartbeat"
             value={newNoiseKeyword}
             onChange={e => setNewNoiseKeyword(e.target.value)}
             onPressEnter={handleAddNoiseKeyword}
@@ -282,7 +282,7 @@ const KeywordAnalyzer: React.FC = () => {
         <List
           size="small"
           bordered
-          header={<Text strong>近期忽略来源</Text>}
+          header={<Text strong>近期折叠来源</Text>}
           locale={{ emptyText: '暂无忽略统计' }}
           dataSource={suppressionStats}
           renderItem={(item) => (
@@ -309,8 +309,8 @@ const KeywordAnalyzer: React.FC = () => {
         <List
           size="small"
           bordered
-          header={<Text strong>自定义忽略词</Text>}
-          locale={{ emptyText: '暂无自定义忽略词' }}
+          header={<Text strong>自定义折叠词</Text>}
+          locale={{ emptyText: '暂无自定义折叠词' }}
           dataSource={noiseKeywords}
           renderItem={(item) => (
             <List.Item actions={[
@@ -358,7 +358,7 @@ const KeywordAnalyzer: React.FC = () => {
         
         <Alert
           message="基于实时输出流的正则/子串匹配"
-          description="系统会先按当前内建模式与自定义忽略词做降噪，再把命中关键字的日志抽取到监控面板里。"
+          description="系统会先按当前内建模式与自定义折叠词过滤低价值噪声，再把命中关键字的日志抽取到监控面板里。原始数据仍保留在对应会话输出中。"
           type="info"
           showIcon
           style={{ marginTop: 24, fontSize: 12 }}
