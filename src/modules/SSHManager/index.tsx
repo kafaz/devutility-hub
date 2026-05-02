@@ -26,6 +26,7 @@ import {
     SearchOutlined,
     StopOutlined,
     ThunderboltOutlined,
+    VerticalAlignBottomOutlined,
 } from '@ant-design/icons';
 import { SearchAddon } from '@xterm/addon-search';
 import {
@@ -83,6 +84,13 @@ import {
   shouldPublishTerminalResize,
   type TerminalResizeDimensions,
 } from './terminalResize';
+import {
+  getNextTerminalScrollMode,
+  shouldShowTerminalScrollOverlay,
+  type TerminalBufferType,
+  type TerminalScrollMetrics,
+  type TerminalScrollMode,
+} from './terminalScroll';
 
 const { Title, Text } = Typography;
 const { Password } = Input;
@@ -398,6 +406,29 @@ function collectTerminalScreenSnapshot(term: Terminal, rules: HighlightRule[]): 
   };
 }
 
+function buildTerminalScreenSnapshotSignature(snapshot: TerminalScreenSnapshot): string {
+  const rules = snapshot.ruleSummaries
+    .map((rule) => `${rule.id}:${rule.matchCount}:${rule.lineCount}`)
+    .join('|');
+  const lines = snapshot.matchedLines
+    .map((line) => {
+      const matches = line.matches
+        .map((match) => `${match.id}:${match.start}:${match.end}`)
+        .join(',');
+      return `${line.row}:${matches}:${line.text}`;
+    })
+    .join('\n');
+  return [
+    snapshot.bufferType,
+    snapshot.scannedRows,
+    snapshot.totalMatchCount,
+    rules,
+    lines,
+  ].join('::');
+}
+
+const TERMINAL_HIGHLIGHT_REFRESH_MIN_INTERVAL_MS = 120;
+
 function renderTerminalMatchText(text: string, matches: TerminalScreenMatch[]): React.ReactNode {
   if (!matches.length) return text || '\u200b';
 
@@ -452,6 +483,10 @@ const TerminalInstance: React.FC<{
   const decorationDisposablesRef = useRef<Array<{ dispose: () => void }>>([]);
   const refreshFrameRef = useRef<number | null>(null);
   const resizeFrameRef = useRef<number | null>(null);
+  const refreshTimerRef = useRef<number | null>(null);
+  const highlightRefreshLastAtRef = useRef(0);
+  const screenSnapshotSignatureRef = useRef('');
+  const scrollModeRef = useRef<TerminalScrollMode>('following');
   const lastResizeDimsRef = useRef<TerminalResizeDimensions | null>(null);
   const visibleRef = useRef(visible);
   const onResizeRef = useRef(onResize);
@@ -460,6 +495,8 @@ const TerminalInstance: React.FC<{
   const [highlightOpen, setHighlightOpen] = useState(false);
   const [highlightKeyword, setHighlightKeyword] = useState('');
   const [highlightColor, setHighlightColor] = useState('#ef4444');
+  const [scrollMode, setScrollMode] = useState<TerminalScrollMode>('following');
+  const [hasPendingOutput, setHasPendingOutput] = useState(false);
   const [screenSnapshot, setScreenSnapshot] = useState<TerminalScreenSnapshot>(() => createEmptyTerminalScreenSnapshot());
   const [activeHighlightRuleId, setActiveHighlightRuleId] = useState<string | null>(null);
   const searchAddonRef = useRef<SearchAddon | null>(null);
@@ -467,7 +504,45 @@ const TerminalInstance: React.FC<{
   const highlightRulesRef = useRef(highlightRules);
   highlightRulesRef.current = highlightRules;
   const activeHighlightRule = highlightRules.find((rule) => rule.id === activeHighlightRuleId) || highlightRules[0] || null;
+
+  const readTerminalScrollMetrics = React.useCallback((): TerminalScrollMetrics | null => {
+    const term = termRef.current;
+    if (!term) return null;
+    const activeBuffer = term.buffer.active;
+    return {
+      visible: visibleRef.current,
+      bufferType: activeBuffer.type as TerminalBufferType,
+      viewportY: activeBuffer.viewportY,
+      rows: term.rows,
+      bufferLength: activeBuffer.length,
+    };
+  }, []);
+
+  const applyTerminalScrollState = React.useCallback(() => {
+    const metrics = readTerminalScrollMetrics();
+    if (!metrics) return;
+
+    const nextMode = getNextTerminalScrollMode(scrollModeRef.current, metrics);
+    if (nextMode !== scrollModeRef.current) {
+      scrollModeRef.current = nextMode;
+      setScrollMode(nextMode);
+    }
+    if (nextMode === 'following') {
+      setHasPendingOutput(false);
+    }
+  }, [readTerminalScrollMetrics]);
+
+  const returnTerminalToBottom = React.useCallback(() => {
+    const term = termRef.current;
+    if (!term) return;
+    term.scrollToBottom();
+    scrollModeRef.current = 'following';
+    setScrollMode('following');
+    setHasPendingOutput(false);
+  }, []);
+
   visibleRef.current = visible;
+  scrollModeRef.current = scrollMode;
   onResizeRef.current = onResize;
 
   const clearScreenDecorations = React.useCallback(() => {
@@ -477,11 +552,16 @@ const TerminalInstance: React.FC<{
 
   const refreshScreenHighlights = React.useCallback(() => {
     const term = termRef.current;
-    if (!term) return;
+    const rules = highlightRulesRef.current;
+    if (!term || rules.length === 0) return;
 
-    clearScreenDecorations();
-    const nextSnapshot = collectTerminalScreenSnapshot(term, highlightRulesRef.current);
+    const nextSnapshot = collectTerminalScreenSnapshot(term, rules);
+    const nextSignature = buildTerminalScreenSnapshotSignature(nextSnapshot);
+    if (nextSignature === screenSnapshotSignatureRef.current) return;
+
+    screenSnapshotSignatureRef.current = nextSignature;
     setScreenSnapshot(nextSnapshot);
+    clearScreenDecorations();
 
     if (nextSnapshot.bufferType !== 'normal') return;
 
@@ -521,13 +601,27 @@ const TerminalInstance: React.FC<{
   }, [clearScreenDecorations]);
 
   const scheduleScreenHighlightRefresh = React.useCallback(() => {
-    if (refreshFrameRef.current != null) {
-      cancelAnimationFrame(refreshFrameRef.current);
+    if (highlightRulesRef.current.length === 0) return;
+    if (refreshFrameRef.current != null || refreshTimerRef.current != null) return;
+
+    const now = Date.now();
+    const elapsed = now - highlightRefreshLastAtRef.current;
+    const delay = Math.max(0, TERMINAL_HIGHLIGHT_REFRESH_MIN_INTERVAL_MS - elapsed);
+
+    const run = () => {
+      refreshTimerRef.current = null;
+      refreshFrameRef.current = requestAnimationFrame(() => {
+        refreshFrameRef.current = null;
+        highlightRefreshLastAtRef.current = Date.now();
+        refreshScreenHighlights();
+      });
+    };
+
+    if (delay > 0) {
+      refreshTimerRef.current = window.setTimeout(run, delay);
+      return;
     }
-    refreshFrameRef.current = requestAnimationFrame(() => {
-      refreshFrameRef.current = null;
-      refreshScreenHighlights();
-    });
+    run();
   }, [refreshScreenHighlights]);
 
   const fitAndPublishResize = React.useCallback(() => {
@@ -596,6 +690,7 @@ const TerminalInstance: React.FC<{
     if (highlightRules.length === 0) {
       setActiveHighlightRuleId(null);
       clearScreenDecorations();
+      screenSnapshotSignatureRef.current = '';
       setScreenSnapshot(createEmptyTerminalScreenSnapshot());
       searchAddonRef.current?.clearDecorations();
       return;
@@ -642,8 +737,14 @@ const TerminalInstance: React.FC<{
 
     const d1 = term.onData(onInput);
     const d2 = term.onRender(() => scheduleScreenHighlightRefresh());
-    const d3 = term.onScroll(() => scheduleScreenHighlightRefresh());
-    const d4 = term.onResize(() => scheduleScreenHighlightRefresh());
+    const d3 = term.onScroll(() => {
+      applyTerminalScrollState();
+      scheduleScreenHighlightRefresh();
+    });
+    const d4 = term.onResize(() => {
+      applyTerminalScrollState();
+      scheduleScreenHighlightRefresh();
+    });
     const ro = new ResizeObserver(() => scheduleFitAndPublishResize());
     ro.observe(ref.current);
 
@@ -661,7 +762,16 @@ const TerminalInstance: React.FC<{
       const bin = atob(b64);
       const bytes = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-      term.write(bytes);
+      const wasViewingHistory = scrollModeRef.current === 'history';
+      term.write(bytes, () => {
+        if (wasViewingHistory) {
+          setHasPendingOutput(true);
+        } else {
+          term.scrollToBottom();
+        }
+        applyTerminalScrollState();
+        scheduleScreenHighlightRefresh();
+      });
     });
 
     registerSnapshot(() => {
@@ -691,6 +801,10 @@ const TerminalInstance: React.FC<{
       if (refreshFrameRef.current != null) {
         cancelAnimationFrame(refreshFrameRef.current);
       }
+      if (refreshTimerRef.current != null) {
+        window.clearTimeout(refreshTimerRef.current);
+        refreshTimerRef.current = null;
+      }
       if (resizeFrameRef.current != null) {
         cancelAnimationFrame(resizeFrameRef.current);
       }
@@ -705,6 +819,9 @@ const TerminalInstance: React.FC<{
 
   useEffect(() => {
     if (!visible) return;
+    scrollModeRef.current = 'following';
+    setScrollMode('following');
+    setHasPendingOutput(false);
     scheduleFitAndPublishResize();
     scheduleScreenHighlightRefresh();
   }, [visible, scheduleFitAndPublishResize, scheduleScreenHighlightRefresh]);
@@ -812,15 +929,52 @@ const TerminalInstance: React.FC<{
         </div>
       )}
 
-      <div
-        ref={ref}
-        style={{
-          width: '100%', flex: 1,
-          background: isDark ? '#1e1e1e' : '#fafafa',
-          padding: 4,
-          minHeight: 0,
-        }}
-      />
+      <div style={{ width: '100%', flex: 1, minHeight: 0, position: 'relative' }}>
+        <div
+          ref={ref}
+          style={{
+            width: '100%',
+            height: '100%',
+            background: isDark ? '#1e1e1e' : '#fafafa',
+            padding: 4,
+            minHeight: 0,
+          }}
+        />
+        {shouldShowTerminalScrollOverlay({
+          visible,
+          bufferType: (termRef.current?.buffer.active.type ?? 'normal') as TerminalBufferType,
+          mode: scrollMode,
+        }) && (
+          <div
+            style={{
+              position: 'absolute',
+              right: 14,
+              bottom: 14,
+              zIndex: 102,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '5px 8px',
+              borderRadius: 6,
+              background: isDark ? 'rgba(24, 24, 27, 0.92)' : 'rgba(255, 255, 255, 0.94)',
+              border: `1px solid ${isDark ? '#3f3f46' : '#d4d4d8'}`,
+              boxShadow: '0 4px 12px rgba(0,0,0,.18)',
+            }}
+          >
+            <Text style={{ fontSize: 11 }}>
+              {hasPendingOutput ? '有新输出' : '正在查看历史'}
+            </Text>
+            <Button
+              size="small"
+              type="primary"
+              icon={<VerticalAlignBottomOutlined />}
+              onClick={returnTerminalToBottom}
+            >
+              回到底部
+            </Button>
+          </div>
+        )}
+      </div>
 
       {highlightRules.length > 0 && (
         <div style={{
