@@ -8,10 +8,16 @@ import {
     Modal, Radio, Row, Select, Space, Tag,
     Typography,
     message,
-    notification
+    notification,
+    type BadgeProps,
 } from 'antd';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { useBackgroundJobStore, type BackgroundJob, type JobMode } from '../store/backgroundJobStore';
+import {
+  shouldUpdateJobOutput,
+  useBackgroundJobStore,
+  type BackgroundJob,
+  type JobMode,
+} from '../store/backgroundJobStore';
 import { useSSHStore } from '../store/sshStore';
 
 const { Text, Paragraph } = Typography;
@@ -79,7 +85,7 @@ header && NF >= 14 {
 const TAIL_INTERVAL_MS = 2000;
 const TAIL_LINES = 200;
 
-const statusColor: Record<BackgroundJob['status'], any> = {
+const statusColor: Record<BackgroundJob['status'], BadgeProps['status']> = {
   launching: 'processing', running: 'success', done: 'default', killed: 'warning', error: 'error',
 };
 const statusLabel: Record<BackgroundJob['status'], string> = {
@@ -92,6 +98,14 @@ function formatDuration(ms: number): string {
   const min = Math.floor(sec / 60);
   if (min < 60) return `${min}m ${sec % 60}s`;
   return `${Math.floor(min / 60)}h ${min % 60}m`;
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isFormValidationError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'errorFields' in error;
 }
 
 // Render log with alert lines highlighted red
@@ -130,6 +144,7 @@ export const BackgroundJobMonitor: React.FC = () => {
   const pollingRef = useRef<number | null>(null);
   const notifiedRef = useRef<Set<string>>(new Set()); // track per-job notifications
   const alertSignatureRef = useRef<Map<string, string>>(new Map());
+  const [now, setNow] = useState(() => Date.now());
 
   const connectedSessions = sessions.filter(s => s.status === 'connected');
 
@@ -148,7 +163,9 @@ export const BackgroundJobMonitor: React.FC = () => {
           { journal: false }
         );
         const output = tailRes.stdout || '（无输出）';
-        updateJobOutput(job.id, output);
+        if (shouldUpdateJobOutput(job.output, output)) {
+          updateJobOutput(job.id, output);
+        }
 
         // Alert pattern detection
         if (job.alertPattern) {
@@ -200,7 +217,7 @@ export const BackgroundJobMonitor: React.FC = () => {
           }
         }
       } catch {
-        // Session may have disconnected
+        // Keep the last visible output. A transient disconnect should not blank the log pane.
       }
     }
   }, [execCommandOnSession, updateJobOutput, updateJobStatus, recordAlertMatch]);
@@ -209,6 +226,11 @@ export const BackgroundJobMonitor: React.FC = () => {
     pollingRef.current = window.setInterval(pollJobs, TAIL_INTERVAL_MS);
     return () => { if (pollingRef.current !== null) clearInterval(pollingRef.current); };
   }, [pollJobs]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   // ── Handlers ─────────────────────────────────────────────────
   const handleLaunch = async () => {
@@ -224,9 +246,9 @@ export const BackgroundJobMonitor: React.FC = () => {
       message.success('后台任务已提交！');
       setLaunchModalOpen(false);
       form.resetFields();
-    } catch (e: any) {
-      if (e?.errorFields) return;
-      message.error('启动失败：' + e.message);
+    } catch (e: unknown) {
+      if (isFormValidationError(e)) return;
+      message.error('启动失败：' + getErrorMessage(e));
     }
   };
 
@@ -321,7 +343,7 @@ export const BackgroundJobMonitor: React.FC = () => {
                         {job.mode === 'watch' ? `watch -n ${job.watchInterval}s` : 'once'}
                       </Tag>
                       <Text type="secondary" style={{ fontSize: 11 }}>
-                        {formatDuration(Date.now() - job.startedAt)}
+                        {formatDuration(now - job.startedAt)}
                       </Text>
                     </Space>
                   </Col>

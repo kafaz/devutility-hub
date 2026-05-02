@@ -42,6 +42,14 @@ export interface BackgroundJob {
 
 const MAX_LOG_BYTES = 1024 * 1024 * 1024; // 1GB
 
+export function shouldUpdateJobOutput(current: string, next: string): boolean {
+  return current !== next;
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 // Build the shell command launched with nohup
 export function buildLaunchCmd(job: Pick<BackgroundJob, 'id' | 'cmd' | 'mode' | 'watchInterval' | 'logPath'>): string {
   const log = job.logPath;
@@ -138,9 +146,9 @@ export const useBackgroundJobStore = create<BackgroundJobStore>()(
               : j
             )
           }));
-        } catch (e: any) {
+        } catch (e: unknown) {
           set(s => ({
-            jobs: s.jobs.map(j => j.id === id ? { ...j, status: 'error', errorMsg: e.message } : j)
+            jobs: s.jobs.map(j => j.id === id ? { ...j, status: 'error', errorMsg: getErrorMessage(e) } : j)
           }));
         }
 
