@@ -1,0 +1,169 @@
+name: DevUtility Hub CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: devutility-hub-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NPM_CONFIG_AUDIT: "false"
+  NPM_CONFIG_FUND: "false"
+  NPM_CONFIG_PROGRESS: "false"
+
+jobs:
+  verify:
+    name: Verify build and tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+
+      - name: Show npm environment
+        run: |
+          node -v
+          npm -v
+          npm config get registry
+
+      - name: Install frontend dependencies
+        timeout-minutes: 15
+        run: npm ci --prefer-offline --no-audit --no-fund
+
+      - name: Install server dependencies
+        timeout-minutes: 10
+        run: npm ci --prefix server --prefer-offline --no-audit --no-fund
+
+      - name: Run CI verification
+        run: npm run ci:verify
+
+  windows-portable:
+    name: Build Windows portable bundle
+    runs-on: windows-latest
+    needs: verify
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+
+      - name: Show npm environment
+        run: |
+          node -v
+          npm -v
+          npm config get registry
+
+      - name: Install frontend dependencies
+        timeout-minutes: 15
+        run: npm ci --prefer-offline --no-audit --no-fund
+
+      - name: Install server dependencies
+        timeout-minutes: 10
+        run: npm ci --prefix server --prefer-offline --no-audit --no-fund
+
+      - name: Build frontend bundle
+        run: npm run build
+
+      - name: Resolve bundled Node.js version
+        id: node-runtime
+        shell: pwsh
+        run: |
+          $version = node -p "process.version.slice(1)"
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Download official Node.js Windows runtime
+        shell: pwsh
+        run: |
+          $version = "${{ steps.node-runtime.outputs.version }}"
+          $zipUrl = "https://nodejs.org/dist/v$version/node-v$version-win-x64.zip"
+          $zipPath = Join-Path $env:RUNNER_TEMP "node-runtime.zip"
+          $extractDir = Join-Path $env:RUNNER_TEMP "node-runtime"
+          Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath
+          Expand-Archive -Path $zipPath -DestinationPath $extractDir -Force
+
+      - name: Assemble portable package
+        shell: pwsh
+        run: |
+          $version = "${{ steps.node-runtime.outputs.version }}"
+          $runtimeDir = Join-Path $env:RUNNER_TEMP "node-runtime/node-v$version-win-x64"
+          $outputDir = Join-Path $env:RUNNER_TEMP "devutility-hub-windows-portable"
+          node scripts/build-windows-portable.mjs --node-runtime-dir $runtimeDir --output-dir $outputDir
+
+      - name: Smoke test portable package
+        shell: pwsh
+        run: |
+          $packageDir = Join-Path $env:RUNNER_TEMP "devutility-hub-windows-portable"
+          $serverCmd = Join-Path $packageDir "server/run-portable-server.cmd"
+          $proc = $null
+          try {
+            $env:PORT = "3101"
+            $proc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "`"$serverCmd`"" -PassThru -WindowStyle Hidden
+            $deadline = (Get-Date).AddSeconds(30)
+            $healthy = $false
+            while ((Get-Date) -lt $deadline) {
+              try {
+                $health = Invoke-RestMethod -Uri "http://127.0.0.1:$env:PORT/api/health" -TimeoutSec 2
+                if ($health.ok -eq $true) {
+                  $healthy = $true
+                  break
+                }
+              } catch {
+              }
+              Start-Sleep -Milliseconds 500
+            }
+
+            if (-not $healthy) {
+              throw "Portable package did not become healthy in time."
+            }
+
+            $shell = Invoke-WebRequest -Uri "http://127.0.0.1:$env:PORT/" -TimeoutSec 5
+            if ($shell.Content -notmatch '<!doctype html|<html') {
+              throw "Portable package did not serve the app shell."
+            }
+          } finally {
+            if ($proc -and -not $proc.HasExited) {
+              Stop-Process -Id $proc.Id -Force
+            }
+            Remove-Item Env:PORT -ErrorAction SilentlyContinue
+          }
+
+      - name: Zip portable package
+        id: zip
+        shell: pwsh
+        run: |
+          $packageDir = Join-Path $env:RUNNER_TEMP "devutility-hub-windows-portable"
+          $zipPath = Join-Path $env:RUNNER_TEMP "devutility-hub-windows-portable-${{ github.sha }}.zip"
+          if (Test-Path $zipPath) {
+            Remove-Item $zipPath -Force
+          }
+          Compress-Archive -Path "$packageDir\*" -DestinationPath $zipPath
+          "path=$zipPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Upload Windows portable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: devutility-hub-windows-portable-${{ github.sha }}
+          path: ${{ steps.zip.outputs.path }}
+          if-no-files-found: error
