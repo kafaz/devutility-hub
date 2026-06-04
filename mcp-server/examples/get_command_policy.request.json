@@ -1,0 +1,7 @@
+{
+  "tool": "get_command_policy",
+  "arguments": {},
+  "expected": {
+    "contains": ["allowedBaseCommands", "blockedRules"]
+  }
+}

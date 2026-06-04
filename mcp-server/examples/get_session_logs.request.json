@@ -1,0 +1,10 @@
+{
+  "tool": "get_session_logs",
+  "arguments": {
+    "sessionId": "agent_xxx",
+    "limit": 120
+  },
+  "expected": {
+    "contains": ["sessionId", "logs"]
+  }
+}

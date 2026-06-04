@@ -1,0 +1,7 @@
+{
+  "tool": "list_sessions",
+  "arguments": {},
+  "expected": {
+    "contains": ["sessionId", "nodeId", "host"]
+  }
+}

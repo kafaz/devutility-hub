@@ -144,13 +144,13 @@ Use these tools when you want the agent to incorporate historical cases into the
 
 ### Configuration Plane Tools
 
-The MCP server now also exposes write tools for the configuration plane:
+The MCP server also exposes read and write tools for the configuration plane:
 
-- login presets: `save_login_preset`, `delete_login_preset`
-- nodes: `save_node`, `update_node`
-- nodes: `save_node`, `delete_node`, `update_node`
-- prepare profiles: `save_prepare_profile`, `delete_prepare_profile`, `update_prepare_profile`
-- command policy: `replace_command_policy`, `allow_command`, `remove_allowed_command`, `reset_command_policy`
+- login presets: `list_login_presets`, `save_login_preset`, `delete_login_preset`
+- nodes: `list_nodes`, `resolve_node`, `save_node`, `update_node`, `delete_node`
+- prepare profiles: `list_prepare_profiles`, `save_prepare_profile`, `update_prepare_profile`, `delete_prepare_profile`
+- command policy: `get_command_policy`, `validate_command`, `replace_command_policy`, `allow_command`, `remove_allowed_command`, `reset_command_policy`
+- ssh agents: `list_ssh_agents`
 
 This means an agent can now bootstrap its own login preset or node definition before opening a session, instead of depending on manual pre-configuration.
 
@@ -268,4 +268,7 @@ Claude Desktop example:
 8. `validate_command` when the command is not trivially known-good
 9. `run_command` or `troubleshoot` with target assertion
 10. `get_session_logs` / `get_diagnostic_run` / `list_diagnostic_runs`
-11. `close_session`
+11. `list_sessions` / `get_session` to inspect the live session identity when needed
+12. `close_session`
+
+For per-tool parameter details, example payloads, and the two supported tool-orderings (Fast First Pass and Interactive Drill-Down), see `skills/devutility-agent-diagnosis/references/mcp-tools.md`.

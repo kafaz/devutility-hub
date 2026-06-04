@@ -1,0 +1,9 @@
+{
+  "tool": "close_session",
+  "arguments": {
+    "sessionId": "agent_xxx"
+  },
+  "expected": {
+    "contains": ["sessionId", "closed"]
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "tool": "resolve_node",
+  "arguments": {
+    "query": "db-master"
+  },
+  "expected": {
+    "contains": ["nodeId", "host"]
+  }
+}

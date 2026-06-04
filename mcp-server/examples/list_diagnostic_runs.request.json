@@ -1,0 +1,9 @@
+{
+  "tool": "list_diagnostic_runs",
+  "arguments": {
+    "limit": 20
+  },
+  "expected": {
+    "contains": ["runId"]
+  }
+}

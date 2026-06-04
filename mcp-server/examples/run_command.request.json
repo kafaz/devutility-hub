@@ -1,0 +1,18 @@
+{
+  "tool": "run_command",
+  "arguments": {
+    "sessionId": "agent_xxx",
+    "target": {
+      "nodeId": "node-prod-db-01",
+      "host": "10.0.0.11",
+      "port": 22,
+      "username": "root"
+    },
+    "cmd": "tail -n 200 /var/log/myapp/error.log",
+    "timeoutMs": 15000,
+    "mode": "pty"
+  },
+  "expected": {
+    "contains": ["stdout", "stderr", "exitCode", "durationMs", "targetGuard"]
+  }
+}

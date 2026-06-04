@@ -1,0 +1,7 @@
+{
+  "tool": "list_nodes",
+  "arguments": {},
+  "expected": {
+    "contains": ["nodeId", "host"]
+  }
+}

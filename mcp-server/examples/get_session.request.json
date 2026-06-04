@@ -1,0 +1,9 @@
+{
+  "tool": "get_session",
+  "arguments": {
+    "sessionId": "agent_xxx"
+  },
+  "expected": {
+    "contains": ["sessionId", "nodeId", "host", "username"]
+  }
+}

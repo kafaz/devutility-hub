@@ -1,0 +1,7 @@
+{
+  "tool": "list_ssh_agents",
+  "arguments": {},
+  "expected": {
+    "contains": ["agents"]
+  }
+}

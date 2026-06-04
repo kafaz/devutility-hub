@@ -28,6 +28,61 @@ When a SOP is available, let the SOP structure decide which path should dominate
 
 ## Tool Summary
 
+### Health & SSH Backbone
+
+- `health_check`
+- `list_ssh_agents`
+
+### Login Presets
+
+- `list_login_presets`
+- `save_login_preset`
+- `delete_login_preset`
+
+### Registered Nodes
+
+- `list_nodes`
+- `resolve_node`
+- `save_node`
+- `update_node`
+- `delete_node`
+
+### Prepare Profiles
+
+- `list_prepare_profiles`
+- `save_prepare_profile`
+- `update_prepare_profile`
+- `delete_prepare_profile`
+
+### Command Policy
+
+- `get_command_policy`
+- `validate_command`
+- `replace_command_policy`
+- `allow_command`
+- `remove_allowed_command`
+- `reset_command_policy`
+
+### Sessions
+
+- `open_session`
+- `list_sessions`
+- `get_session`
+- `close_session`
+
+### Execution
+
+- `prepare_session`
+- `run_command`
+- `get_session_logs`
+
+### Diagnosis & Knowledge Base
+
+- `troubleshoot`
+- `recall_similar_runs`
+- `list_diagnostic_runs`
+- `get_diagnostic_run`
+
 ## SOP Note
 
 This repository already has SOP templates and server-side `exec_plan`, but the current MCP layer does not yet expose first-class SOP tools such as `list_sop_templates` or `run_sop`.
@@ -38,6 +93,22 @@ Until those tools exist:
 - translate SOP variables into the inputs you pass to `troubleshoot`, `prepare_session`, and `run_command`
 - translate SOP checks into bounded command batches
 - record any missing branch as candidate SOP material instead of leaving it implicit
+
+### `health_check`
+
+Lightweight liveness probe. Use it before opening sessions to make sure the local DevUtility Hub service is reachable. No parameters.
+
+### `list_ssh_agents`
+
+List local SSH agent sockets or agent providers DevUtility Hub can use for agent-based authentication. No parameters.
+
+### `list_login_presets` / `save_login_preset` / `delete_login_preset`
+
+Manage login presets used by the preset auto-login flow.
+
+- `list_login_presets`: no parameters.
+- `save_login_preset` payload: full preset object (must include `id`, `name`, `host`, `username`, `authType`).
+- `delete_login_preset`: pass `presetId`.
 
 ### `list_nodes`
 
@@ -66,6 +137,16 @@ Example input:
 }
 ```
 
+### `save_node` / `update_node` / `delete_node`
+
+Mutate the registered node set.
+
+- `save_node` payload: full node object (must include `nodeId`, `name`, `host`, `username`).
+- `update_node`: pass `nodeId` plus a `patch` object containing only the fields to change.
+- `delete_node`: pass `nodeId` only.
+
+Treat these as configuration-plane tools. Do not call them during normal diagnosis unless the user explicitly asked you to change local configuration.
+
 ### `open_session`
 
 Prefer opening by `nodeId`.
@@ -88,6 +169,16 @@ You can also pass direct top-level fields such as `host`, `port`, `username`, `p
 ### `list_prepare_profiles`
 
 Use this to discover prebuilt preparation flows such as root escalation or environment initialization.
+
+### `save_prepare_profile` / `update_prepare_profile` / `delete_prepare_profile`
+
+Mutate prepare profiles.
+
+- `save_prepare_profile` payload: full profile object (must include `profileId` and `name`).
+- `update_prepare_profile`: pass `profileId` plus a `patch` object.
+- `delete_prepare_profile`: pass `profileId` only.
+
+Configuration-plane. Do not invoke during normal diagnosis unless the user explicitly asked to change local configuration.
 
 ### `prepare_session`
 
@@ -151,6 +242,10 @@ Example input:
 Use `mode="exec"` only for stateless checks.
 Do not call `run_command` with only `sessionId`; target guard rejects mismatches before the command is written to the SSH PTY.
 
+### `get_command_policy`
+
+Fetch the current service-side command whitelist and the fixed blocking rules. No parameters. Use it once at the start of a session to know which base commands the local whitelist currently allows.
+
 ### `validate_command`
 
 Preflight a command against the service-side whitelist without running it.
@@ -166,6 +261,26 @@ Example input:
 
 Use this before `run_command` when the command contains shell operators, user-provided paths, SQL, curl options, or a less common binary.
 If the result has `allowed=false`, stop and report the reason. Do not call policy mutation tools unless the user explicitly asked to change the local command whitelist.
+
+### `replace_command_policy` / `allow_command` / `remove_allowed_command` / `reset_command_policy`
+
+Mutate the service-side command whitelist.
+
+- `replace_command_policy` payload: full `allowedBaseCommands` array.
+- `allow_command` payload: `{ "command": "<binary>" }`.
+- `remove_allowed_command` payload: `{ "command": "<binary>" }`.
+- `reset_command_policy`: no payload, restores defaults.
+
+These are configuration-plane tools. Do not widen the whitelist on your own when a command is blocked. Stop and ask the user.
+
+### `list_sessions` / `get_session`
+
+Inspect currently active SSH sessions.
+
+- `list_sessions`: no parameters. Returns the live sessions that the local diagnosis service can target, including their target identity (`nodeId`, `host`, `port`, `username`) and `status`.
+- `get_session`: pass `sessionId`. Returns the same identity for one session.
+
+Use these when the Agent needs to confirm the active target identity before passing a `target` assertion to `prepare_session`, `run_command`, or `troubleshoot`. The returned `nodeId` / `host` / `port` / `username` is the authoritative identity that the target guard will compare against.
 
 ### `troubleshoot`
 
@@ -222,7 +337,21 @@ Example input:
 
 ### `close_session`
 
-Close the session when the investigation is complete.
+Close the active SSH session when the investigation is complete.
+
+Pass `sessionId` only. After this call the session id is no longer valid; further `prepare_session` / `run_command` / `get_session_logs` calls will fail with 404.
+
+### `list_diagnostic_runs`
+
+List archived diagnostic runs from the local knowledge base. Use it to look up historical context before starting a new investigation.
+
+Example input:
+
+```json
+{
+  "limit": 20
+}
+```
 
 ## Interpretation Rules
 

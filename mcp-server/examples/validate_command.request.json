@@ -1,0 +1,10 @@
+{
+  "tool": "validate_command",
+  "arguments": {
+    "cmd": "tail -n 200 /var/log/myapp/error.log",
+    "context": "mcp-preflight"
+  },
+  "expected": {
+    "contains": ["allowed", "reason", "baseCommands"]
+  }
+}
