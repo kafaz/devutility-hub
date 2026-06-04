@@ -5,7 +5,7 @@ const { spawn } = require('node:child_process');
 
 const { STORE_FILE } = require('../diagnosticKb');
 
-const PORT = 3312;
+const PORT = 3313;
 const BASE_URL = `http://127.0.0.1:${PORT}`;
 
 function sleep(ms) {
