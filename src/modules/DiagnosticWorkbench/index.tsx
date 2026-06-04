@@ -215,8 +215,8 @@ interface LocalizationDeskDraft {
 
 interface CommandPolicySnapshot {
   storeFile?: string;
-  allowedBaseCommands: string[];
-  defaultAllowedBaseCommands: string[];
+  blockedBaseCommands: string[];
+  defaultBlockedBaseCommands: string[];
   customAddedCommands: string[];
   customRemovedCommands: string[];
   blockedRules: Array<{
@@ -327,11 +327,11 @@ type SourcePreviewDisplayRow =
 function normalizeCommandPolicySnapshot(snapshot: Partial<CommandPolicySnapshot> | null | undefined): CommandPolicySnapshot {
   return {
     storeFile: typeof snapshot?.storeFile === 'string' ? snapshot.storeFile : undefined,
-    allowedBaseCommands: Array.isArray(snapshot?.allowedBaseCommands)
-      ? snapshot.allowedBaseCommands.map((item) => String(item)).filter(Boolean)
+    blockedBaseCommands: Array.isArray(snapshot?.blockedBaseCommands)
+      ? snapshot.blockedBaseCommands.map((item) => String(item)).filter(Boolean)
       : [],
-    defaultAllowedBaseCommands: Array.isArray(snapshot?.defaultAllowedBaseCommands)
-      ? snapshot.defaultAllowedBaseCommands.map((item) => String(item)).filter(Boolean)
+    defaultBlockedBaseCommands: Array.isArray(snapshot?.defaultBlockedBaseCommands)
+      ? snapshot.defaultBlockedBaseCommands.map((item) => String(item)).filter(Boolean)
       : [],
     customAddedCommands: Array.isArray(snapshot?.customAddedCommands)
       ? snapshot.customAddedCommands.map((item) => String(item)).filter(Boolean)
@@ -1364,7 +1364,7 @@ const DiagnosticWorkbench: React.FC = () => {
   function syncPolicyState(snapshot: CommandPolicySnapshot) {
     const normalized = normalizeCommandPolicySnapshot(snapshot);
     setCommandPolicy(normalized);
-    setPolicyEditorValue(normalized.allowedBaseCommands.join('\n'));
+    setPolicyEditorValue(normalized.blockedBaseCommands.join('\n'));
   }
 
   async function fetchCommandPolicy() {
@@ -1373,61 +1373,61 @@ const DiagnosticWorkbench: React.FC = () => {
       const response = await fetch(`${PROXY_HTTP}/api/agent/command-policy`);
       const data = await response.json();
       if (!data.ok) {
-        messageApi.error(data.error || '命令白名单加载失败');
+        messageApi.error(data.error || '命令黑名单加载失败');
         return;
       }
       syncPolicyState(data.policy);
     } catch {
-      messageApi.error('命令白名单加载失败');
+      messageApi.error('命令黑名单加载失败');
     } finally {
       setLoadingPolicy(false);
     }
   }
 
-  async function addAllowedCommand() {
+  async function addBlockedCommand() {
     const command = newAllowedCommand.trim();
     if (!command) {
-      messageApi.warning('请输入要加入白名单的命令名');
+      messageApi.warning('请输入要加入黑名单的命令名');
       return;
     }
 
     setSavingPolicy(true);
     try {
-      const response = await fetch(`${PROXY_HTTP}/api/agent/command-policy/allow`, {
+      const response = await fetch(`${PROXY_HTTP}/api/agent/command-policy/block`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ command }),
       });
       const data = await response.json();
       if (!data.ok) {
-        messageApi.error(data.error || '白名单更新失败');
+        messageApi.error(data.error || '黑名单更新失败');
         return;
       }
       syncPolicyState(data.policy);
       setNewAllowedCommand('');
-      messageApi.success(`已允许命令 ${command}`);
+      messageApi.success(`已拦截命令 ${command}`);
     } catch {
-      messageApi.error('白名单更新失败');
+      messageApi.error('黑名单更新失败');
     } finally {
       setSavingPolicy(false);
     }
   }
 
-  async function removeAllowedCommand(command: string) {
+  async function removeBlockedCommand(command: string) {
     setSavingPolicy(true);
     try {
-      const response = await fetch(`${PROXY_HTTP}/api/agent/command-policy/allow/${encodeURIComponent(command)}`, {
+      const response = await fetch(`${PROXY_HTTP}/api/agent/command-policy/block/${encodeURIComponent(command)}`, {
         method: 'DELETE',
       });
       const data = await response.json();
       if (!data.ok) {
-        messageApi.error(data.error || '移除白名单命令失败');
+        messageApi.error(data.error || '移除黑名单命令失败');
         return;
       }
       syncPolicyState(data.policy);
-      messageApi.success(`已移除命令 ${command}`);
+      messageApi.success(`已放行命令 ${command}`);
     } catch {
-      messageApi.error('移除白名单命令失败');
+      messageApi.error('移除黑名单命令失败');
     } finally {
       setSavingPolicy(false);
     }
@@ -1444,7 +1444,7 @@ const DiagnosticWorkbench: React.FC = () => {
     );
 
     if (commands.length === 0) {
-      messageApi.warning('白名单不能为空');
+      messageApi.warning('黑名单不能为空，至少保留基础防护');
       return;
     }
 
@@ -1453,17 +1453,17 @@ const DiagnosticWorkbench: React.FC = () => {
       const response = await fetch(`${PROXY_HTTP}/api/agent/command-policy`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ allowedBaseCommands: commands }),
+        body: JSON.stringify({ blockedBaseCommands: commands }),
       });
       const data = await response.json();
       if (!data.ok) {
-        messageApi.error(data.error || '白名单保存失败');
+        messageApi.error(data.error || '黑名单保存失败');
         return;
       }
       syncPolicyState(data.policy);
-      messageApi.success(`白名单已保存，共 ${data.policy?.allowedBaseCommands?.length || commands.length} 条命令`);
+      messageApi.success(`黑名单已保存，共 ${data.policy?.blockedBaseCommands?.length || commands.length} 条命令`);
     } catch {
-      messageApi.error('白名单保存失败');
+      messageApi.error('黑名单保存失败');
     } finally {
       setSavingPolicy(false);
     }
@@ -1477,13 +1477,13 @@ const DiagnosticWorkbench: React.FC = () => {
       });
       const data = await response.json();
       if (!data.ok) {
-        messageApi.error(data.error || '白名单重置失败');
+        messageApi.error(data.error || '黑名单重置失败');
         return;
       }
       syncPolicyState(data.policy);
-      messageApi.success('白名单已恢复默认策略');
+      messageApi.success('黑名单已恢复默认策略');
     } catch {
-      messageApi.error('白名单重置失败');
+      messageApi.error('黑名单重置失败');
     } finally {
       setSavingPolicy(false);
     }
@@ -2625,8 +2625,8 @@ const DiagnosticWorkbench: React.FC = () => {
                         <Space direction="vertical" size={16} style={{ width: '100%' }}>
                           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
                             <Card size="small">
-                              <Text type="secondary">当前允许命令</Text>
-                              <Title level={4} style={{ margin: '8px 0 0' }}>{commandPolicy.allowedBaseCommands.length}</Title>
+                              <Text type="secondary">当前阻止命令</Text>
+                              <Title level={4} style={{ margin: '8px 0 0' }}>{commandPolicy.blockedBaseCommands.length}</Title>
                             </Card>
                             <Card size="small">
                               <Text type="secondary">动态新增</Text>
@@ -2639,53 +2639,53 @@ const DiagnosticWorkbench: React.FC = () => {
                           </div>
 
                           <div>
-                            <Text type="secondary">快速新增允许命令</Text>
+                            <Text type="secondary">快速新增阻止命令</Text>
                             <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
                               <Input
                                 value={newAllowedCommand}
                                 onChange={(e) => setNewAllowedCommand(e.target.value)}
-                                placeholder="例如 kubectl"
+                                placeholder="例如 rm"
                                 style={{ flex: 1, minWidth: 220 }}
-                                onPressEnter={() => void addAllowedCommand()}
+                                onPressEnter={() => void addBlockedCommand()}
                               />
-                              <Button type="primary" icon={<PlusOutlined />} loading={savingPolicy} onClick={() => void addAllowedCommand()}>
-                                加入白名单
+                              <Button type="primary" danger icon={<PlusOutlined />} loading={savingPolicy} onClick={() => void addBlockedCommand()}>
+                                加入黑名单
                               </Button>
                               <Button icon={<ReloadOutlined />} loading={loadingPolicy} onClick={() => void fetchCommandPolicy()}>
                                 刷新策略
                               </Button>
-                              <Popconfirm title="恢复默认白名单？" onConfirm={() => void resetPolicyToDefault()}>
+                              <Popconfirm title="恢复默认黑名单？" onConfirm={() => void resetPolicyToDefault()}>
                                 <Button loading={savingPolicy}>恢复默认</Button>
                               </Popconfirm>
                             </div>
                           </div>
 
                           <div>
-                            <Text type="secondary">批量编辑基础命令白名单</Text>
+                            <Text type="secondary">批量编辑基础命令黑名单</Text>
                             <TextArea
                               value={policyEditorValue}
                               onChange={(e) => setPolicyEditorValue(e.target.value)}
                               autoSize={{ minRows: 6, maxRows: 12 }}
                               style={{ marginTop: 8 }}
-                              placeholder={'一行一个命令，例如\ncurl\njournalctl\nkubectl'}
+                              placeholder={'一行一个命令，例如\nrm\nmkfs\nreboot'}
                             />
                             <div style={{ marginTop: 8 }}>
-                              <Button type="primary" icon={<SaveOutlined />} loading={savingPolicy} onClick={() => void saveCommandPolicy()}>
-                                保存整套白名单
+                              <Button type="primary" danger icon={<SaveOutlined />} loading={savingPolicy} onClick={() => void saveCommandPolicy()}>
+                                保存整套黑名单
                               </Button>
                             </div>
                           </div>
 
                           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                            {commandPolicy.allowedBaseCommands.map((command) => (
+                            {commandPolicy.blockedBaseCommands.map((command) => (
                               <Tag
                                 key={command}
                                 closable
                                 onClose={(event) => {
                                   event.preventDefault();
-                                  void removeAllowedCommand(command);
+                                  void removeBlockedCommand(command);
                                 }}
-                                color={commandPolicy.customAddedCommands.includes(command) ? 'green' : 'blue'}
+                                color={commandPolicy.customAddedCommands.includes(command) ? 'volcano' : 'red'}
                                 style={{ paddingInline: 10 }}
                               >
                                 {command}

@@ -5,16 +5,10 @@ const { getServerDataDir } = require('./storePaths');
 const STORE_DIR = getServerDataDir();
 const STORE_FILE = path.join(STORE_DIR, 'command-policy.json');
 
-const DEFAULT_ALLOWED_BASE_COMMANDS = [
-  'echo', 'printf', 'pwd', 'cd', 'ls', 'cat', 'tail', 'head',
-  'grep', 'egrep', 'fgrep', 'awk', 'sed', 'cut', 'sort', 'uniq', 'wc', 'tr',
-  'date', 'hostname', 'uptime', 'whoami', 'id', 'uname', 'env', 'printenv',
-  'ps', 'pstree', 'top', 'free', 'df', 'du', 'vmstat', 'iostat', 'sar', 'mpstat', 'pidstat',
-  'ss', 'netstat', 'lsof', 'journalctl', 'dmesg', 'systemctl', 'service',
-  'curl', 'ping', 'telnet', 'nc', 'nslookup', 'dig', 'traceroute',
-  'ip', 'ifconfig', 'route', 'find', 'stat', 'file', 'blkid', 'lsblk', 'fdisk',
-  'mysql', 'psql', 'redis-cli',
-  'python', 'python3',
+const DEFAULT_BLOCKED_BASE_COMMANDS = [
+  'rm', 'mkfs', 'dd', 'reboot', 'shutdown', 'poweroff',
+  'chmod', 'chown', 'kill', 'killall', 'pkill',
+  'mount', 'umount', 'fdisk', 'parted',
 ];
 
 const BLOCKED_RULES = [
@@ -55,7 +49,7 @@ function uniqueCommands(values) {
 
 function buildDefaultPolicy() {
   return {
-    allowedBaseCommands: uniqueCommands(DEFAULT_ALLOWED_BASE_COMMANDS),
+    blockedBaseCommands: uniqueCommands(DEFAULT_BLOCKED_BASE_COMMANDS),
   };
 }
 
@@ -72,9 +66,9 @@ function loadPolicyFromDisk() {
     const raw = fs.readFileSync(STORE_FILE, 'utf8');
     const parsed = JSON.parse(raw);
     return {
-      allowedBaseCommands: Array.isArray(parsed.allowedBaseCommands) && parsed.allowedBaseCommands.length > 0
-        ? uniqueCommands(parsed.allowedBaseCommands)
-        : buildDefaultPolicy().allowedBaseCommands,
+      blockedBaseCommands: Array.isArray(parsed.blockedBaseCommands) && parsed.blockedBaseCommands.length > 0
+        ? uniqueCommands(parsed.blockedBaseCommands)
+        : buildDefaultPolicy().blockedBaseCommands,
     };
   } catch {
     return buildDefaultPolicy();
@@ -90,7 +84,7 @@ function getPolicyState() {
 
 function persistPolicy(nextPolicy) {
   policyState = {
-    allowedBaseCommands: uniqueCommands(nextPolicy.allowedBaseCommands),
+    blockedBaseCommands: uniqueCommands(nextPolicy.blockedBaseCommands),
   };
   ensureStore();
   fs.writeFileSync(STORE_FILE, JSON.stringify(policyState, null, 2), 'utf8');
@@ -232,11 +226,17 @@ function validateSpecialCases(info, rawSegment) {
   }
 
   if (info.binary === 'sed' && info.tokens.includes('-i')) {
-    return { ok: false, reason: 'sed -i 会修改文件，不在白名单内' };
+    return { ok: false, reason: 'sed -i 会直接修改文件，被安全策略禁止' };
   }
 
   if (info.binary === 'find' && info.tokens.some((token) => token === '-exec' || token === '-delete')) {
-    return { ok: false, reason: 'find -exec/-delete 可能执行或删除内容，不在白名单内' };
+    return { ok: false, reason: 'find -exec/-delete 可能执行或删除内容，被安全策略禁止' };
+  }
+
+  if (info.binary === 'git') {
+    if (info.tokens.some((t) => ['push', 'commit', 'revert', 'reset', 'clean', 'rm'].includes(t))) {
+      return { ok: false, reason: '禁止对代码库进行破坏性或提交/推送操作' };
+    }
   }
 
   if (info.binary === 'top' && !info.tokens.some((token) => token.includes('b'))) {
@@ -244,17 +244,17 @@ function validateSpecialCases(info, rawSegment) {
   }
 
   if (info.binary === 'systemctl') {
-    const allowedSubs = new Set(['status', 'show', 'list-units', 'list-sockets', 'is-active', 'cat']);
+    const blockedSubs = new Set(['stop', 'restart', 'disable', 'mask', 'kill', 'poweroff', 'reboot', 'halt', 'suspend', 'hibernate']);
     const sub = info.tokens[info.index + 1] || '';
-    if (!allowedSubs.has(sub)) {
-      return { ok: false, reason: `systemctl 仅允许 ${Array.from(allowedSubs).join(', ')}` };
+    if (blockedSubs.has(sub)) {
+      return { ok: false, reason: `systemctl 敏感操作 ${sub} 被禁止` };
     }
   }
 
   if (info.binary === 'service') {
     const sub = info.tokens[info.index + 2] || '';
-    if (sub && sub !== 'status') {
-      return { ok: false, reason: 'service 仅允许 status 查询' };
+    if (sub && ['stop', 'restart', 'reload', 'force-reload'].includes(sub)) {
+      return { ok: false, reason: 'service 敏感操作被禁止' };
     }
   }
 
@@ -308,14 +308,14 @@ function validateCommandPolicy(command, context = 'service') {
     return { ok: false, reason: '未解析到可执行命令段', context };
   }
 
-  const allowedCommands = new Set(getPolicyState().allowedBaseCommands);
+  const blockedCommands = new Set(getPolicyState().blockedBaseCommands);
 
   for (const segment of segments) {
     const info = extractCommandInfo(segment);
-    if (!allowedCommands.has(info.binary)) {
+    if (blockedCommands.has(info.binary)) {
       return {
         ok: false,
-        reason: `命令 "${info.binary || segment}" 不在服务端白名单内`,
+        reason: `命令 "${info.binary || segment}" 位于服务端黑名单内，被禁止执行`,
         context,
         segment,
       };
@@ -373,49 +373,46 @@ function assertCommandAllowed(command, context = 'service') {
 function getCommandPolicySnapshot() {
   const current = getPolicyState();
   const defaults = buildDefaultPolicy();
-  const currentSet = new Set(current.allowedBaseCommands);
-  const defaultSet = new Set(defaults.allowedBaseCommands);
+  const currentSet = new Set(current.blockedBaseCommands);
+  const defaultSet = new Set(defaults.blockedBaseCommands);
 
   return {
     storeFile: STORE_FILE,
-    allowedBaseCommands: [...current.allowedBaseCommands],
-    defaultAllowedBaseCommands: [...defaults.allowedBaseCommands],
-    customAddedCommands: current.allowedBaseCommands.filter((cmd) => !defaultSet.has(cmd)),
-    customRemovedCommands: defaults.allowedBaseCommands.filter((cmd) => !currentSet.has(cmd)),
+    blockedBaseCommands: [...current.blockedBaseCommands],
+    defaultBlockedBaseCommands: [...defaults.blockedBaseCommands],
+    customAddedCommands: current.blockedBaseCommands.filter((cmd) => !defaultSet.has(cmd)),
+    customRemovedCommands: defaults.blockedBaseCommands.filter((cmd) => !currentSet.has(cmd)),
     blockedRules: BLOCKED_RULES.map((rule) => ({ id: rule.id, reason: rule.reason })),
   };
 }
 
-function replaceAllowedBaseCommands(commands) {
-  if (!Array.isArray(commands) || commands.length === 0) {
-    throw new Error('allowedBaseCommands 不能为空数组');
+function replaceBlockedBaseCommands(commands) {
+  if (!Array.isArray(commands)) {
+    throw new Error('blockedBaseCommands 必须是数组');
   }
-  persistPolicy({ allowedBaseCommands: commands });
+  persistPolicy({ blockedBaseCommands: commands });
   return getCommandPolicySnapshot();
 }
 
-function addAllowedBaseCommand(command) {
+function addBlockedBaseCommand(command) {
   const normalized = normalizeCommandName(command);
   const current = getPolicyState();
-  if (!current.allowedBaseCommands.includes(normalized)) {
+  if (!current.blockedBaseCommands.includes(normalized)) {
     persistPolicy({
-      allowedBaseCommands: [...current.allowedBaseCommands, normalized],
+      blockedBaseCommands: [...current.blockedBaseCommands, normalized],
     });
   }
   return getCommandPolicySnapshot();
 }
 
-function removeAllowedBaseCommand(command) {
+function removeBlockedBaseCommand(command) {
   const normalized = normalizeCommandName(command);
   const current = getPolicyState();
-  const next = current.allowedBaseCommands.filter((item) => item !== normalized);
-  if (next.length === current.allowedBaseCommands.length) {
-    throw new Error(`命令 "${normalized}" 不存在于白名单中`);
+  const next = current.blockedBaseCommands.filter((item) => item !== normalized);
+  if (next.length === current.blockedBaseCommands.length) {
+    throw new Error(`命令 "${normalized}" 不存在于黑名单中`);
   }
-  if (next.length === 0) {
-    throw new Error('白名单不能为空');
-  }
-  persistPolicy({ allowedBaseCommands: next });
+  persistPolicy({ blockedBaseCommands: next });
   return getCommandPolicySnapshot();
 }
 
@@ -426,12 +423,12 @@ function resetCommandPolicy() {
 
 module.exports = {
   STORE_FILE,
-  addAllowedBaseCommand,
+  addBlockedBaseCommand,
   assertCommandAllowed,
   getCommandPolicySnapshot,
   inspectCommandPolicy,
-  removeAllowedBaseCommand,
-  replaceAllowedBaseCommands,
+  removeBlockedBaseCommand,
+  replaceBlockedBaseCommands,
   resetCommandPolicy,
   validateCommandPolicy,
 };

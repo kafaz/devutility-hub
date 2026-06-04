@@ -76,12 +76,12 @@ const {
   savePreset,
 } = require('./agentPresets');
 const {
-  addAllowedBaseCommand,
+  addBlockedBaseCommand,
   assertCommandAllowed,
   getCommandPolicySnapshot,
   inspectCommandPolicy,
-  removeAllowedBaseCommand,
-  replaceAllowedBaseCommands,
+  removeBlockedBaseCommand,
+  replaceBlockedBaseCommands,
   resetCommandPolicy,
   validateCommandPolicy,
 } = require('./commandPolicy');
