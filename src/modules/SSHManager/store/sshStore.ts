@@ -454,6 +454,7 @@ export function recordManualCommandStart(sessionId: string, cmd: string, current
 // ─── 常量 ──────────────────────────────────────────────────────────────────
 
 const PROXY_HTTP = PROXY_HTTP_BASE;
+let proxyFailCount = 0;
 const PROXY_WS   = PROXY_WS_BASE;
 
 interface ExecCommandOptions {
@@ -1286,10 +1287,18 @@ export const useSSHStore = create<SSHStore>()(
 
       checkProxy: async () => {
         try {
-          const r = await fetch(`${PROXY_HTTP}/api/health`, { signal: AbortSignal.timeout(2000) });
-          set({ proxyOnline: r.ok });
+          const r = await fetch(`${PROXY_HTTP}/api/health`, { signal: AbortSignal.timeout(5000) });
+          if (r.ok) {
+            proxyFailCount = 0;
+            set({ proxyOnline: true });
+          } else {
+            throw new Error('HTTP ' + r.status);
+          }
         } catch {
-          set({ proxyOnline: false });
+          proxyFailCount += 1;
+          if (proxyFailCount >= 3) {
+            set({ proxyOnline: false });
+          }
         }
       },
 
