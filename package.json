@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "ci:verify": "npm run build && npm run test:web && npm run test:server && npm run test:server:integration",
-    "predev": "node scripts/ensure-server-deps.mjs",
-    "dev": "concurrently -k \"vite\" \"node server/index.js\"",
+    "predev": "node scripts/ensure-server-deps.mjs && node scripts/ensure-mcp-deps.mjs",
+    "dev": "concurrently -k -n vite,proxy,mcp --prefix-colors cyan,green,magenta \"vite\" \"node server/index.js\" \"node mcp-server/dist/index.js\"",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "package:windows-portable": "node scripts/build-windows-portable.mjs",

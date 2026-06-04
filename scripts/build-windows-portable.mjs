@@ -151,6 +151,7 @@ async function main() {
     'diagnosticKb.js',
     'commandPolicy.js',
     'codeContext.js',
+    'targetGuard.js',
     'package.json',
     'package-lock.json',
     'lib',
