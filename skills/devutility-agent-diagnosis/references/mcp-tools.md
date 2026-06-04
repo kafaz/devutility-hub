@@ -19,11 +19,12 @@ When a SOP is available, let the SOP structure decide which path should dominate
 1. `resolve_node` or `list_nodes`
 2. `open_session`
 3. `list_prepare_profiles` when a prepare profile is needed
-4. `prepare_session`
-5. `run_command`
-6. `get_session_logs`
-7. `recall_similar_runs` when a historical case may unblock the diagnosis
-8. `close_session`
+4. `prepare_session` with a `target` assertion
+5. `validate_command` for non-trivial commands
+6. `run_command` with the same `target` assertion
+7. `get_session_logs`
+8. `recall_similar_runs` when a historical case may unblock the diagnosis
+9. `close_session`
 
 ## Tool Summary
 
@@ -97,6 +98,12 @@ Example input:
 ```json
 {
   "sessionId": "agent_xxx",
+  "target": {
+    "nodeId": "node-prod-db-01",
+    "host": "10.0.0.11",
+    "port": 22,
+    "username": "root"
+  },
   "profileId": "linux-root-default"
 }
 ```
@@ -106,6 +113,12 @@ Example with explicit steps:
 ```json
 {
   "sessionId": "agent_xxx",
+  "target": {
+    "nodeId": "node-prod-db-01",
+    "host": "10.0.0.11",
+    "port": 22,
+    "username": "root"
+  },
   "steps": [
     { "name": "sudo", "cmd": "sudo su -" },
     { "name": "profile", "cmd": "source /etc/profile >/dev/null 2>&1 || true" },
@@ -123,6 +136,12 @@ Example input:
 ```json
 {
   "sessionId": "agent_xxx",
+  "target": {
+    "nodeId": "node-prod-db-01",
+    "host": "10.0.0.11",
+    "port": 22,
+    "username": "root"
+  },
   "cmd": "tail -n 200 /var/log/myapp/error.log",
   "timeoutMs": 15000,
   "mode": "pty"
@@ -130,6 +149,23 @@ Example input:
 ```
 
 Use `mode="exec"` only for stateless checks.
+Do not call `run_command` with only `sessionId`; target guard rejects mismatches before the command is written to the SSH PTY.
+
+### `validate_command`
+
+Preflight a command against the service-side whitelist without running it.
+
+Example input:
+
+```json
+{
+  "cmd": "tail -n 200 /var/log/myapp/error.log",
+  "context": "mcp-preflight"
+}
+```
+
+Use this before `run_command` when the command contains shell operators, user-provided paths, SQL, curl options, or a less common binary.
+If the result has `allowed=false`, stop and report the reason. Do not call policy mutation tools unless the user explicitly asked to change the local command whitelist.
 
 ### `troubleshoot`
 
@@ -196,10 +232,17 @@ Treat these fields as primary evidence:
 - `stderr`
 - `exitCode`
 - `durationMs`
+- `policy.allowed`
+- `targetGuard.ok`
+- `session.host` / `session.username` / `session.nodeId`
 
 Do not treat an empty `stdout` as success by itself. Always consider `exitCode` and the command semantics.
 
 When a prepare step or command fails, report the exact failed step and the output that supports the conclusion.
+
+When `run_command` returns policy metadata with `allowed=false`, treat it as a controlled block result, not a transport failure.
+
+When a tool returns `targetGuard.ok=false`, treat it as a wrong-target block. Do not retry against a different active session unless you explicitly resolve and open the intended node again.
 
 When `troubleshoot` and manual commands disagree, trust the raw evidence and explain the discrepancy instead of hiding it.
 

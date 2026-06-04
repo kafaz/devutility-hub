@@ -79,11 +79,17 @@ const {
   addAllowedBaseCommand,
   assertCommandAllowed,
   getCommandPolicySnapshot,
+  inspectCommandPolicy,
   removeAllowedBaseCommand,
   replaceAllowedBaseCommands,
   resetCommandPolicy,
   validateCommandPolicy,
 } = require('./commandPolicy');
+const {
+  formatTargetGuardError,
+  normalizeExpectedTarget,
+  verifySessionTarget,
+} = require('./targetGuard');
 const {
   foldSessionLogs,
   normalizeBuiltinNoiseMode,
@@ -1242,6 +1248,12 @@ app.post('/api/agent/command-policy/reset', (_req, res) => {
   }
 });
 
+app.post('/api/agent/command-policy/validate', (req, res) => {
+  const cmd = req.body?.cmd ?? req.body?.command;
+  const context = String(req.body?.context || 'agent-command-preflight');
+  res.json({ ok: true, data: inspectCommandPolicy(cmd, context) });
+});
+
 function writeAgentAuditLog(text) {
   const logFilePath = path.join(os.tmpdir(), 'agent-execution-audit.log');
   fs.appendFileSync(logFilePath, text, 'utf8');
@@ -1253,6 +1265,14 @@ function getBlockedCommandError(cmd, context = 'agent-command') {
     return `[Command Policy Block] ${result.reason}: ${cmd}`;
   }
   return null;
+}
+
+function getTargetGuardDecision(req, sessionInfo) {
+  return verifySessionTarget(
+    sessionInfo,
+    normalizeExpectedTarget(req.body || {}),
+    { requireTarget: req.body?.requireTarget === true }
+  );
 }
 
 function extractDirectConnectionFromBody(body = {}) {
@@ -1709,6 +1729,18 @@ app.post('/api/agent/sessions/:sessionId/prepare', async (req, res) => {
   if (!session) {
     return res.status(404).json({ ok: false, error: 'Session 不存在或已断开连接' });
   }
+  const sessionInfo = describeSession(req.params.sessionId, session);
+  const targetGuard = getTargetGuardDecision(req, sessionInfo);
+  if (!targetGuard.ok) {
+    const message = formatTargetGuardError(targetGuard);
+    appendSessionLog(req.params.sessionId, {
+      type: 'target_guard_blocked',
+      level: 'error',
+      message,
+      targetGuard,
+    });
+    return res.status(409).json({ ok: false, error: message, data: { targetGuard } });
+  }
 
   const profile = req.body?.profileId ? getPrepareProfile(req.body.profileId) : null;
   const stage = normalizePrepareStage(req.body?.stage);
@@ -1728,7 +1760,8 @@ app.post('/api/agent/sessions/:sessionId/prepare', async (req, res) => {
       ok: true,
       data: {
         stage,
-        session: describeSession(req.params.sessionId, session),
+        session: sessionInfo,
+        targetGuard,
         profile: profile || null,
         ...result,
       },
@@ -1744,16 +1777,18 @@ app.post('/api/agent/sessions/:sessionId/commands', async (req, res) => {
     return res.status(400).json({ ok: false, error: '缺少 cmd 参数' });
   }
 
-  const blocked = getBlockedCommandError(cmd, 'agent-session-command');
-  if (blocked) {
+  const policyDecision = inspectCommandPolicy(cmd, 'agent-session-command');
+  if (!policyDecision.allowed) {
+    const blocked = `[Command Policy Block] ${policyDecision.reason}: ${cmd}`;
     appendSessionLog(req.params.sessionId, {
       type: 'command_blocked',
       level: 'warning',
       cmd,
       mode,
       message: blocked,
+      policy: policyDecision,
     });
-    return res.status(403).json({ ok: false, error: blocked });
+    return res.status(403).json({ ok: false, error: blocked, data: { policy: policyDecision } });
   }
 
   const session = global.activeSessions.get(req.params.sessionId);
@@ -1762,16 +1797,33 @@ app.post('/api/agent/sessions/:sessionId/commands', async (req, res) => {
   }
 
   const startTime = new Date().toISOString();
+  const sessionInfo = describeSession(req.params.sessionId, session);
+  const targetGuard = getTargetGuardDecision(req, sessionInfo);
+  if (!targetGuard.ok) {
+    const message = formatTargetGuardError(targetGuard);
+    appendSessionLog(req.params.sessionId, {
+      type: 'target_guard_blocked',
+      level: 'error',
+      cmd,
+      mode,
+      message,
+      targetGuard,
+    });
+    return res.status(409).json({ ok: false, error: message, data: { targetGuard } });
+  }
   appendSessionLog(req.params.sessionId, {
     type: 'command_started',
     level: 'info',
     cmd,
     mode,
+    policy: policyDecision,
+    targetGuard,
     message: `开始执行命令 (${mode})`,
   });
 
   try {
     const result = await executeSingleCommand(session, cmd, timeoutMs, mode);
+    const finishedAt = new Date().toISOString();
     appendSessionLog(req.params.sessionId, {
       type: 'command_result',
       level: result.exitCode === 0 ? 'info' : 'warning',
@@ -1779,6 +1831,8 @@ app.post('/api/agent/sessions/:sessionId/commands', async (req, res) => {
       mode,
       exitCode: result.exitCode,
       durationMs: result.durationMs,
+      policy: policyDecision,
+      targetGuard,
       stdout: trimLogText(result.stdout),
       stderr: trimLogText(result.stderr),
       message: `命令执行完成，exit=${result.exitCode}，duration=${result.durationMs}ms`,
@@ -1793,13 +1847,30 @@ app.post('/api/agent/sessions/:sessionId/commands', async (req, res) => {
       `Stderr  :\n${result.stderr}\n` +
       '---------------------------------------------------\n'
     );
-    res.json({ ok: true, data: result });
+    res.json({
+      ok: true,
+      data: {
+        ...result,
+        command: {
+          cmd,
+          mode,
+          timeoutMs,
+        },
+        policy: policyDecision,
+        targetGuard,
+        session: sessionInfo,
+        startedAt: startTime,
+        finishedAt,
+      },
+    });
   } catch (e) {
     appendSessionLog(req.params.sessionId, {
       type: 'command_error',
       level: 'error',
       cmd,
       mode,
+      policy: policyDecision,
+      targetGuard,
       message: e.message,
     });
     writeAgentAuditLog(
@@ -2030,6 +2101,19 @@ app.post('/api/agent/troubleshoot', async (req, res) => {
       }
     }
 
+    const session = global.activeSessions.get(sessionId);
+    const targetGuard = getTargetGuardDecision(req, describeSession(sessionId, session));
+    if (!targetGuard.ok) {
+      const message = formatTargetGuardError(targetGuard);
+      appendSessionLog(sessionId, {
+        type: 'target_guard_blocked',
+        level: 'error',
+        message,
+        targetGuard,
+      });
+      return res.status(409).json({ ok: false, error: message, data: { targetGuard } });
+    }
+
     const run = await runDiagnosticOrchestration({
       ...payload,
       sessionId,
@@ -2043,6 +2127,7 @@ app.post('/api/agent/troubleshoot', async (req, res) => {
       sessionId,
       autoConnected,
       keptSession: keepSession || !autoDisconnect,
+      targetGuard,
       run,
     };
 

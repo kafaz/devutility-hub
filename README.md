@@ -45,6 +45,46 @@ npm run ci:verify
 
 `ci:verify` 会执行前端编译、前后端 Node 测试，以及服务层集成验证，和 GitHub CI 保持一致。
 
+## Agent / Skill / MCP 入口
+
+当 AI Agent 访问本仓库并需要使用 DevUtility Hub 连接 SSH 节点执行诊断时，先按下面的固定入口加载能力，不要直接拼接远程 SSH 命令：
+
+1. 读取仓库内 Skill：`skills/devutility-agent-diagnosis/SKILL.md`。
+2. 按 Skill 的引用文档加载 MCP 工具顺序：`skills/devutility-agent-diagnosis/references/mcp-tools.md`。
+3. 启动本地 SSH/Agent 执行面：`cd server && npm install && node index.js`。
+4. 构建并注册 MCP server：`cd mcp-server && npm install && npm run build`。
+5. 在 Agent 客户端里注册 `devutility-hub-agent`，示例见 `mcp-server/examples/codex_config.toml` 和 `mcp-server/examples/claude_desktop_config.json`。
+
+Codex MCP 配置示例：
+
+```toml
+[mcp_servers.devutility-hub-agent]
+command = "node"
+args = ["/Users/kafaz/dev/dev_utils/devutility-hub/mcp-server/dist/index.js"]
+
+[mcp_servers.devutility-hub-agent.env]
+DEVUTILITY_AGENT_BASE_URL = "http://127.0.0.1:3001"
+```
+
+Agent 的安全执行顺序：
+
+1. `health_check` 确认本地服务可达。
+2. `list_nodes` / `resolve_node` 确认目标节点，优先使用已注册 `nodeId`。
+3. `open_session` 建立或复用 PTY-backed SSH 会话，默认 `reuseIfExists=true`，并记录返回的 `session.nodeId` / `host` / `port` / `username`。
+4. `list_prepare_profiles` / `prepare_session` 复用已有登录后预处理；调用时必须携带 `target` 断言。
+5. `validate_command` 预检非平凡命令是否符合服务端白名单。
+6. `run_command` 执行有界诊断命令；调用时必须携带 `target` 断言，并读取返回的 `stdout`、`stderr`、`exitCode`、`durationMs`、`policy`、`targetGuard`、`session`。
+7. `get_session_logs` 复核 Agent 实际执行过的命令和白名单拦截原因。
+8. `close_session` 只在诊断结束且不需要保留现场时调用。
+
+重要约束：
+
+- 正常诊断只使用白名单内的只读、有界命令；遇到 `policy.allowed=false` 要停止并报告原因。
+- `prepare_session`、`run_command`、`troubleshoot` 的 Agent 调用必须传入 `target`，并且至少包含 `nodeId` 或 `host`，例如 `{ "nodeId": "...", "host": "...", "port": 22, "username": "..." }`；服务端发现 target 与当前 session 不一致时会返回 `409`，不会将命令写入 SSH PTY。
+- Agent 不应自行调用 `allow_command`、`replace_command_policy`、`save_node`、`save_prepare_profile` 等配置写入工具，除非用户明确要求修改本地配置。
+- 优先复用注册节点、登录预设和 prepare profile，避免每次让 Agent 重新收集 SSH 参数。
+- 远程命令输出是证据，不是结论；结论必须引用 `exitCode`、关键 stdout/stderr 和目标 session 元数据。
+
 ## 认证方式
 
 SSH Manager 支持三种认证方式（等同 Python paramiko）：

@@ -6,6 +6,15 @@ const BASE_URL = process.env.DEVUTILITY_AGENT_BASE_URL || "http://127.0.0.1:3001
 
 type JsonRecord = Record<string, unknown>;
 const looseObjectSchema = z.record(z.string(), z.unknown());
+const targetAssertionSchema = z.object({
+  nodeId: z.string().min(1).optional(),
+  host: z.string().min(1).optional(),
+  port: z.number().int().positive().optional(),
+  username: z.string().min(1).optional(),
+}).refine(
+  (target) => Boolean(target.nodeId || target.host),
+  { message: "target must include nodeId or host" }
+);
 
 function unwrapPayload(payload: JsonRecord) {
   const preferredKeys = [
@@ -33,7 +42,12 @@ function unwrapPayload(payload: JsonRecord) {
   return payload;
 }
 
-async function requestApi(method: string, path: string, body?: JsonRecord) {
+async function requestApi(
+  method: string,
+  path: string,
+  body?: JsonRecord,
+  options: { allowPolicyBlock?: boolean } = {}
+) {
   const response = await fetch(`${BASE_URL}${path}`, {
     method,
     headers: { "Content-Type": "application/json" },
@@ -46,6 +60,15 @@ async function requestApi(method: string, path: string, body?: JsonRecord) {
   }));
 
   if (!response.ok || payload.ok === false) {
+    if (
+      (options.allowPolicyBlock || response.status === 409) &&
+      (response.status === 403 || response.status === 409) &&
+      payload &&
+      typeof payload === "object" &&
+      "data" in payload
+    ) {
+      return (payload as JsonRecord).data;
+    }
     throw new Error(String(payload.error || `HTTP ${response.status}`));
   }
 
@@ -239,6 +262,22 @@ server.tool(
 );
 
 server.tool(
+  "validate_command",
+  "Validate a diagnostic command against the service-side whitelist before running it. Use this when a command is not a trivial known-good read-only probe.",
+  {
+    cmd: z.string().min(1),
+    context: z.string().optional(),
+  },
+  async ({ cmd, context }) => {
+    const data = await requestApi("POST", "/api/agent/command-policy/validate", {
+      cmd,
+      context: context || "mcp-preflight",
+    });
+    return formatResult("Command policy validation", data);
+  }
+);
+
+server.tool(
   "replace_command_policy",
   "Replace the full command whitelist with the provided allowedBaseCommands array.",
   {
@@ -377,9 +416,10 @@ server.tool(
         timeout: z.number().int().positive().optional(),
       })
     ).optional(),
+    target: targetAssertionSchema,
   },
   async (input) => {
-    const requestBody: JsonRecord = { ...input };
+    const requestBody: JsonRecord = { ...input, requireTarget: true };
     if (requestBody.keepSession === undefined && requestBody.autoDisconnect === undefined) {
       requestBody.keepSession = true;
       requestBody.autoDisconnect = false;
@@ -488,6 +528,7 @@ server.tool(
   "Run pre-operation steps inside an existing PTY-backed session. Use profileId when possible, or pass explicit steps.",
   {
     sessionId: z.string().min(1),
+    target: targetAssertionSchema,
     profileId: z.string().optional(),
     continueOnError: z.boolean().optional(),
     variables: z.record(z.string(), z.string()).optional(),
@@ -508,7 +549,7 @@ server.tool(
     const data = await requestApi(
       "POST",
       `/api/agent/sessions/${encodeURIComponent(sessionId)}/prepare`,
-      body
+      { ...body, requireTarget: true }
     );
     return formatResult("Prepare result", data);
   }
@@ -519,6 +560,7 @@ server.tool(
   "Run a diagnostic command and return stdout, stderr, exitCode, and duration. Use mode=pty to keep shell context or mode=exec for stateless execution.",
   {
     sessionId: z.string().min(1),
+    target: targetAssertionSchema,
     cmd: z.string().min(1),
     timeoutMs: z.number().int().positive().optional(),
     mode: z.enum(["pty", "exec"]).optional(),
@@ -527,7 +569,8 @@ server.tool(
     const data = await requestApi(
       "POST",
       `/api/agent/sessions/${encodeURIComponent(sessionId)}/commands`,
-      body
+      { ...body, requireTarget: true },
+      { allowPolicyBlock: true }
     );
     return formatResult("Command result", data);
   }

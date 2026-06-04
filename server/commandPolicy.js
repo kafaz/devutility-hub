@@ -335,6 +335,30 @@ function validateCommandPolicy(command, context = 'service') {
   return { ok: true, context, segments };
 }
 
+function inspectCommandPolicy(command, context = 'service') {
+  const raw = String(command || '').trim();
+  const result = validateCommandPolicy(raw, context);
+  const segments = Array.isArray(result.segments)
+    ? result.segments
+    : result.segment
+      ? [result.segment]
+      : [];
+  const baseCommands = segments
+    .map((segment) => extractCommandInfo(segment).binary)
+    .filter(Boolean);
+
+  return {
+    command: raw,
+    context,
+    allowed: result.ok,
+    reason: result.reason || '',
+    blockedRuleId: result.blockedRuleId || null,
+    segment: result.segment || null,
+    segments,
+    baseCommands,
+  };
+}
+
 function assertCommandAllowed(command, context = 'service') {
   const result = validateCommandPolicy(command, context);
   if (!result.ok) {
@@ -405,6 +429,7 @@ module.exports = {
   addAllowedBaseCommand,
   assertCommandAllowed,
   getCommandPolicySnapshot,
+  inspectCommandPolicy,
   removeAllowedBaseCommand,
   replaceAllowedBaseCommands,
   resetCommandPolicy,

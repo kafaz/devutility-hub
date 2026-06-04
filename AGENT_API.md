@@ -164,6 +164,41 @@ If you are running the Agent remotely, you must tunnel this port using a tool li
 
 - 将白名单恢复为服务默认值
 
+### 0.4.5 Validate Command
+
+**Endpoint:** `POST /api/agent/command-policy/validate`
+
+**Request Example:**
+```json
+{
+  "cmd": "tail -n 200 /var/log/nginx/error.log",
+  "context": "mcp-preflight"
+}
+```
+
+**Response Example:**
+```json
+{
+  "ok": true,
+  "data": {
+    "command": "tail -n 200 /var/log/nginx/error.log",
+    "context": "mcp-preflight",
+    "allowed": true,
+    "reason": "",
+    "blockedRuleId": null,
+    "segment": null,
+    "segments": ["tail -n 200 /var/log/nginx/error.log"],
+    "baseCommands": ["tail"]
+  }
+}
+```
+
+用途：
+
+- 在真正执行前检查命令是否符合服务端白名单
+- 为 Agent 返回结构化的允许/拒绝原因
+- 当 `allowed=false` 时，Agent 应停止执行、报告原因，并等待用户确认是否调整白名单
+
 ---
 
 
@@ -192,6 +227,8 @@ If you are running the Agent remotely, you must tunnel this port using a tool li
 
 - `GET /api/agent/sessions`
 - `GET /api/agent/sessions/:sessionId`
+
+Agent 后续执行 `prepare`、`commands`、`troubleshoot` 时，应把返回的 `nodeId`、`host`、`port`、`username` 作为 `target` 断言一并传回服务端，避免把命令写入错误的活跃 SSH 会话。`target` 至少要包含 `nodeId` 或 `host`；仅包含 `username` / `port` 不足以标识节点。
 
 ### 0.5.2 `open` with direct host + password
 
@@ -266,6 +303,12 @@ It blocks the HTTP request and awaits the final standard output + exit code to r
 ```json
 {
   "sessionId": "x2y3z4",   // Obained from /api/agent/sessions
+  "target": {
+    "nodeId": "node-prod-db-01",
+    "host": "10.0.0.11",
+    "port": 22,
+    "username": "root"
+  },
   "cmd": "tail -n 20 /var/log/nginx/error.log",
   "timeout": 15000         // (Optional) Max MS to wait before aborting. Default: 30000
 }
@@ -305,6 +348,8 @@ It blocks the HTTP request and awaits the final standard output + exit code to r
 ```
 
 如果命令不在白名单内，服务会返回 `403`，并在错误信息中明确指出拦截原因。
+新接口 `POST /api/agent/sessions/:sessionId/commands` 还会在成功响应里返回 `command`、`policy`、`session`、`startedAt`、`finishedAt` 元数据；如果命令被策略拦截，响应体会携带 `data.policy.allowed=false`，方便 Agent 区分“白名单拒绝”和“SSH/网络失败”。
+如果传入的 `target` 与当前 `sessionId` 绑定的节点不一致，服务会返回 `409` 和 `data.targetGuard.ok=false`，并且不会将命令写入 SSH PTY。
 
 ---
 

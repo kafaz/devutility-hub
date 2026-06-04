@@ -2,6 +2,16 @@
 
 This server exposes the local DevUtility Hub diagnosis APIs as MCP tools over `stdio`.
 
+## Agent Entry Contract
+
+Agents should treat this MCP server as the supported access path for DevUtility Hub SSH diagnosis. Before using these tools, load the repository skill at:
+
+```text
+skills/devutility-agent-diagnosis/SKILL.md
+```
+
+The skill defines the safe operating sequence, command whitelist behavior, and when to stop for user collaboration. Do not bypass this MCP layer with direct `ssh` from the local shell unless the user explicitly asks for manual SSH outside DevUtility Hub.
+
 ## Prerequisites
 
 1. Start the DevUtility Hub proxy service:
@@ -50,6 +60,7 @@ export DEVUTILITY_AGENT_BASE_URL=http://127.0.0.1:3001
 - `delete_prepare_profile`
 - `update_prepare_profile`
 - `get_command_policy`
+- `validate_command`
 - `replace_command_policy`
 - `allow_command`
 - `remove_allowed_command`
@@ -143,6 +154,45 @@ The MCP server now also exposes write tools for the configuration plane:
 
 This means an agent can now bootstrap its own login preset or node definition before opening a session, instead of depending on manual pre-configuration.
 
+For normal diagnosis, prefer the execution-plane flow and treat configuration-plane tools as explicit administration actions. Use `validate_command` before `run_command` for commands that contain shell operators, user-supplied paths, uncommon binaries, SQL, or curl options. If validation returns `allowed=false`, stop and report the blocked reason instead of widening the whitelist automatically.
+
+### Target Assertion
+
+Agent-facing execution tools require a `target` assertion so a command cannot be queued into the wrong active SSH session.
+
+Use the target identity returned by `open_session` or `get_session`:
+
+```json
+{
+  "sessionId": "agent_xxx",
+  "target": {
+    "nodeId": "node-prod-db-01",
+    "host": "10.0.0.11",
+    "port": 22,
+    "username": "root"
+  },
+  "cmd": "tail -n 200 /var/log/myapp/error.log",
+  "timeoutMs": 15000,
+  "mode": "pty"
+}
+```
+
+`prepare_session`, `run_command`, and `troubleshoot` send `requireTarget=true` through the MCP adapter. If the assertion does not match the current session, the service returns `targetGuard.ok=false` with HTTP `409`, and the command is not written to the SSH PTY.
+The assertion must include at least `nodeId` or `host`; `username` and `port` alone are not accepted because they do not identify a node.
+
+### `validate_command`
+
+Preflight a command against the service-side whitelist without running it.
+
+```json
+{
+  "cmd": "tail -n 200 /var/log/myapp/error.log",
+  "context": "mcp-preflight"
+}
+```
+
+The response includes `allowed`, `reason`, `blockedRuleId`, `segments`, and `baseCommands` so an Agent can decide whether to proceed, pick a safer probe, or ask the user to approve a policy change.
+
 ## `get_session_logs`
 
 Query recent in-memory logs for a given session.
@@ -177,6 +227,35 @@ Example environment:
 }
 ```
 
+Codex example:
+
+```toml
+[mcp_servers.devutility-hub-agent]
+command = "node"
+args = ["/Users/kafaz/dev/dev_utils/devutility-hub/mcp-server/dist/index.js"]
+
+[mcp_servers.devutility-hub-agent.env]
+DEVUTILITY_AGENT_BASE_URL = "http://127.0.0.1:3001"
+```
+
+Claude Desktop example:
+
+```json
+{
+  "mcpServers": {
+    "devutility-hub-agent": {
+      "command": "node",
+      "args": [
+        "/Users/kafaz/dev/dev_utils/devutility-hub/mcp-server/dist/index.js"
+      ],
+      "env": {
+        "DEVUTILITY_AGENT_BASE_URL": "http://127.0.0.1:3001"
+      }
+    }
+  }
+}
+```
+
 ## Expected Flow
 
 1. `health_check`
@@ -185,7 +264,8 @@ Example environment:
 4. `get_command_policy`
 5. `open_session` or `troubleshoot`
 6. `recall_similar_runs`
-7. `prepare_session`
-8. `run_command` or `troubleshoot`
-9. `get_session_logs` / `get_diagnostic_run` / `list_diagnostic_runs`
-10. `close_session`
+7. `prepare_session` with target assertion
+8. `validate_command` when the command is not trivially known-good
+9. `run_command` or `troubleshoot` with target assertion
+10. `get_session_logs` / `get_diagnostic_run` / `list_diagnostic_runs`
+11. `close_session`

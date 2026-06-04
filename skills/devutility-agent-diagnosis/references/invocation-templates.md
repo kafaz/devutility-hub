@@ -1,12 +1,15 @@
 # DevUtility Agent Diagnosis Invocation Templates
 
 Use these templates when invoking `$devutility-agent-diagnosis`.
+When an Agent is operating from the repository root, load `skills/devutility-agent-diagnosis/SKILL.md` first, then use the `devutility-hub-agent` MCP server. For non-trivial commands, call `validate_command` before `run_command`.
+For `prepare_session`, `run_command`, and `troubleshoot`, pass the intended `target` assertion from `open_session` or `get_session`; never rely on `sessionId` alone.
 
 ## 1. Diagnose a Registered Node by Name
 
 ```text
 Use $devutility-agent-diagnosis to diagnose the issue on node "<node name or alias>".
 Resolve the node first, open or reuse a session, run the default prepare profile if one exists, then execute bounded read-only diagnostic commands.
+Validate non-trivial commands against the command policy before running them.
 Focus on "<symptom>".
 Return:
 1. symptom summary
@@ -20,6 +23,7 @@ Example:
 ```text
 Use $devutility-agent-diagnosis to diagnose the issue on node "主库1".
 Resolve the node first, open or reuse a session, run the default prepare profile if one exists, then execute bounded read-only diagnostic commands.
+Validate non-trivial commands against the command policy before running them.
 Focus on "mysql replication lag keeps increasing".
 Return:
 1. symptom summary
@@ -35,6 +39,7 @@ Use $devutility-agent-diagnosis to diagnose a host that may not be registered.
 If the node cannot be resolved, open a session with a direct connection using host "<ip>", port "<port>", username "<username>", and the available local auth method.
 Run prepare steps only if required by the target environment.
 Investigate "<symptom>" using safe read-only commands and summarize the evidence.
+Validate non-trivial commands before execution and stop if the command policy blocks the probe.
 ```
 
 ## 3. Continue an Existing Investigation
@@ -42,6 +47,7 @@ Investigate "<symptom>" using safe read-only commands and summarize the evidence
 ```text
 Use $devutility-agent-diagnosis to continue an existing diagnosis session.
 List active sessions, pick the session for "<node name or host>", keep the current PTY context, and run only the additional commands needed to confirm or reject "<hypothesis>".
+Validate non-trivial commands before execution and do not change local command policy unless explicitly asked.
 Return the new evidence and whether the hypothesis is supported.
 ```
 
@@ -51,6 +57,7 @@ Return the new evidence and whether the hypothesis is supported.
 Use $devutility-agent-diagnosis to investigate why service "<service name>" is unavailable on node "<node name>".
 After preparing the shell, check process state, listening ports, recent error logs, system resources, and any obvious OOM or disk-full signals.
 Prefer bounded commands such as ps, ss, tail, grep, df, free, and dmesg with limits.
+Validate any command that includes shell operators, user-provided paths, SQL, curl options, or uncommon binaries before running it.
 Return:
 1. current outage symptom
 2. strongest evidence
@@ -95,8 +102,11 @@ Goal: <problem statement>
 Constraints:
 - prefer registered nodes
 - reuse session if possible
+- pass target assertions on prepare_session, run_command, and troubleshoot
 - run prepare profile before PTY commands when available
+- call validate_command before non-trivial run_command calls
 - use bounded read-only commands unless explicitly told otherwise
+- do not mutate command policy, nodes, presets, or prepare profiles unless explicitly asked
 - summarize evidence instead of dumping large logs
 Output:
 1. symptom
