@@ -2,7 +2,7 @@
 
 Use these templates when invoking `$devutility-agent-diagnosis`.
 When an Agent is operating from the repository root, load `skills/devutility-agent-diagnosis/SKILL.md` first, then use the `devutility-hub-agent` MCP server. For non-trivial commands, call `validate_command` before `run_command`.
-For `prepare_session`, `run_command`, and `troubleshoot`, pass the intended `target` assertion from `open_session` or `get_session`; never rely on `sessionId` alone.
+For `prepare_session`, `run_command`, and `run_commands_batch`, pass the intended `target` assertion from `open_session` or `get_session`; never rely on `sessionId` alone.
 
 ## 1. Diagnose a Registered Node by Name
 
@@ -102,7 +102,7 @@ Goal: <problem statement>
 Constraints:
 - prefer registered nodes
 - reuse session if possible
-- pass target assertions on prepare_session, run_command, and troubleshoot
+- pass target assertions on prepare_session, run_command, and run_commands_batch
 - run prepare profile before PTY commands when available
 - call validate_command before non-trivial run_command calls
 - use bounded read-only commands unless explicitly told otherwise

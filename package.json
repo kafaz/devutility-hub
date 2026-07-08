@@ -4,48 +4,13 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "ci:verify": "npm run build && npm run test:web && npm run test:server && npm run test:server:integration",
     "predev": "node scripts/ensure-server-deps.mjs && node scripts/ensure-mcp-deps.mjs",
-    "dev": "concurrently -k -n vite,proxy,mcp --prefix-colors cyan,green,magenta \"vite\" \"node server/index.js\" \"node mcp-server/dist/index.js\"",
-    "build": "tsc -b && vite build",
-    "lint": "eslint .",
-    "package:windows-portable": "node scripts/build-windows-portable.mjs",
-    "preview": "vite preview",
-    "test:server": "node --test scripts/ensure-server-deps.test.mjs server/runtimeHelpers.test.cjs server/targetGuard.test.cjs server/proxyServer.test.cjs server/test/logNoise.test.js server/test/prepareRuntime.test.js server/test/prepareProfiles.test.js",
-    "test:server:integration": "node --test server/test/commandPolicyRoutes.test.js server/test/diagnosticWorkbenchRoutes.test.js",
-    "test:web": "node --test src/utils/logNoise.test.ts src/modules/SSHManager/prepareInsights.test.ts src/modules/SSHManager/shellVars.test.ts src/modules/SSHManager/terminalResize.test.ts src/modules/SSHManager/terminalScroll.test.ts src/modules/SSHManager/store/backgroundJobStore.test.ts src/modules/DiagnosticWorkbench/viewModel.test.ts src/modules/DiagnosticWorkbench/floatingSourceWindow.test.ts src/modules/DiagnosticWorkbench/LocalizationDesk/workbenchPersistence.test.ts src/modules/DiagnosticWorkbench/LocalizationDesk/manualCommandRuns.test.ts src/modules/DiagnosticWorkbench/LocalizationDesk/localizationDeskState.test.ts src/modules/DiagnosticWorkbench/LocalizationDesk/timelineWhiteboard.test.ts src/modules/DiagnosticWorkbench/LocalizationDesk/codeProvenanceLane.test.ts"
-  },
-  "dependencies": {
-    "@ant-design/icons": "^6.1.0",
-    "@xterm/addon-search": "^0.16.0",
-    "antd": "^6.3.1",
-    "crc-32": "^1.2.2",
-    "cron-parser": "^5.5.0",
-    "echarts": "^6.0.0",
-    "echarts-for-react": "^3.0.6",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0",
-    "react-router-dom": "^7.13.1",
-    "spark-md5": "^3.0.2",
-    "tldraw": "^4.4.1",
-    "xterm": "^5.3.0",
-    "xterm-addon-fit": "^0.8.0",
-    "zustand": "^5.0.11"
+    "dev": "concurrently -k -n proxy,mcp --prefix-colors green,magenta \"node server/index.js\" \"node mcp-server/dist/index.js\"",
+    "build": "npm --prefix mcp-server run build",
+    "test:server": "node --test scripts/ensure-server-deps.test.mjs server/runtimeHelpers.test.cjs server/targetGuard.test.cjs server/proxyServer.test.cjs server/test/logNoise.test.js server/test/prepareRuntime.test.js server/test/prepareProfiles.test.js server/test/commandPolicyRoutes.test.js",
+    "ci:verify": "npm run build && npm run test:server"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.1",
-    "@types/node": "^24.11.0",
-    "@types/react": "^19.2.7",
-    "@types/react-dom": "^19.2.3",
-    "@types/spark-md5": "^3.0.5",
-    "@vitejs/plugin-react": "^5.1.1",
-    "concurrently": "^9.2.1",
-    "eslint": "^9.39.1",
-    "eslint-plugin-react-hooks": "^7.0.1",
-    "eslint-plugin-react-refresh": "^0.4.24",
-    "globals": "^16.5.0",
-    "typescript": "~5.9.3",
-    "typescript-eslint": "^8.48.0",
-    "vite": "^7.3.1"
+    "concurrently": "^9.2.1"
   }
 }

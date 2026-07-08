@@ -1,6 +1,6 @@
 ---
 name: devutility-agent-diagnosis
-description: Diagnose remote Linux, middleware, storage, or service faults through the local DevUtility Hub MCP tools. Use when Codex needs to resolve a registered node, open or reuse a PTY-backed session, run prepare steps, execute diagnostic commands, and convert command output into a structured troubleshooting conclusion for the user.
+description: Inspect remote Linux, middleware, storage, or service faults through the local DevUtility Hub MCP tools. Use when Codex needs to resolve a registered node, open or reuse a PTY-backed session, run prepare steps, execute bounded SSH commands, and convert command output into a structured conclusion for the user.
 ---
 
 # Devutility Agent Diagnosis
@@ -14,8 +14,7 @@ When an Agent enters this repository, load this skill before using any DevUtilit
 This skill supports two working modes:
 
 - A SOP-first diagnosis path when a reusable SOP exists or can be partially reused
-- A fast first pass through `recall_similar_runs` and `troubleshoot`
-- An interactive drill-down through `open_session`, `prepare_session`, and `run_command`
+- An interactive drill-down through `open_session`, `prepare_session`, `run_command`, and `run_commands_batch`
 
 When evidence is weak, conflicting, or blocked, stop the blind search and switch into a structured user-collaboration loop.
 When a repeatable path emerges, convert the useful parts into SOP material instead of leaving them as one-off commands.
@@ -33,14 +32,13 @@ When a repeatable path emerges, convert the useful parts into SOP material inste
 1. Frame the target and the symptom.
    Use `resolve_node` when the user gives a name, alias, role, or IP.
    Use `list_nodes` first when the user is unsure which node to target.
-   Use `recall_similar_runs` when the symptom is broad or when a historical starting point would reduce guesswork.
 2. Check whether a SOP should drive the diagnosis.
    Prefer an existing SOP when the symptom matches a known domain pattern such as service unavailable, slow response, network checks, or storage checks.
    Reuse part of a SOP when the overall incident is new but some checks, variables, or regex rules are clearly reusable.
    Fall back to manual commands only when no suitable SOP exists or the remaining uncertainty is narrower than the SOP.
 3. Choose the execution mode.
-   Use `troubleshoot` for a bounded first-pass diagnosis when the user already gave the symptom, collection plan, or a preset/direct connection.
-   Use the manual session flow when you need fine-grained control, when you are continuing an existing investigation, or when you need to validate a user-supplied hypothesis step by step.
+   Use the session flow for all remote access: open or reuse a session, prepare the shell when needed, then run bounded single or batch commands.
+   Use `run_commands_batch` when several safe read-only probes can run sequentially in the same session without needing intermediate interpretation.
    Treat SOP as a diagnosis scaffold: category, hints, variables, checks, sub-steps, capture rules, and normal or abnormal signals are all part of the reasoning context.
 4. Open or reuse a session.
    Use `open_session` with `nodeId`, `presetId`, or direct connection fields and a short `reason`.
@@ -56,6 +54,7 @@ When a repeatable path emerges, convert the useful parts into SOP material inste
 7. Run bounded diagnostic commands.
    Use `run_command` with `mode="pty"` by default so the command inherits the prepared shell state.
    Use `mode="exec"` only for stateless checks that must not inherit `cd`, `sudo`, or exported variables.
+   Use `run_commands_batch` for small groups of bounded read-only commands that share the same target assertion.
    Always include the same `target` assertion used for prepare. Never run a command using only `sessionId`.
 8. Analyze evidence, not guesses.
    Base findings on returned `stdout`, `stderr`, `exitCode`, and `durationMs`.
@@ -72,7 +71,7 @@ When a repeatable path emerges, convert the useful parts into SOP material inste
 11. Close or keep the session intentionally.
    Use `close_session` unless the user is actively continuing the same diagnosis.
 12. Capture what should become reusable.
-   If the incident exposed a repeatable decision path, note which commands, evidence patterns, user questions, variables, and branch points should be promoted into the diagnostic knowledge base or a SOP.
+   If the incident exposed a repeatable decision path, note which commands, evidence patterns, user questions, variables, and branch points should be promoted into a SOP or skill reference.
    Prefer promoting stable fragments first: one check, one variable, one regex pair, or one diagnosis hint can become SOP material before a full template exists.
 
 ## Command Rules
@@ -99,13 +98,11 @@ If `open_session` fails, explain whether the failure is network, SSH auth, jump 
 
 If `prepare_session` fails, stop and surface which step failed unless the user explicitly asks to continue despite partial preparation.
 
-If `troubleshoot` returns partial findings or low confidence, use `get_diagnostic_run`, `get_session_logs`, and one or two narrower follow-up commands instead of restarting from scratch.
-
 If a command returns ambiguous output, run one or two narrower follow-up commands instead of guessing.
 
 If command policy blocks the next useful probe, stop and ask the user whether to adjust the whitelist, pick a different read-only command, or hand over the missing evidence manually.
 
-If target guard blocks a prepare, command, or troubleshoot call, do not retry on another active session. Report the expected target, the actual session target, and the mismatched fields, then reopen or resolve the intended node explicitly.
+If target guard blocks a prepare or command call, do not retry on another active session. Report the expected target, the actual session target, and the mismatched fields, then reopen or resolve the intended node explicitly.
 
 If the diagnosis depends on business semantics that are not visible from system logs, switch to the user-collaboration loop rather than pretending the infrastructure data is sufficient.
 

@@ -2,28 +2,16 @@
 
 ## Tool Order
 
-Use one of these two paths.
+Use the SSH gateway as the single execution path:
 
-When a SOP is available, let the SOP structure decide which path should dominate. Use the tools to implement the SOP's intent, variables, checks, and follow-up branches.
-
-### Fast First Pass
-
-1. `recall_similar_runs`
-2. `troubleshoot`
-3. `get_diagnostic_run`
-4. `get_session_logs` or `run_command` for targeted follow-up
-5. `close_session`
-
-### Interactive Drill-Down
-
-1. `resolve_node` or `list_nodes`
-2. `open_session`
-3. `list_prepare_profiles` when a prepare profile is needed
-4. `prepare_session` with a `target` assertion
-5. `validate_command` for non-trivial commands
-6. `run_command` with the same `target` assertion
-7. `get_session_logs`
-8. `recall_similar_runs` when a historical case may unblock the diagnosis
+1. `health_check`
+2. `resolve_node` or `list_nodes`
+3. `open_session`
+4. `list_prepare_profiles` when a prepare profile is needed
+5. `prepare_session` with a `target` assertion
+6. `validate_command` for non-trivial commands
+7. `run_command` or `run_commands_batch` with the same `target` assertion
+8. `get_session_logs`
 9. `close_session`
 
 ## Tool Summary
@@ -74,25 +62,10 @@ When a SOP is available, let the SOP structure decide which path should dominate
 
 - `prepare_session`
 - `run_command`
+- `run_commands_batch`
 - `get_session_logs`
 
-### Diagnosis & Knowledge Base
-
-- `troubleshoot`
-- `recall_similar_runs`
-- `list_diagnostic_runs`
-- `get_diagnostic_run`
-
-## SOP Note
-
-This repository already has SOP templates and server-side `exec_plan`, but the current MCP layer does not yet expose first-class SOP tools such as `list_sop_templates` or `run_sop`.
-
-Until those tools exist:
-
-- use SOP as a reasoning scaffold
-- translate SOP variables into the inputs you pass to `troubleshoot`, `prepare_session`, and `run_command`
-- translate SOP checks into bounded command batches
-- record any missing branch as candidate SOP material instead of leaving it implicit
+## Core Tools
 
 ### `health_check`
 
@@ -104,10 +77,10 @@ List local SSH agent sockets or agent providers DevUtility Hub can use for agent
 
 ### `list_login_presets` / `save_login_preset` / `delete_login_preset`
 
-Manage login presets used by the preset auto-login flow.
+Manage login presets used by preset auto-login.
 
 - `list_login_presets`: no parameters.
-- `save_login_preset` payload: full preset object (must include `id`, `name`, `host`, `username`, `authType`).
+- `save_login_preset`: pass the full preset object. It must include `id`, `name`, `host`, `username`, and `authType`.
 - `delete_login_preset`: pass `presetId`.
 
 ### `list_nodes`
@@ -129,8 +102,6 @@ Use this when the user describes a system but not an exact node identifier.
 
 Resolve a node by alias, node name, IP, role, or tag.
 
-Example input:
-
 ```json
 {
   "query": "db-master"
@@ -141,30 +112,26 @@ Example input:
 
 Mutate the registered node set.
 
-- `save_node` payload: full node object (must include `nodeId`, `name`, `host`, `username`).
+- `save_node`: pass a full node object. It must include `nodeId`, `name`, `host`, and `username`.
 - `update_node`: pass `nodeId` plus a `patch` object containing only the fields to change.
-- `delete_node`: pass `nodeId` only.
+- `delete_node`: pass `nodeId`.
 
-Treat these as configuration-plane tools. Do not call them during normal diagnosis unless the user explicitly asked you to change local configuration.
+Treat these as configuration-plane tools. Do not call them during normal remote access unless the user explicitly asked you to change local configuration.
 
 ### `open_session`
 
 Prefer opening by `nodeId`.
 
-Example input:
-
 ```json
 {
   "nodeId": "node-prod-db-01",
-  "reason": "diagnose mysql replication lag",
+  "reason": "inspect mysql replication lag",
   "reuseIfExists": true,
   "ttlSec": 1800
 }
 ```
 
-Use direct `connection` only when the node is not registered.
-
-You can also pass direct top-level fields such as `host`, `port`, `username`, `password`, `keyContent`, or `keyFilePath`.
+Use direct `connection` only when the node is not registered. You can also pass top-level fields such as `host`, `port`, `username`, `password`, `keyContent`, or `keyFilePath`.
 
 ### `list_prepare_profiles`
 
@@ -174,17 +141,15 @@ Use this to discover prebuilt preparation flows such as root escalation or envir
 
 Mutate prepare profiles.
 
-- `save_prepare_profile` payload: full profile object (must include `profileId` and `name`).
+- `save_prepare_profile`: pass a full profile object. It must include `profileId` and `name`.
 - `update_prepare_profile`: pass `profileId` plus a `patch` object.
-- `delete_prepare_profile`: pass `profileId` only.
+- `delete_prepare_profile`: pass `profileId`.
 
-Configuration-plane. Do not invoke during normal diagnosis unless the user explicitly asked to change local configuration.
+Configuration-plane. Do not invoke during normal remote access unless the user explicitly asked to change local configuration.
 
 ### `prepare_session`
 
 Use either `profileId` or explicit `steps`.
-
-Example input:
 
 ```json
 {
@@ -220,9 +185,7 @@ Example with explicit steps:
 
 ### `run_command`
 
-Run bounded diagnosis commands.
-
-Example input:
+Run one bounded command in an SSH session.
 
 ```json
 {
@@ -239,18 +202,36 @@ Example input:
 }
 ```
 
-Use `mode="exec"` only for stateless checks.
-Do not call `run_command` with only `sessionId`; target guard rejects mismatches before the command is written to the SSH PTY.
+Use `mode="exec"` only for stateless checks. Do not call `run_command` with only `sessionId`; target guard rejects mismatches before the command is written to the SSH PTY.
+
+### `run_commands_batch`
+
+Run multiple bounded commands sequentially in the same SSH session. Use this when several read-only probes are independent and you want fewer tool round trips.
+
+```json
+{
+  "sessionId": "agent_xxx",
+  "target": {
+    "nodeId": "node-prod-db-01",
+    "host": "10.0.0.11",
+    "port": 22,
+    "username": "root"
+  },
+  "commands": [
+    { "cmd": "hostname", "mode": "exec", "timeoutMs": 5000 },
+    { "cmd": "uptime", "mode": "exec", "timeoutMs": 5000 }
+  ],
+  "stopOnFailure": false
+}
+```
 
 ### `get_command_policy`
 
-Fetch the current service-side command whitelist and the fixed blocking rules. No parameters. Use it once at the start of a session to know which base commands the local whitelist currently allows.
+Fetch the current service-side command whitelist and fixed blocking rules. No parameters. Use it once at the start of a session to know which base commands the local whitelist currently allows.
 
 ### `validate_command`
 
 Preflight a command against the service-side whitelist without running it.
-
-Example input:
 
 ```json
 {
@@ -259,16 +240,15 @@ Example input:
 }
 ```
 
-Use this before `run_command` when the command contains shell operators, user-provided paths, SQL, curl options, or a less common binary.
-If the result has `allowed=false`, stop and report the reason. Do not call policy mutation tools unless the user explicitly asked to change the local command whitelist.
+Use this before `run_command` when the command contains shell operators, user-provided paths, SQL, curl options, or a less common binary. If the result has `allowed=false`, stop and report the reason. Do not call policy mutation tools unless the user explicitly asked to change the local command whitelist.
 
 ### `replace_command_policy` / `allow_command` / `remove_allowed_command` / `reset_command_policy`
 
 Mutate the service-side command whitelist.
 
-- `replace_command_policy` payload: full `allowedBaseCommands` array.
-- `allow_command` payload: `{ "command": "<binary>" }`.
-- `remove_allowed_command` payload: `{ "command": "<binary>" }`.
+- `replace_command_policy`: pass the full `allowedBaseCommands` array.
+- `allow_command`: pass `{ "command": "<binary>" }`.
+- `remove_allowed_command`: pass `{ "command": "<binary>" }`.
 - `reset_command_policy`: no payload, restores defaults.
 
 These are configuration-plane tools. Do not widen the whitelist on your own when a command is blocked. Stop and ask the user.
@@ -277,56 +257,14 @@ These are configuration-plane tools. Do not widen the whitelist on your own when
 
 Inspect currently active SSH sessions.
 
-- `list_sessions`: no parameters. Returns the live sessions that the local diagnosis service can target, including their target identity (`nodeId`, `host`, `port`, `username`) and `status`.
-- `get_session`: pass `sessionId`. Returns the same identity for one session.
+- `list_sessions`: no parameters. Returns live sessions, including target identity (`nodeId`, `host`, `port`, `username`) and `status`.
+- `get_session`: pass `sessionId`.
 
-Use these when the Agent needs to confirm the active target identity before passing a `target` assertion to `prepare_session`, `run_command`, or `troubleshoot`. The returned `nodeId` / `host` / `port` / `username` is the authoritative identity that the target guard will compare against.
-
-### `troubleshoot`
-
-Run the single-agent first-pass diagnosis flow.
-
-Use this when the user already has a target, a symptom, and a bounded collection plan, and you want one structured run that combines:
-
-- optional auto-login
-- collection
-- analysis
-- report generation
-- knowledge-base archiving
-
-Prefer `keepSession=true` when you expect a second interactive round after the first-pass results.
-This is also the preferred first-pass executor when you are reusing a SOP concept but do not yet have a formal MCP `run_sop` tool.
-
-### `recall_similar_runs`
-
-Recall similar historical diagnostic runs before or during an investigation.
-
-Use this when:
-
-- the symptom is broad
-- the first pass is stuck
-- the user wants known-good next commands
-
-### `get_diagnostic_run`
-
-Fetch the archived output of one diagnosis run.
-
-Use this after `troubleshoot` when you need the structured findings and report before deciding the next manual commands.
-
-Use it as the evidence base for deciding whether a new SOP fragment should be proposed.
-
+Use these when the Agent needs to confirm active target identity before passing a `target` assertion to `prepare_session`, `run_command`, or `run_commands_batch`.
 
 ### `get_session_logs`
 
 Retrieve recent per-session logs captured by the server.
-
-Use this when users ask:
-
-- which commands the Agent actually executed
-- what stdout/stderr was returned
-- whether command policy blocked a command
-
-Example input:
 
 ```json
 {
@@ -337,21 +275,9 @@ Example input:
 
 ### `close_session`
 
-Close the active SSH session when the investigation is complete.
+Close the active SSH session when remote access is complete.
 
-Pass `sessionId` only. After this call the session id is no longer valid; further `prepare_session` / `run_command` / `get_session_logs` calls will fail with 404.
-
-### `list_diagnostic_runs`
-
-List archived diagnostic runs from the local knowledge base. Use it to look up historical context before starting a new investigation.
-
-Example input:
-
-```json
-{
-  "limit": 20
-}
-```
+Pass `sessionId` only. After this call the session id is no longer valid; further `prepare_session`, `run_command`, `run_commands_batch`, or `get_session_logs` calls will fail with 404.
 
 ## Interpretation Rules
 
@@ -369,10 +295,6 @@ Do not treat an empty `stdout` as success by itself. Always consider `exitCode` 
 
 When a prepare step or command fails, report the exact failed step and the output that supports the conclusion.
 
-When `run_command` returns policy metadata with `allowed=false`, treat it as a controlled block result, not a transport failure.
+When `run_command` or `run_commands_batch` returns policy metadata with `allowed=false`, treat it as a controlled block result, not a transport failure.
 
 When a tool returns `targetGuard.ok=false`, treat it as a wrong-target block. Do not retry against a different active session unless you explicitly resolve and open the intended node again.
-
-When `troubleshoot` and manual commands disagree, trust the raw evidence and explain the discrepancy instead of hiding it.
-
-When an existing SOP and the raw evidence disagree, explain whether the SOP is stale, incomplete, or misapplied.

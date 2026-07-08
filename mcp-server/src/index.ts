@@ -1,8 +1,30 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { readFileSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const BASE_URL = process.env.DEVUTILITY_AGENT_BASE_URL || "http://127.0.0.1:3001";
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+function resolveBaseUrl(): string {
+  if (process.env.DEVUTILITY_AGENT_BASE_URL) {
+    return process.env.DEVUTILITY_AGENT_BASE_URL;
+  }
+  try {
+    const portFilePath = resolve(__dirname, '../../.runtime-port');
+    const port = readFileSync(portFilePath, 'utf8').trim();
+    if (/^\d+$/.test(port)) {
+      return `http://127.0.0.1:${port}`;
+    }
+  } catch {
+    // .runtime-port 不存在，使用默认值
+  }
+  return "http://127.0.0.1:3001";
+}
+
+const BASE_URL = resolveBaseUrl();
 
 type JsonRecord = Record<string, unknown>;
 const looseObjectSchema = z.record(z.string(), z.unknown());
@@ -46,33 +68,46 @@ async function requestApi(
   method: string,
   path: string,
   body?: JsonRecord,
-  options: { allowPolicyBlock?: boolean } = {}
+  options: { allowPolicyBlock?: boolean; timeoutMs?: number } = {}
 ) {
-  const response = await fetch(`${BASE_URL}${path}`, {
-    method,
-    headers: { "Content-Type": "application/json" },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), options.timeoutMs ?? 60000);
 
-  const payload = await response.json().catch(() => ({
-    ok: false,
-    error: `API returned non-JSON response: HTTP ${response.status}`,
-  }));
+  try {
+    const response = await fetch(`${BASE_URL}${path}`, {
+      method,
+      headers: { "Content-Type": "application/json" },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
+    });
 
-  if (!response.ok || payload.ok === false) {
-    if (
-      (options.allowPolicyBlock || response.status === 409) &&
-      (response.status === 403 || response.status === 409) &&
-      payload &&
-      typeof payload === "object" &&
-      "data" in payload
-    ) {
-      return (payload as JsonRecord).data;
+    const payload = await response.json().catch(() => ({
+      ok: false,
+      error: `API returned non-JSON response: HTTP ${response.status}`,
+    }));
+
+    if (!response.ok || payload.ok === false) {
+      if (
+        (options.allowPolicyBlock || response.status === 409) &&
+        (response.status === 403 || response.status === 409) &&
+        payload &&
+        typeof payload === "object" &&
+        "data" in payload
+      ) {
+        return (payload as JsonRecord).data;
+      }
+      throw new Error(String(payload.error || `HTTP ${response.status}`));
     }
-    throw new Error(String(payload.error || `HTTP ${response.status}`));
-  }
 
-  return unwrapPayload(payload as JsonRecord);
+    return unwrapPayload(payload as JsonRecord);
+  } catch (error: unknown) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`请求超时（${(options.timeoutMs ?? 60000) / 1000}s）: ${method} ${path}`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 function formatResult(title: string, data: unknown) {
@@ -80,7 +115,7 @@ function formatResult(title: string, data: unknown) {
     content: [
       {
         type: "text" as const,
-        text: `${title}\n${JSON.stringify(data, null, 2)}`,
+        text: `${title}\n${JSON.stringify(data)}`,
       },
     ],
   };
@@ -147,7 +182,7 @@ server.tool(
 
 server.tool(
   "list_nodes",
-  "List locally registered diagnosis nodes with nodeId, name, IP, role, tags, and prepare profile.",
+  "List locally registered SSH nodes with nodeId, name, IP, role, tags, and prepare profile.",
   {},
   async () => {
     const data = await requestApi("GET", "/api/agent/nodes");
@@ -263,7 +298,7 @@ server.tool(
 
 server.tool(
   "validate_command",
-  "Validate a diagnostic command against the service-side whitelist before running it. Use this when a command is not a trivial known-good read-only probe.",
+  "Validate a remote command against the service-side whitelist before running it. Use this when a command is not a trivial known-good read-only probe.",
   {
     cmd: z.string().min(1),
     context: z.string().optional(),
@@ -325,7 +360,7 @@ server.tool(
 
 server.tool(
   "open_session",
-  "Open or reuse a diagnosis session. Use presetId for preset-based auto-login, otherwise use nodeId, connection/auth, or direct host/username/password fields.",
+  "Open or reuse an SSH session. Use presetId for preset-based auto-login, otherwise use nodeId, connection/auth, or direct host/username/password fields.",
   {
     presetId: z.string().min(1).optional(),
     sessionId: z.string().min(1).optional(),
@@ -358,134 +393,8 @@ server.tool(
 );
 
 server.tool(
-  "troubleshoot",
-  "Run the single-agent troubleshoot flow. It can reuse an existing session or auto-connect by presetId or direct connection fields.",
-  {
-    presetId: z.string().min(1).optional(),
-    sessionId: z.string().min(1).optional(),
-    keepSession: z.boolean().optional(),
-    autoDisconnect: z.boolean().optional(),
-    cols: z.number().int().positive().optional(),
-    rows: z.number().int().positive().optional(),
-    connection: z.record(z.string(), z.unknown()).optional(),
-    name: z.string().optional(),
-    host: z.string().optional(),
-    port: z.number().int().positive().optional(),
-    username: z.string().optional(),
-    authType: z.enum(["privateKey", "password", "agent"]).optional(),
-    password: z.string().optional(),
-    keyContent: z.string().optional(),
-    keyFilePath: z.string().optional(),
-    passphrase: z.string().optional(),
-    agent: z.string().optional(),
-    jumpHostId: z.string().optional(),
-    jumpHost: z.record(z.string(), z.unknown()).optional(),
-    title: z.string().min(1),
-    symptom: z.string().min(1),
-    notes: z.string().optional(),
-    collectionPlan: z.array(
-      z.object({
-        id: z.string().optional(),
-        name: z.string().optional(),
-        command: z.string().optional(),
-        cmd: z.string().optional(),
-        timeoutMs: z.number().int().positive().optional(),
-        timeout: z.number().int().positive().optional(),
-      })
-    ).optional(),
-    analysisRules: z.array(
-      z.object({
-        id: z.string().optional(),
-        name: z.string().optional(),
-        pattern: z.string().optional(),
-        summary: z.string().optional(),
-        severity: z.enum(["info", "warning", "critical"]).optional(),
-        source: z.enum(["all", "stdout", "stderr"]).optional(),
-      })
-    ).optional(),
-    businessActions: z.array(
-      z.object({
-        id: z.string().optional(),
-        name: z.string().optional(),
-        scriptPath: z.string().optional(),
-        args: z.union([z.string(), z.array(z.string())]).optional(),
-        stdinPayload: z.string().optional(),
-        payload: z.string().optional(),
-        runMode: z.enum(["before_collection", "after_collection"]).optional(),
-        timeoutMs: z.number().int().positive().optional(),
-        timeout: z.number().int().positive().optional(),
-      })
-    ).optional(),
-    target: targetAssertionSchema,
-  },
-  async (input) => {
-    const requestBody: JsonRecord = { ...input, requireTarget: true };
-    if (requestBody.keepSession === undefined && requestBody.autoDisconnect === undefined) {
-      requestBody.keepSession = true;
-      requestBody.autoDisconnect = false;
-    }
-    const data = await requestApi("POST", "/api/agent/troubleshoot", requestBody);
-    return formatResult("Troubleshoot result", data);
-  }
-);
-
-server.tool(
-  "list_diagnostic_runs",
-  "List archived diagnostic runs from the local knowledge base for history review.",
-  {
-    limit: z.number().int().positive().max(200).optional(),
-  },
-  async ({ limit }) => {
-    const query = limit ? `?limit=${encodeURIComponent(String(limit))}` : "";
-    const data = await requestApi("GET", `/api/diagnostic/runs${query}`);
-    return formatResult("Diagnostic runs", data);
-  }
-);
-
-server.tool(
-  "get_diagnostic_run",
-  "Get one archived diagnostic run by run id, including findings and report.",
-  {
-    runId: z.string().min(1),
-  },
-  async ({ runId }) => {
-    const data = await requestApi("GET", `/api/diagnostic/runs/${encodeURIComponent(runId)}`);
-    return formatResult("Diagnostic run", data);
-  }
-);
-
-server.tool(
-  "recall_similar_runs",
-  "Recall similar historical runs from the diagnostic knowledge base based on title, symptom, and planned commands.",
-  {
-    title: z.string().optional(),
-    symptom: z.string().optional(),
-    notes: z.string().optional(),
-    limit: z.number().int().positive().max(10).optional(),
-    collectionPlan: z.array(
-      z.object({
-        name: z.string().optional(),
-        command: z.string().optional(),
-        cmd: z.string().optional(),
-      })
-    ).optional(),
-    businessActions: z.array(
-      z.object({
-        name: z.string().optional(),
-        scriptPath: z.string().optional(),
-        args: z.union([z.string(), z.array(z.string())]).optional(),
-      })
-    ).optional(),
-  },
-  async (input) => {
-    const data = await requestApi("POST", "/api/diagnostic/recall", input);
-    return formatResult("Similar diagnostic runs", data);
-  }
-);
-
-server.tool(
   "list_sessions",
-  "List currently active sessions that the local diagnosis service can use.",
+  "List currently active SSH sessions that the local gateway can use.",
   {},
   async () => {
     const data = await requestApi("GET", "/api/agent/sessions");
@@ -557,7 +466,7 @@ server.tool(
 
 server.tool(
   "run_command",
-  "Run a diagnostic command and return stdout, stderr, exitCode, and duration. Use mode=pty to keep shell context or mode=exec for stateless execution.",
+  "Run a command in an SSH session and return stdout, stderr, exitCode, and duration. Use mode=pty to keep shell context or mode=exec for stateless execution.",
   {
     sessionId: z.string().min(1),
     target: targetAssertionSchema,
@@ -577,8 +486,34 @@ server.tool(
 );
 
 server.tool(
+  "run_commands_batch",
+  "Run multiple commands in sequence within the same SSH session. Returns all results at once, reducing round-trips. Use this instead of multiple run_command calls when you need to execute several commands.",
+  {
+    sessionId: z.string().min(1),
+    target: targetAssertionSchema,
+    commands: z.array(
+      z.object({
+        cmd: z.string().min(1),
+        timeoutMs: z.number().int().positive().optional(),
+        mode: z.enum(["pty", "exec"]).optional(),
+      })
+    ).min(1).max(20),
+    stopOnFailure: z.boolean().optional(),
+  },
+  async ({ sessionId, ...body }) => {
+    const data = await requestApi(
+      "POST",
+      `/api/agent/sessions/${encodeURIComponent(sessionId)}/commands/batch`,
+      { ...body, requireTarget: true },
+      { allowPolicyBlock: true, timeoutMs: 120000 }
+    );
+    return formatResult("Batch command results", data);
+  }
+);
+
+server.tool(
   "close_session",
-  "Close an active diagnosis session once investigation is complete.",
+  "Close an active SSH session once remote access is complete.",
   {
     sessionId: z.string().min(1),
   },

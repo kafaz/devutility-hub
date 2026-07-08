@@ -33,13 +33,10 @@ const cors   = require('cors');
 const http   = require('http');
 const fs     = require('fs');
 const path   = require('path');
-const os     = require('os');
 const crypto = require('crypto');
-const { simpleGit } = require('simple-git');
 const {
   buildRuntimeUrls,
   normalizeServerRuntimeOptions,
-  shouldServeAppShell,
 } = require('./runtimeHelpers');
 const { ManagedAgentSession } = require('./lib/managedAgentSession');
 const {
@@ -59,16 +56,6 @@ const {
 const {
   executeStructuredSteps: executePrepareSteps,
 } = require('./lib/prepareRuntime');
-const {
-  appendRun,
-  buildDiagnosticReport,
-  buildHeuristicFindings,
-  buildSignals,
-  getRunById,
-  listRuns,
-  patchRunWorkbench,
-  recallSimilarRuns,
-} = require('./diagnosticKb');
 const {
   deletePreset,
   getPresetById,
@@ -95,17 +82,6 @@ const {
   normalizeBuiltinNoiseMode,
   normalizeNoiseKeywords,
 } = require('./lib/logNoise');
-const {
-  openCodeContext,
-  renderLocation,
-  renderSymbol,
-  searchSymbols,
-  getCallers,
-  getCallees,
-  findCallRelation,
-  listContexts,
-  closeContext,
-} = require('./codeContext');
 
 const app    = express();
 const server = http.createServer(app);
@@ -113,7 +89,6 @@ const wss    = new WebSocketServer({ server, path: '/terminal' });
 let runtimeOptions = normalizeServerRuntimeOptions({
   host: process.env.HOST,
   port: process.env.PORT ? Number(process.env.PORT) : undefined,
-  staticDir: process.env.STATIC_DIR,
 });
 let startPromise = null;
 
@@ -185,44 +160,14 @@ function getRuntimeUrls() {
 function sendStartupBanner() {
   const urls = getRuntimeUrls();
   console.log('\n╔══════════════════════════════════════════════════╗');
-  console.log('║   DevUtility Hub — SSH Proxy (Shell 复用模式)    ║');
+  console.log('║   DevUtility Hub — SSH/MCP Gateway              ║');
   console.log('╠══════════════════════════════════════════════════╣');
   console.log(`║  HTTP : ${urls.httpBaseUrl.padEnd(37)}║`);
   console.log(`║  WS   : ${urls.wsBaseUrl.padEnd(37)}║`);
   console.log('╠══════════════════════════════════════════════════╣');
-  console.log('║  SOP 执行复用同一 Shell PTY，保留:               ║');
+  console.log('║  命令复用同一 Shell PTY，保留:                  ║');
   console.log('║    sudo/su 身份、cd 路径、source env 变量         ║');
   console.log('╚══════════════════════════════════════════════════╝\n');
-}
-
-function handleStaticFrontend(req, res, next) {
-  if (!runtimeOptions.staticDir || (req.method !== 'GET' && req.method !== 'HEAD')) {
-    next();
-    return;
-  }
-
-  const staticDir = runtimeOptions.staticDir;
-  const requestedPath = decodeURIComponent(req.path || '/');
-  const relativePath = requestedPath.replace(/^\/+/, '');
-  const candidatePath = path.resolve(staticDir, relativePath);
-
-  if (relativePath && candidatePath.startsWith(staticDir) && fs.existsSync(candidatePath)) {
-    const stat = fs.statSync(candidatePath);
-    if (stat.isFile()) {
-      res.sendFile(candidatePath);
-      return;
-    }
-  }
-
-  if (shouldServeAppShell(requestedPath)) {
-    const indexPath = path.join(staticDir, 'index.html');
-    if (fs.existsSync(indexPath)) {
-      res.sendFile(indexPath);
-      return;
-    }
-  }
-
-  next();
 }
 
 // ─── 工具函数 ──────────────────────────────────────────────────────────────
@@ -302,97 +247,8 @@ async function runPythonScript(scriptPath, inputData, timeoutMs = 15000) {
   });
 }
 
-function resolveUserFilePath(inputPath) {
-  if (!inputPath) return '';
-  if (inputPath.startsWith('~')) {
-    return path.join(process.env.HOME || process.env.USERPROFILE || '', inputPath.slice(1));
-  }
-  if (path.isAbsolute(inputPath)) return inputPath;
-
-  const candidates = [
-    path.resolve(process.cwd(), inputPath),
-    path.resolve(__dirname, inputPath),
-    path.resolve(__dirname, '..', inputPath),
-  ];
-
-  const matched = candidates.find((candidate) => fs.existsSync(candidate));
-  return matched || candidates[0];
-}
-
-async function runPythonControlScript(scriptPath, args = [], inputData = '', timeoutMs = 20000) {
-  return new Promise((resolve) => {
-    const resolved = resolveUserFilePath(scriptPath);
-    const pythonBin = process.platform === 'win32' ? 'python' : 'python3';
-    let stdout = '';
-    let stderr = '';
-    let proc;
-
-    try {
-      proc = spawn(pythonBin, [resolved, ...args.map((arg) => String(arg))], {
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-    } catch (e) {
-      resolve({ stdout: '', stderr: String(e), exitCode: -1, durationMs: 0, resolvedPath: resolved });
-      return;
-    }
-
-    const startedAt = Date.now();
-    proc.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
-    proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
-
-    const timer = setTimeout(() => {
-      proc.kill();
-      resolve({
-        stdout: stdout.trimEnd(),
-        stderr: `[TIMEOUT] ${stderr}`.trim(),
-        exitCode: -1,
-        durationMs: Date.now() - startedAt,
-        resolvedPath: resolved,
-      });
-    }, timeoutMs);
-
-    proc.on('close', (code) => {
-      clearTimeout(timer);
-      resolve({
-        stdout: stdout.trimEnd(),
-        stderr: stderr.trimEnd(),
-        exitCode: code ?? 0,
-        durationMs: Date.now() - startedAt,
-        resolvedPath: resolved,
-      });
-    });
-
-    proc.on('error', (err) => {
-      clearTimeout(timer);
-      resolve({
-        stdout: '',
-        stderr: err.message,
-        exitCode: -1,
-        durationMs: Date.now() - startedAt,
-        resolvedPath: resolved,
-      });
-    });
-
-    proc.stdin.write(inputData ?? '');
-    proc.stdin.end();
-  });
-}
-
 function makeEntityId(prefix = 'diag') {
   return `${prefix}-${Date.now().toString(36)}-${crypto.randomBytes(3).toString('hex')}`;
-}
-
-function parseArgsValue(args) {
-  if (Array.isArray(args)) return args.map((item) => String(item));
-  if (typeof args === 'string') {
-    try {
-      const parsed = JSON.parse(args);
-      if (Array.isArray(parsed)) return parsed.map((item) => String(item));
-    } catch {
-      return args.split(/\s+/).map((item) => item.trim()).filter(Boolean);
-    }
-  }
-  return [];
 }
 
 function normalizeSSHError(err, cfg, prefix = '') {
@@ -688,310 +544,6 @@ async function connectManagedSession({
       ssh.connect(cfg);
     }
   });
-}
-
-function normalizeDiagnosticPayload(payload) {
-  const {
-    title,
-    symptom,
-    notes = '',
-    sessionId = '',
-    scenarioType = 'problem_localization',
-    objective = '',
-    successCriteria = '',
-    tags = [],
-    contextSnapshot = {},
-    collectionPlan = [],
-    analysisRules = [],
-    businessActions = [],
-  } = payload || {};
-
-  if (!title || !symptom) {
-    throw new Error('title 和 symptom 不能为空');
-  }
-
-  if (!Array.isArray(collectionPlan) && !Array.isArray(businessActions)) {
-    throw new Error('缺少 collectionPlan 或 businessActions');
-  }
-
-  if ((!collectionPlan || collectionPlan.length === 0) && (!businessActions || businessActions.length === 0)) {
-    throw new Error('至少需要一个采集步骤或业务动作');
-  }
-
-  const blockedStep = (collectionPlan || []).find((step) =>
-    (() => {
-      try {
-        assertCommandAllowed(step.command || step.cmd || '', 'diagnostic-collection');
-        return false;
-      } catch {
-        return true;
-      }
-    })()
-  );
-  if (blockedStep) {
-    try {
-      assertCommandAllowed(blockedStep.command || blockedStep.cmd || '', 'diagnostic-collection');
-    } catch (e) {
-      throw new Error(e.message);
-    }
-  }
-
-  return {
-    title,
-    symptom,
-    notes,
-    sessionId,
-    scenarioType: String(scenarioType || 'problem_localization'),
-    objective: String(objective || ''),
-    successCriteria: String(successCriteria || ''),
-    tags: Array.isArray(tags) ? tags.map((tag) => String(tag).trim()).filter(Boolean) : [],
-    contextSnapshot: {
-      impactScope: String(contextSnapshot?.impactScope || ''),
-      triggerAction: String(contextSnapshot?.triggerAction || ''),
-      recentChange: String(contextSnapshot?.recentChange || ''),
-      expectedBehavior: String(contextSnapshot?.expectedBehavior || ''),
-      observationWindow: String(contextSnapshot?.observationWindow || ''),
-      logKeywords: String(contextSnapshot?.logKeywords || ''),
-    },
-    normalizedRules: Array.isArray(analysisRules)
-      ? analysisRules.map((rule, index) => ({
-        id: rule.id || `rule-${index + 1}`,
-        name: rule.name || `规则 ${index + 1}`,
-        pattern: String(rule.pattern || ''),
-        summary: String(rule.summary || ''),
-        severity: rule.severity || 'warning',
-        source: rule.source || 'all',
-      }))
-      : [],
-    normalizedPlan: Array.isArray(collectionPlan)
-      ? collectionPlan.map((step, index) => ({
-        id: step.id || makeEntityId('step'),
-        name: step.name || `采集步骤 ${index + 1}`,
-        command: String(step.command || step.cmd || ''),
-        timeoutMs: Number(step.timeoutMs || step.timeout || 30000),
-        phase: String(step.phase || 'prepare'),
-        expectedSignal: String(step.expectedSignal || ''),
-        continueOnFailure: Boolean(step.continueOnFailure),
-      }))
-      : [],
-    normalizedActions: Array.isArray(businessActions)
-      ? businessActions.map((action, index) => ({
-        id: action.id || makeEntityId('biz'),
-        name: action.name || `业务动作 ${index + 1}`,
-        scriptPath: String(action.scriptPath || ''),
-        args: parseArgsValue(action.args),
-        stdinPayload: String(action.stdinPayload || action.payload || ''),
-        runMode: action.runMode === 'after_collection' ? 'after_collection' : 'before_collection',
-        timeoutMs: Number(action.timeoutMs || action.timeout || 20000),
-      }))
-      : [],
-  };
-}
-
-async function executeBusinessStage(actions, runMode) {
-  const results = [];
-  for (const action of actions.filter((item) => item.runMode === runMode)) {
-    const actionStartedAt = Date.now();
-    const output = await runPythonControlScript(
-      action.scriptPath,
-      action.args,
-      action.stdinPayload,
-      action.timeoutMs
-    );
-
-    results.push({
-      id: action.id,
-      name: action.name,
-      scriptPath: action.scriptPath,
-      resolvedPath: output.resolvedPath,
-      args: action.args,
-      stdinPayload: action.stdinPayload,
-      runMode: action.runMode,
-      stdout: output.stdout,
-      stderr: output.stderr,
-      exitCode: output.exitCode,
-      durationMs: output.durationMs,
-      startedAt: actionStartedAt,
-      finishedAt: actionStartedAt + output.durationMs,
-      status: output.exitCode === 0 ? 'done' : 'failed',
-    });
-  }
-  return results;
-}
-
-async function runDiagnosticOrchestration(payload) {
-  const {
-    title,
-    symptom,
-    notes,
-    sessionId,
-    scenarioType,
-    objective,
-    successCriteria,
-    tags,
-    contextSnapshot,
-    normalizedPlan,
-    normalizedRules,
-    normalizedActions,
-  } = normalizeDiagnosticPayload(payload);
-
-  const session = sessionId ? global.activeSessions.get(sessionId) : null;
-  if (normalizedPlan.length > 0 && !session) {
-    throw new Error('采集步骤需要有效的 SSH 会话');
-  }
-
-  const startedAt = Date.now();
-  const beforeActions = await executeBusinessStage(normalizedActions, 'before_collection');
-  const collectionSteps = [];
-
-  for (let index = 0; index < normalizedPlan.length; index += 1) {
-    const step = normalizedPlan[index];
-    let shouldStop = false;
-    const stepStartedAt = Date.now();
-
-    try {
-      const result = await session.enqueueShellCmd(step.command, step.timeoutMs);
-      shouldStop = result.exitCode !== 0 && !step.continueOnFailure;
-      collectionSteps.push({
-        id: step.id,
-        name: step.name,
-        command: step.command,
-        resolvedCommand: step.command,
-        stdout: result.stdout,
-        stderr: result.stderr,
-        exitCode: result.exitCode,
-        durationMs: result.durationMs,
-        startedAt: stepStartedAt,
-        finishedAt: stepStartedAt + result.durationMs,
-        phase: step.phase,
-        expectedSignal: step.expectedSignal,
-        continueOnFailure: step.continueOnFailure,
-        status: result.exitCode === 0 ? 'done' : 'failed',
-        conclusion: result.exitCode === 0 ? '命令执行完成' : `命令退出非零 (${result.exitCode})`,
-        agent: 'collector',
-      });
-    } catch (e) {
-      shouldStop = !step.continueOnFailure;
-      collectionSteps.push({
-        id: step.id,
-        name: step.name,
-        command: step.command,
-        resolvedCommand: step.command,
-        stdout: '',
-        stderr: e.message,
-        exitCode: -1,
-        durationMs: 0,
-        startedAt: stepStartedAt,
-        finishedAt: Date.now(),
-        phase: step.phase,
-        expectedSignal: step.expectedSignal,
-        continueOnFailure: step.continueOnFailure,
-        status: 'failed',
-        conclusion: `采集执行异常: ${e.message}`,
-        agent: 'collector',
-      });
-    }
-
-    if (shouldStop) {
-      normalizedPlan.slice(index + 1).forEach((pendingStep) => {
-        const skippedAt = Date.now();
-        collectionSteps.push({
-          id: pendingStep.id,
-          name: pendingStep.name,
-          command: pendingStep.command,
-          resolvedCommand: pendingStep.command,
-          stdout: '',
-          stderr: '',
-          exitCode: 0,
-          durationMs: 0,
-          startedAt: skippedAt,
-          finishedAt: skippedAt,
-          phase: pendingStep.phase,
-          expectedSignal: pendingStep.expectedSignal,
-          continueOnFailure: pendingStep.continueOnFailure,
-          status: 'skipped',
-          conclusion: `前置步骤「${step.name}」失败，且配置为失败停下`,
-          agent: 'collector',
-        });
-      });
-      break;
-    }
-  }
-
-  const afterActions = await executeBusinessStage(normalizedActions, 'after_collection');
-  const allBusinessActions = [...beforeActions, ...afterActions];
-  const findings = buildHeuristicFindings({
-    collectionSteps,
-    businessActions: allBusinessActions,
-    analysisRules: normalizedRules,
-  });
-  const similarCases = recallSimilarRuns({
-    title,
-    symptom,
-    notes,
-    contextSnapshot,
-    collectionSteps,
-    businessActions: allBusinessActions,
-    findings,
-    report: null,
-  }, listRuns(), 5);
-  const report = buildDiagnosticReport({
-    title,
-    symptom,
-    notes,
-    contextSnapshot,
-    collectionSteps,
-    businessActions: allBusinessActions,
-    findings,
-    similarCases,
-  });
-  const signals = buildSignals({
-    title,
-    symptom,
-    notes,
-    contextSnapshot,
-    collectionSteps,
-    businessActions: allBusinessActions,
-    findings,
-    report,
-  });
-
-  const run = {
-    id: makeEntityId('run'),
-    title,
-    symptom,
-    notes,
-    scenarioType,
-    objective,
-    successCriteria,
-    tags,
-    contextSnapshot,
-    status:
-      findings.some((finding) => finding.severity === 'critical') ||
-      collectionSteps.some((step) => (step.exitCode ?? 0) !== 0) ||
-      allBusinessActions.some((action) => (action.exitCode ?? 0) !== 0)
-        ? 'attention'
-        : 'completed',
-    startedAt,
-    finishedAt: Date.now(),
-    sessionId: sessionId || '',
-    sessionLabel: session ? `${session.username}@${session.host}` : '',
-    agentStatus: {
-      collector: normalizedPlan.length ? 'completed' : 'skipped',
-      logAnalyst: 'completed',
-      summarizer: 'completed',
-    },
-    collectionSteps,
-    analysisRules: normalizedRules,
-    businessActions: allBusinessActions,
-    findings,
-    similarCases,
-    report,
-    signals,
-  };
-
-  appendRun(run);
-  return run;
 }
 
 /**
@@ -1882,6 +1434,117 @@ app.post('/api/agent/sessions/:sessionId/commands', async (req, res) => {
 });
 
 /**
+ * POST /api/agent/sessions/:sessionId/commands/batch
+ * 批量执行诊断命令 —— 减少 Agent 多次 tool call 的 LLM 推理开销
+ *
+ * Body: {
+ *   commands: [{ cmd, timeoutMs?, mode? }],
+ *   target: { nodeId?, host?, port?, username? },
+ *   requireTarget?: boolean,
+ *   stopOnFailure?: boolean
+ * }
+ */
+app.post('/api/agent/sessions/:sessionId/commands/batch', async (req, res) => {
+  const { commands, stopOnFailure = false } = req.body || {};
+  if (!Array.isArray(commands) || commands.length === 0) {
+    return res.status(400).json({ ok: false, error: '缺少 commands 数组' });
+  }
+  if (commands.length > 20) {
+    return res.status(400).json({ ok: false, error: '单次批量最多 20 条命令' });
+  }
+
+  const session = global.activeSessions.get(req.params.sessionId);
+  if (!session) {
+    return res.status(404).json({ ok: false, error: 'Session 不存在或已断开连接' });
+  }
+
+  const sessionInfo = describeSession(req.params.sessionId, session);
+  const targetGuard = getTargetGuardDecision(req, sessionInfo);
+  if (!targetGuard.ok) {
+    return res.status(409).json({
+      ok: false,
+      error: formatTargetGuardError(targetGuard),
+      data: { targetGuard },
+    });
+  }
+
+  const results = [];
+  let hasFailure = false;
+
+  for (const entry of commands) {
+    const { cmd, timeoutMs = 30000, mode = 'pty' } = entry || {};
+    if (!cmd) {
+      results.push({ cmd: '', error: '缺少 cmd', skipped: false });
+      continue;
+    }
+
+    if (hasFailure && stopOnFailure) {
+      results.push({ cmd, skipped: true, reason: '前序命令失败，已跳过' });
+      continue;
+    }
+
+    const policyDecision = inspectCommandPolicy(cmd, 'agent-batch-command');
+    if (!policyDecision.allowed) {
+      results.push({
+        cmd,
+        error: `[Command Policy Block] ${policyDecision.reason}`,
+        policy: policyDecision,
+        skipped: false,
+      });
+      if (stopOnFailure) hasFailure = true;
+      continue;
+    }
+
+    try {
+      const result = await executeSingleCommand(session, cmd, timeoutMs, mode);
+      appendSessionLog(req.params.sessionId, {
+        type: 'command_result',
+        level: result.exitCode === 0 ? 'info' : 'warning',
+        cmd,
+        mode,
+        exitCode: result.exitCode,
+        durationMs: result.durationMs,
+        stdout: trimLogText(result.stdout),
+        stderr: trimLogText(result.stderr),
+        message: `[batch] 命令执行完成，exit=${result.exitCode}，duration=${result.durationMs}ms`,
+      });
+      results.push({
+        cmd,
+        ...result,
+        skipped: false,
+      });
+      if (result.exitCode !== 0 && stopOnFailure) hasFailure = true;
+    } catch (e) {
+      appendSessionLog(req.params.sessionId, {
+        type: 'command_error',
+        level: 'error',
+        cmd,
+        mode,
+        message: `[batch] 执行异常: ${e.message}`,
+      });
+      results.push({
+        cmd,
+        error: e.message,
+        skipped: false,
+      });
+      if (stopOnFailure) hasFailure = true;
+    }
+  }
+
+  res.json({
+    ok: true,
+    data: {
+      totalCommands: commands.length,
+      executedCount: results.filter((r) => !r.skipped).length,
+      skippedCount: results.filter((r) => r.skipped).length,
+      results,
+      session: sessionInfo,
+      targetGuard,
+    },
+  });
+});
+
+/**
  * POST /api/agent/execute
  * 供 Agent 远程执行命令，并且阻塞等待命令执行结束返回 std/out。
  * 
@@ -1937,410 +1600,6 @@ app.post('/api/agent/execute', async (req, res) => {
     );
 
     res.status(500).json({ ok: false, error: e.message });
-  }
-});
-
-// ─── 诊断知识库 / 多 Agent 编排 API ───────────────────────────────────────
-
-app.get('/api/diagnostic/runs', (req, res) => {
-  const limit = Math.max(1, Math.min(200, Number(req.query.limit) || 50));
-  const runs = listRuns()
-    .slice(0, limit)
-    .map((run) => ({
-      id: run.id,
-      title: run.title,
-      symptom: run.symptom,
-      status: run.status,
-      startedAt: run.startedAt,
-      finishedAt: run.finishedAt,
-      sessionLabel: run.sessionLabel,
-      findingCount: (run.findings || []).length,
-      summary: run.report?.summary || '',
-    }));
-
-  res.json({ ok: true, runs });
-});
-
-app.get('/api/diagnostic/runs/:id', (req, res) => {
-  const run = getRunById(req.params.id);
-  if (!run) {
-    return res.status(404).json({ ok: false, error: '诊断记录不存在' });
-  }
-  return res.json({ ok: true, run });
-});
-
-app.patch('/api/diagnostic/runs/:id/workbench', (req, res) => {
-  try {
-    const run = patchRunWorkbench(req.params.id, req.body || {});
-    if (!run) {
-      return res.status(404).json({ ok: false, error: '诊断记录不存在' });
-    }
-    return res.json({ ok: true, run });
-  } catch (error) {
-    return res.status(400).json({ ok: false, error: error.message });
-  }
-});
-
-app.post('/api/diagnostic/recall', (req, res) => {
-  const {
-    title = '',
-    symptom = '',
-    notes = '',
-    scenarioType = 'problem_localization',
-    objective = '',
-    successCriteria = '',
-    tags = [],
-    contextSnapshot = {},
-    collectionPlan = [],
-    businessActions = [],
-    limit = 5,
-  } = req.body || {};
-
-  const draft = {
-    title,
-    symptom,
-    notes,
-    scenarioType,
-    objective,
-    successCriteria,
-    tags: Array.isArray(tags) ? tags.map((tag) => String(tag).trim()).filter(Boolean) : [],
-    contextSnapshot: {
-      impactScope: String(contextSnapshot?.impactScope || ''),
-      triggerAction: String(contextSnapshot?.triggerAction || ''),
-      recentChange: String(contextSnapshot?.recentChange || ''),
-      expectedBehavior: String(contextSnapshot?.expectedBehavior || ''),
-      observationWindow: String(contextSnapshot?.observationWindow || ''),
-      logKeywords: String(contextSnapshot?.logKeywords || ''),
-    },
-    collectionSteps: Array.isArray(collectionPlan)
-      ? collectionPlan.map((step) => ({
-        name: step.name || '未命名步骤',
-        command: step.command || step.cmd || '',
-        resolvedCommand: step.command || step.cmd || '',
-        phase: step.phase || 'prepare',
-        expectedSignal: step.expectedSignal || '',
-      }))
-      : [],
-    businessActions: Array.isArray(businessActions)
-      ? businessActions.map((action) => ({
-        name: action.name || '未命名业务动作',
-        scriptPath: action.scriptPath || '',
-        args: parseArgsValue(action.args),
-      }))
-      : [],
-    findings: [],
-    report: null,
-  };
-
-  const matches = recallSimilarRuns(draft, listRuns(), Math.max(1, Math.min(10, Number(limit) || 5)));
-  return res.json({ ok: true, matches });
-});
-
-app.post('/api/diagnostic/orchestrate', async (req, res) => {
-  try {
-    const run = await runDiagnosticOrchestration(req.body || {});
-    return res.json({ ok: true, run });
-  } catch (e) {
-    return res.status(400).json({ ok: false, error: e.message });
-  }
-});
-
-app.post('/api/agent/troubleshoot', async (req, res) => {
-  const {
-    presetId,
-    connection = null,
-    keepSession = false,
-    autoDisconnect = true,
-    sessionId: requestedSessionId,
-    cols = 220,
-    rows = 50,
-    ...payload
-  } = req.body || {};
-
-  let sessionId = requestedSessionId || '';
-  let autoConnected = false;
-
-  try {
-    if (!sessionId || !global.activeSessions.get(sessionId)) {
-      let baseConfig = {};
-      if (presetId) {
-        const preset = getPresetById(presetId);
-        if (!preset) {
-          return res.status(404).json({ ok: false, error: '登录预设不存在' });
-        }
-        baseConfig = preset;
-      }
-
-      const directConnection = extractDirectConnectionFromBody(req.body || {});
-      const connectSource = {
-        ...baseConfig,
-        ...(directConnection || {}),
-        ...(connection && typeof connection === 'object' ? connection : {}),
-      };
-
-      if (req.body?.reuseIfExists !== false) {
-        const reusable = findReusableSession({
-          host: connectSource.host,
-          port: connectSource.port || 22,
-          username: connectSource.username,
-        });
-        if (reusable) {
-          sessionId = reusable.sessionId;
-        }
-      }
-
-      if (!sessionId || !global.activeSessions.get(sessionId)) {
-        const session = await connectManagedSession({
-          ...connectSource,
-          sessionId: sessionId || makeEntityId('agent-session'),
-          cols,
-          rows,
-        });
-        sessionId = session.sessionId;
-        autoConnected = true;
-      }
-    }
-
-    const session = global.activeSessions.get(sessionId);
-    const targetGuard = getTargetGuardDecision(req, describeSession(sessionId, session));
-    if (!targetGuard.ok) {
-      const message = formatTargetGuardError(targetGuard);
-      appendSessionLog(sessionId, {
-        type: 'target_guard_blocked',
-        level: 'error',
-        message,
-        targetGuard,
-      });
-      return res.status(409).json({ ok: false, error: message, data: { targetGuard } });
-    }
-
-    const run = await runDiagnosticOrchestration({
-      ...payload,
-      sessionId,
-    });
-
-    if (autoConnected && autoDisconnect && !keepSession) {
-      disconnectActiveSession(sessionId);
-    }
-
-    const data = {
-      sessionId,
-      autoConnected,
-      keptSession: keepSession || !autoDisconnect,
-      targetGuard,
-      run,
-    };
-
-    return res.json({
-      ok: true,
-      ...data,
-      data,
-    });
-  } catch (e) {
-    if (autoConnected && sessionId && autoDisconnect && !keepSession) {
-      disconnectActiveSession(sessionId);
-    }
-    return res.status(400).json({ ok: false, error: e.message });
-  }
-});
-
-// ─── SOP Git 仓库同步 ──────────────────────────────────────────────────────
-
-/**
- * POST /api/sop/git-sync
- *
- * 从指定 Git 仓库的特定路径批量读取 SOP 模板文件（.md / .json）。
- * 流程：
- *   1. 以 URL + branch 的 MD5 哈希作为缓存目录名，避免重复 clone
- *   2. 目录已存在 → pull 最新；不存在 → shallow clone (--depth 1)
- *   3. 遍历 path 指定的子目录，读取所有 .md 和 .json 文件内容
- *   4. 返回文件列表供前端解析并导入模板
- *
- * 鉴权：将 token 以 Basic Auth 形式嵌入 URL（兼容 GitHub / GitLab / Gitea）
- *   https://<token>@github.com/org/repo.git
- *
- * Request body:
- *   { url: string, branch?: string, path?: string, token?: string }
- *
- * Response:
- *   { ok: true, files: [{name, relativePath, content, ext}], branch, count }
- *   { ok: false, error: string }
- */
-app.post('/api/sop/git-sync', async (req, res) => {
-  const { url, branch = 'main', path: repoSubPath = '', token } = req.body;
-
-  if (!url) {
-    return res.status(400).json({ ok: false, error: '仓库 URL 不能为空' });
-  }
-
-  // 构造带鉴权的克隆 URL（仅用于 git 操作，不对外暴露）
-  let cloneUrl = url;
-  if (token) {
-    try {
-      const parsed = new URL(url);
-      // GitHub/GitLab PAT: https://oauth2:TOKEN@host/org/repo.git
-      parsed.username = 'oauth2';
-      parsed.password = token;
-      cloneUrl = parsed.toString();
-    } catch (e) {
-      return res.status(400).json({ ok: false, error: `无效的仓库 URL: ${e.message}` });
-    }
-  }
-
-  // 缓存目录：用 url+branch 做哈希，避免同仓库不同分支冲突
-  const cacheKey  = crypto.createHash('md5').update(`${url}#${branch}`).digest('hex').slice(0, 12);
-  const cacheDir  = path.join(os.tmpdir(), 'devutility-git', cacheKey);
-  const gitMarker = path.join(cacheDir, '.git');
-
-  try {
-    if (fs.existsSync(gitMarker)) {
-      // 已有缓存：pull 最新
-      const git = simpleGit(cacheDir);
-      await git.fetch(['--depth', '1', 'origin', branch]);
-      await git.checkout(branch);
-      await git.reset(['--hard', `origin/${branch}`]);
-    } else {
-      // 首次克隆：shallow clone 节省空间和时间
-      fs.mkdirSync(cacheDir, { recursive: true });
-      const git = simpleGit();
-      await git.clone(cloneUrl, cacheDir, ['--branch', branch, '--depth', '1']);
-    }
-  } catch (e) {
-    // 清理可能损坏的缓存目录，下次重试会重新 clone
-    try { fs.rmSync(cacheDir, { recursive: true, force: true }); } catch (_) {}
-    return res.status(500).json({ ok: false, error: `Git 操作失败: ${e.message}` });
-  }
-
-  // 确定读取目录
-  const targetDir = repoSubPath
-    ? path.join(cacheDir, repoSubPath)
-    : cacheDir;
-
-  if (!fs.existsSync(targetDir)) {
-    return res.status(400).json({
-      ok: false,
-      error: `路径在仓库中不存在: "${repoSubPath}"`,
-    });
-  }
-
-  // 递归遍历目录，收集 .md / .json 文件
-  const files = [];
-
-  function collectFiles(dir) {
-    let entries;
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); }
-    catch (_) { return; }
-
-    for (const entry of entries) {
-      if (entry.name.startsWith('.')) continue;
-      const fullPath = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        collectFiles(fullPath);
-      } else if (/\.(md|json)$/i.test(entry.name) && !/^readme\.(md|txt)$/i.test(entry.name)) {
-        try {
-          const content      = fs.readFileSync(fullPath, 'utf-8');
-          const relativePath = path.relative(targetDir, fullPath);
-          const ext          = path.extname(entry.name).toLowerCase().slice(1);
-          files.push({ name: entry.name, relativePath, content, ext });
-        } catch (_) { /* 跳过无法读取的文件 */ }
-      }
-    }
-  }
-
-  collectFiles(targetDir);
-
-  res.json({ ok: true, files, branch, count: files.length });
-});
-
-// ─── 代码上下文 / 函数渲染 ────────────────────────────────────────────────
-
-app.post('/api/code-context/open', async (req, res) => {
-  try {
-    const context = await openCodeContext(req.body || {});
-    res.json({ ok: true, data: context });
-  } catch (e) {
-    res.status(400).json({ ok: false, error: e.message });
-  }
-});
-
-app.get('/api/code-context/:contextId/symbols', async (req, res) => {
-  try {
-    const data = await searchSymbols(
-      req.params.contextId,
-      req.query.q,
-      req.query.limit
-    );
-    res.json({ ok: true, data });
-  } catch (e) {
-    res.status(400).json({ ok: false, error: e.message });
-  }
-});
-
-app.post('/api/code-context/:contextId/render', async (req, res) => {
-  try {
-    const data = await renderSymbol(req.params.contextId, req.body?.symbolId, {
-      beforeContext: req.body?.beforeContext,
-      afterContext: req.body?.afterContext,
-    });
-    res.json({ ok: true, data });
-  } catch (e) {
-    res.status(400).json({ ok: false, error: e.message });
-  }
-});
-
-app.post('/api/code-context/:contextId/render-location', async (req, res) => {
-  try {
-    const data = await renderLocation(req.params.contextId, req.body?.sourcePath, req.body?.line, {
-      beforeContext: req.body?.beforeContext,
-      afterContext: req.body?.afterContext,
-    });
-    res.json({ ok: true, data });
-  } catch (e) {
-    res.status(400).json({ ok: false, error: e.message });
-  }
-});
-
-app.get('/api/code-context/contexts', (_req, res) => {
-  res.json({ ok: true, data: listContexts() });
-});
-
-app.delete('/api/code-context/contexts/:contextId', (req, res) => {
-  const closed = closeContext(req.params.contextId);
-  if (!closed) {
-    return res.status(404).json({ ok: false, error: '代码上下文不存在' });
-  }
-  return res.json({ ok: true });
-});
-
-app.get('/api/code-context/:contextId/symbols/:symbolId/callers', async (req, res) => {
-  try {
-    const data = await getCallers(req.params.contextId, req.params.symbolId);
-    res.json({ ok: true, data });
-  } catch (e) {
-    res.status(400).json({ ok: false, error: e.message });
-  }
-});
-
-app.get('/api/code-context/:contextId/symbols/:symbolId/callees', async (req, res) => {
-  try {
-    const data = await getCallees(req.params.contextId, req.params.symbolId);
-    res.json({ ok: true, data });
-  } catch (e) {
-    res.status(400).json({ ok: false, error: e.message });
-  }
-});
-
-app.post('/api/code-context/:contextId/call-relation', async (req, res) => {
-  try {
-    const data = await findCallRelation(
-      req.params.contextId,
-      req.body?.fromSymbolId,
-      req.body?.targetQuery,
-      { maxDepth: req.body?.maxDepth }
-    );
-    res.json({ ok: true, data });
-  } catch (e) {
-    res.status(400).json({ ok: false, error: e.message });
   }
 });
 
@@ -2821,7 +2080,23 @@ wss.on('connection', (ws) => {
   });
 });
 
-app.use(handleStaticFrontend);
+function writeRuntimePort(port) {
+  try {
+    const portFilePath = path.join(__dirname, '..', '.runtime-port');
+    fs.writeFileSync(portFilePath, String(port), 'utf8');
+  } catch (_) {
+    // 写入端口文件失败不影响启动
+  }
+}
+
+function cleanupRuntimePort() {
+  try {
+    const portFilePath = path.join(__dirname, '..', '.runtime-port');
+    if (fs.existsSync(portFilePath)) fs.unlinkSync(portFilePath);
+  } catch (_) {
+    // ignore
+  }
+}
 
 function startProxyServer(options = {}) {
   runtimeOptions = normalizeServerRuntimeOptions({
@@ -2833,7 +2108,6 @@ function startProxyServer(options = {}) {
     return Promise.resolve({
       server,
       ...getRuntimeUrls(),
-      staticDir: runtimeOptions.staticDir,
     });
   }
 
@@ -2841,26 +2115,46 @@ function startProxyServer(options = {}) {
     return startPromise;
   }
 
-  startPromise = new Promise((resolve, reject) => {
-    const onError = (error) => {
-      server.off('listening', onListening);
-      startPromise = null;
-      reject(error);
-    };
-    const onListening = () => {
-      server.off('error', onError);
-      startPromise = null;
-      sendStartupBanner();
-      resolve({
-        server,
-        ...getRuntimeUrls(),
-        staticDir: runtimeOptions.staticDir,
-      });
-    };
+  const MAX_PORT_RETRIES = 10;
+  const originalPort = runtimeOptions.port;
 
-    server.once('error', onError);
-    server.once('listening', onListening);
-    server.listen(runtimeOptions.port, runtimeOptions.host);
+  startPromise = new Promise((resolve, reject) => {
+    let attempt = 0;
+
+    function tryListen() {
+      const onError = (error) => {
+        server.removeListener('listening', onListening);
+        if (error.code === 'EADDRINUSE' && attempt < MAX_PORT_RETRIES) {
+          attempt++;
+          const nextPort = originalPort + attempt;
+          console.log(
+            `[proxy] 端口 ${runtimeOptions.port} 被占用，尝试端口 ${nextPort}（第 ${attempt}/${MAX_PORT_RETRIES} 次重试）`
+          );
+          runtimeOptions.port = nextPort;
+          tryListen();
+        } else {
+          startPromise = null;
+          reject(error);
+        }
+      };
+
+      const onListening = () => {
+        server.removeListener('error', onError);
+        startPromise = null;
+        writeRuntimePort(runtimeOptions.port);
+        sendStartupBanner();
+        resolve({
+          server,
+          ...getRuntimeUrls(),
+        });
+      };
+
+      server.once('error', onError);
+      server.once('listening', onListening);
+      server.listen(runtimeOptions.port, runtimeOptions.host);
+    }
+
+    tryListen();
   });
 
   return startPromise;
@@ -2870,6 +2164,8 @@ function stopProxyServer() {
   if (startPromise) {
     return startPromise.then(() => stopProxyServer());
   }
+
+  cleanupRuntimePort();
 
   if (!server.listening) {
     return Promise.resolve();
@@ -2908,3 +2204,7 @@ if (require.main === module) {
     process.exitCode = 1;
   });
 }
+
+process.on('exit', cleanupRuntimePort);
+process.on('SIGINT', () => { cleanupRuntimePort(); process.exit(0); });
+process.on('SIGTERM', () => { cleanupRuntimePort(); process.exit(0); });

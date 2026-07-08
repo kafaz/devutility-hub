@@ -138,15 +138,12 @@ The user does not need to approve every wording change, but should confirm that 
 
 This repository already has:
 
-- SOP template data structures
-- SOP Markdown import and export
-- UI-side SOP execution support
 - server-side `exec_plan` support over the existing shell
 
 The MCP side does not yet expose a first-class `run_sop` or `list_sop_templates` tool. Until that exists:
 
 - use SOP as a reasoning and authoring artifact
-- reuse its structure to shape `troubleshoot`, `prepare_session`, and `run_command`
+- reuse its structure to shape `prepare_session`, `run_command`, and `run_commands_batch`
 - record which parts should later become formal MCP-accessible SOP tools
 
 ## Recommended Future MCP Additions

@@ -19,6 +19,14 @@ function run(cmd, args, cwd) {
   }
 }
 
+function getMtime(filePath) {
+  try {
+    return fs.statSync(filePath).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
 // 1. 检查并安装 mcp-server 依赖
 if (!fs.existsSync(mcpNodeModules)) {
   console.log('[dev bootstrap] installing mcp-server dependencies...');
@@ -26,8 +34,9 @@ if (!fs.existsSync(mcpNodeModules)) {
   run(npmCommand, ['--prefix', mcpDir, subCmd, '--no-audit', '--no-fund'], repoDir);
 }
 
-// 2. 检查并编译 mcp-server（dist 不存在时）
-if (!fs.existsSync(mcpDist)) {
-  console.log('[dev bootstrap] building mcp-server (dist not found)...');
+// 2. 检查并编译 mcp-server（dist 不存在或源码更新时）
+const mcpSource = path.join(mcpDir, 'src', 'index.ts');
+if (!fs.existsSync(mcpDist) || getMtime(mcpSource) > getMtime(mcpDist)) {
+  console.log('[dev bootstrap] building mcp-server...');
   run(npmCommand, ['--prefix', mcpDir, 'run', 'build'], repoDir);
 }
